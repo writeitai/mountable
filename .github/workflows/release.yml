@@ -1,0 +1,125 @@
+name: Release
+
+# Push a tag vX.Y.Z to release the mountable CLI: build, check the packages,
+# publish to npm (mountable-cli) and PyPI (mountable) with trusted publishing
+# and provenance, then smoke-test every install channel.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # the GitHub release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build binaries, npm package and wheel
+        run: packaging/build.sh "${{ steps.version.outputs.version }}"
+      - name: Check the npm package in a clean container
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" node:22-slim \
+            npx -y --package "/dist/mountable-cli-$VERSION.tgz" mountable version \
+            | grep -x "mountable $VERSION (SeaweedFS .*)"
+      - name: Check the wheel in a clean container
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" python:3.12-slim \
+            sh -c "pip install -q /dist/mountable-$VERSION-py3-none-any.whl && mountable version" \
+            | grep -x "mountable $VERSION (SeaweedFS .*)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            dist/*.tgz
+            dist/*.whl
+      - name: GitHub release with the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/bin/* --repo "$GITHUB_REPOSITORY" --generate-notes
+
+  publish:
+    name: Publish to npm and PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      id-token: write # trusted publishing; no tokens are stored
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm 11.5.1+ for trusted publishing
+        run: npm install -g npm@11.19.0
+      - name: npm publish
+        run: npm publish "dist/mountable-cli-${{ needs.build.outputs.version }}.tgz" --access public --provenance
+      - name: Keep only the wheel for PyPI
+        run: rm dist/*.tgz
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  smoke:
+    name: Smoke test the published CLI
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+      # The registries can take a minute to serve a new version.
+      - name: npx
+        run: |
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            npx -y "mountable-cli@$VERSION" version && exit 0
+            sleep 30
+          done
+          exit 1
+      - name: uvx
+        run: |
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            uvx --refresh "mountable==$VERSION" version && exit 0
+            sleep 30
+          done
+          exit 1
+      - name: install.sh (as served by mountable.io)
+        run: |
+          curl -fsSL https://mountable.io/install.sh -o "$RUNNER_TEMP/install.sh"
+          MOUNTABLE_VERSION="$VERSION" sh "$RUNNER_TEMP/install.sh"
+          ~/.local/bin/mountable version | grep -x "mountable $VERSION (SeaweedFS .*)"

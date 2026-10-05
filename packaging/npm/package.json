@@ -1,0 +1,23 @@
+{
+  "name": "mountable-cli",
+  "version": "0.0.0-dev",
+  "description": "The Mountable CLI: mount a Mountable filesystem on Linux or macOS.",
+  "homepage": "https://mountable.io/docs",
+  "license": "Apache-2.0",
+  "bin": {
+    "mountable": "bin/mountable.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/writeitai/mountable.git"
+  },
+  "bugs": {
+    "url": "https://github.com/writeitai/mountable/issues"
+  }
+}
