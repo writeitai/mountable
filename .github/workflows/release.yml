@@ -66,9 +66,9 @@ jobs:
   publish:
     name: Publish to npm and PyPI
     needs: build
-    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
-    # array of labels) moves jobs to the self-hosted slot during outages.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    # Always GitHub-hosted: npm trusted publishing does not support
+    # self-hosted runners, so publishing waits for hosted capacity.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: release
     permissions:
