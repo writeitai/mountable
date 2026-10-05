@@ -1,0 +1,20 @@
+{
+  "name": "mountable-cli",
+  "version": "0.0.0",
+  "description": "Placeholder for the Mountable CLI; install a released version.",
+  "homepage": "https://mountable.io/docs",
+  "license": "Apache-2.0",
+  "bin": {
+    "mountable": "bin/mountable.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/writeitai/mountable.git"
+  },
+  "bugs": {
+    "url": "https://github.com/writeitai/mountable/issues"
+  }
+}

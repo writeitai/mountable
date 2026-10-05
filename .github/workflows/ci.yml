@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and package
+    # Never run fork pull requests: CI may use a self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
+    # array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build and install both packages
+        run: |
+          packaging/build.sh 0.0.0
+          npx -y --package ./dist/mountable-cli-0.0.0.tgz mountable version | grep -x "mountable 0.0.0 (SeaweedFS .*)"
+          uvx --from ./dist/mountable-0.0.0-py3-none-any.whl mountable version | grep -x "mountable 0.0.0 (SeaweedFS .*)"

@@ -1,0 +1,32 @@
+# The `mountable` wheel: the four CLI binaries under mountable/bin/ (copied in
+# by packaging/build.sh) and a launcher. Build: uv build --wheel.
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mountable"
+version = "0.0.0.dev0"  # set from the release tag
+description = "The Mountable CLI: mount a Mountable filesystem on Linux or macOS."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+classifiers = [
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Documentation = "https://mountable.io/docs"
+Source = "https://github.com/writeitai/mountable"
+Issues = "https://github.com/writeitai/mountable/issues"
+
+[project.scripts]
+mountable = "mountable:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mountable"]
+# The binaries are git-ignored build inputs.
+artifacts = ["src/mountable/bin/*"]
