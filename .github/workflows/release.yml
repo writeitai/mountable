@@ -13,7 +13,9 @@ permissions:
 jobs:
   build:
     name: Build and check packages
-    runs-on: ubuntu-latest
+    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
+    # array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 20
     permissions:
       contents: write # the GitHub release
@@ -64,7 +66,9 @@ jobs:
   publish:
     name: Publish to npm and PyPI
     needs: build
-    runs-on: ubuntu-latest
+    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
+    # array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 15
     environment: release
     permissions:
@@ -92,7 +96,9 @@ jobs:
   smoke:
     name: Smoke test the published CLI
     needs: [build, publish]
-    runs-on: ubuntu-latest
+    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
+    # array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 15
     env:
       VERSION: ${{ needs.build.outputs.version }}
