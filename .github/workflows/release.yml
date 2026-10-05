@@ -86,7 +86,7 @@ jobs:
       - name: npm 11.5.1+ for trusted publishing
         run: npm install -g npm@11.19.0
       - name: npm publish
-        run: npm publish "dist/mountable-cli-${{ needs.build.outputs.version }}.tgz" --access public --provenance
+        run: npm publish "./dist/mountable-cli-${{ needs.build.outputs.version }}.tgz" --access public --provenance
       - name: Keep only the wheel for PyPI
         run: rm dist/*.tgz
       - uses: pypa/gh-action-pypi-publish@release/v1
