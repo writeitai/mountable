@@ -1,18 +1,14 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/json"
-	"encoding/pem"
+	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
+	"os"
+	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestEndingFor(t *testing.T) {
@@ -29,103 +25,221 @@ func TestEndingFor(t *testing.T) {
 	}
 }
 
-// renewAPI serves the renewal endpoint: refused with refuse, otherwise a new
-// certificate for the CSR's key.
-func renewAPI(t *testing.T, ca *testCA, refuse int) *int {
+// fakeEngine records what the lifecycle did to it.
+type fakeEngine struct {
+	done        chan struct{}
+	unmountFn   func() error
+	abortErr    error
+	aborted     atomic.Bool
+	flushed     atomic.Bool
+	unmountCall atomic.Bool
+}
+
+func newFakeEngine() *fakeEngine { return &fakeEngine{done: make(chan struct{})} }
+
+func (f *fakeEngine) mountPoint() string      { return "/mnt/f" }
+func (f *fakeEngine) served() <-chan struct{} { return f.done }
+func (f *fakeEngine) flush()                  { f.flushed.Store(true) }
+func (f *fakeEngine) abort() error            { f.aborted.Store(true); return f.abortErr }
+func (f *fakeEngine) unmount() error {
+	f.unmountCall.Store(true)
+	if f.unmountFn != nil {
+		return f.unmountFn()
+	}
+	close(f.done)
+	return nil
+}
+
+type harness struct {
+	l        *lifecycle
+	e        *fakeEngine
+	signals  chan os.Signal
+	revoked  chan struct{}
+	renewed  chan struct{}
+	notAfter atomic.Pointer[time.Time]
+}
+
+func newHarness(validFor time.Duration) *harness {
+	h := &harness{
+		e:       newFakeEngine(),
+		signals: make(chan os.Signal, 2),
+		revoked: make(chan struct{}, 1),
+		renewed: make(chan struct{}, 1),
+	}
+	h.setNotAfter(time.Now().Add(validFor))
+	h.l = &lifecycle{
+		e: h.e, signals: h.signals, revoked: h.revoked, renewed: h.renewed,
+		notAfter: func() time.Time { return *h.notAfter.Load() },
+		timeout:  200 * time.Millisecond,
+	}
+	return h
+}
+
+func (h *harness) setNotAfter(t time.Time) { h.notAfter.Store(&t) }
+
+// runAsync runs the lifecycle and returns its result channel.
+func (h *harness) runAsync() <-chan error {
+	result := make(chan error, 1)
+	go func() { result <- h.l.run() }()
+	return result
+}
+
+func await(t *testing.T, result <-chan error) error {
 	t.Helper()
-	calls := new(int)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*calls++
-		if r.URL.Path != "/api/v1/mount-sessions/s1:renew" {
-			t.Errorf("unexpected %s", r.URL.Path)
-		}
-		if refuse != 0 {
-			w.WriteHeader(refuse)
-			json.NewEncoder(w).Encode(map[string]any{"detail": map[string]string{"code": "session_not_active"}})
-			return
-		}
-		var body struct{ CSR string }
-		json.NewDecoder(r.Body).Decode(&body)
-		block, _ := pem.Decode([]byte(body.CSR))
-		csr, err := x509.ParseCertificateRequest(block.Bytes)
-		if err != nil {
-			t.Error(err)
-		}
-		cert := ca.issue(t, "renewed", csr.PublicKey.(*ecdsa.PublicKey), time.Now().Add(time.Hour), false)
-		json.NewEncoder(w).Encode(map[string]any{"certificate": cert})
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("MOUNTABLE_API_URL", server.URL)
-	return calls
-}
-
-func testSession(t *testing.T, ca *testCA, notAfter time.Time, probe error) *mountSession {
-	key := newKey(t)
-	s := &mountSession{id: "s1", key: key, certs: &certSource{}, probe: func() error { return probe }}
-	s.certs.set(ca.sessionCert(t, "first", key, notAfter))
-	return s
-}
-
-func TestCheckExpiredCertificate(t *testing.T) {
-	ca := newTestCA(t)
-	calls := renewAPI(t, ca, 0)
-	s := testSession(t, ca, time.Now().Add(time.Hour), nil)
-	if got := s.check(time.Now().Add(2 * time.Hour)); got != eventExpired {
-		t.Fatalf("check = %d, want eventExpired", got)
-	}
-	if *calls != 0 {
-		t.Fatal("an expired session called the API")
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lifecycle did not end")
+		return nil
 	}
 }
 
-func TestCheckGatewayRejectionConfirmedByAPI(t *testing.T) {
-	ca := newTestCA(t)
-	renewAPI(t, ca, http.StatusNotFound)
-	s := testSession(t, ca, time.Now().Add(time.Hour), status.Error(codes.Unauthenticated, "no active mount session"))
-	if got := s.check(time.Now()); got != eventRevoked {
-		t.Fatalf("check = %d, want eventRevoked", got)
+func TestSignalUnmountsCleanly(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.signals <- syscall.SIGTERM
+	if err := await(t, h.runAsync()); err != nil {
+		t.Fatal(err)
+	}
+	if !h.e.unmountCall.Load() || !h.e.flushed.Load() || h.e.aborted.Load() {
+		t.Fatal("expected unmount and flush without abort")
 	}
 }
 
-func TestCheckGatewayRejectionTheAPIDoesNotConfirm(t *testing.T) {
-	ca := newTestCA(t)
-	calls := renewAPI(t, ca, 0)
-	s := testSession(t, ca, time.Now().Add(time.Hour), status.Error(codes.Unauthenticated, "database unavailable"))
-	if got := s.check(time.Now()); got != 0 {
-		t.Fatalf("check = %d, want no event", got)
+func TestExternalUnmountOnlyFlushes(t *testing.T) {
+	h := newHarness(time.Hour)
+	close(h.e.done)
+	if err := await(t, h.runAsync()); err != nil {
+		t.Fatal(err)
 	}
-	if *calls != 1 || s.certs.get().Leaf.Subject.CommonName != "renewed" {
-		t.Fatal("the session was not renewed")
-	}
-}
-
-func TestCheckIgnoresOtherGatewayErrors(t *testing.T) {
-	ca := newTestCA(t)
-	calls := renewAPI(t, ca, http.StatusNotFound)
-	for _, probe := range []error{nil, status.Error(codes.Unavailable, "down"), errors.New("network")} {
-		s := testSession(t, ca, time.Now().Add(time.Hour), probe)
-		if got := s.check(time.Now()); got != 0 {
-			t.Fatalf("check with %v = %d, want no event", probe, got)
-		}
-	}
-	if *calls != 0 {
-		t.Fatal("asked the API without a gateway rejection")
+	if h.e.unmountCall.Load() || !h.e.flushed.Load() || h.e.aborted.Load() {
+		t.Fatal("expected only a flush")
 	}
 }
 
-func TestRenewRefusedMeansRevoked(t *testing.T) {
-	ca := newTestCA(t)
-	for _, refuse := range []int{http.StatusForbidden, http.StatusNotFound} {
-		renewAPI(t, ca, refuse)
-		s := testSession(t, ca, time.Now().Add(time.Hour), nil)
-		if revoked, _ := s.renew(); !revoked {
-			t.Fatalf("a %d renewal is not a revocation", refuse)
-		}
+func TestRevocationAborts(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.revoked <- struct{}{}
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(err.Error(), "revoked") || !h.e.aborted.Load() || h.e.flushed.Load() {
+		t.Fatalf("expected an abort without flush, got %v", err)
 	}
-	renewAPI(t, ca, http.StatusServiceUnavailable)
-	s := testSession(t, ca, time.Now().Add(time.Hour), nil)
-	if revoked, err := s.renew(); revoked || err == nil {
-		t.Fatal("a 503 renewal must be a retryable error")
+}
+
+func TestExpiryAbortsOnItsOwnTimer(t *testing.T) {
+	h := newHarness(50 * time.Millisecond)
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(err.Error(), "expired") || !h.e.aborted.Load() {
+		t.Fatalf("expected an abort on expiry, got %v", err)
+	}
+}
+
+func TestRenewalRearmsExpiry(t *testing.T) {
+	h := newHarness(150 * time.Millisecond)
+	result := h.runAsync()
+	time.Sleep(20 * time.Millisecond)
+	h.setNotAfter(time.Now().Add(time.Hour))
+	h.renewed <- struct{}{}
+	time.Sleep(300 * time.Millisecond)
+	if h.e.aborted.Load() {
+		t.Fatal("expired despite the renewal")
+	}
+	h.signals <- syscall.SIGTERM
+	if err := await(t, result); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The worker is stuck (nothing ever arrives on revoked); signals still end
+// the mount at once.
+func TestSignalsDoNotWaitForTheNetwork(t *testing.T) {
+	h := newHarness(time.Hour)
+	result := h.runAsync()
+	start := time.Now()
+	h.signals <- syscall.SIGINT
+	if err := await(t, result); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("the signal waited")
+	}
+}
+
+func TestStuckUnmountAbortsAtTheDeadline(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.e.unmountFn = func() error { select {} } // a request the gateway never answers
+	h.signals <- syscall.SIGTERM
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(err.Error(), "did not shut down") || !h.e.aborted.Load() {
+		t.Fatalf("expected an abort at the deadline, got %v", err)
+	}
+}
+
+func TestEventsDuringShutdownAbort(t *testing.T) {
+	cases := map[string]func(h *harness){
+		"second signal": func(h *harness) { h.signals <- syscall.SIGTERM },
+		"revoked":       func(h *harness) { h.revoked <- struct{}{} },
+		"expired":       func(h *harness) { h.setNotAfter(time.Now()); h.renewed <- struct{}{} },
+	}
+	for name, during := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(time.Hour)
+			h.l.timeout = time.Hour
+			blocked := make(chan struct{})
+			h.e.unmountFn = func() error { close(blocked); select {} }
+			h.signals <- syscall.SIGTERM
+			result := h.runAsync()
+			<-blocked
+			during(h)
+			if err := await(t, result); err == nil || !h.e.aborted.Load() {
+				t.Fatalf("expected an abort, got %v", err)
+			}
+		})
+	}
+}
+
+func TestFailedCleanUnmountAborts(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.e.unmountFn = func() error { return errors.New("device or\nresource busy") }
+	h.signals <- syscall.SIGTERM
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(err.Error(), "could not be unmounted cleanly (device or resource busy)") || !h.e.aborted.Load() {
+		t.Fatalf("expected an abort, got %v", err)
+	}
+}
+
+func TestAFailedAbortIsReported(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.e.abortErr = errors.New("aborting the FUSE connection: no abort file")
+	h.revoked <- struct{}{}
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(err.Error(), "could not be fully aborted (aborting the FUSE connection: no abort file)") {
+		t.Fatalf("the failed abort was not reported: %v", err)
+	}
+}
+
+func TestNoAbortOnceServingStopped(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.e.unmountFn = func() error { close(h.e.done); select {} } // unmounted, flush stuck
+	h.signals <- syscall.SIGTERM
+	if err := await(t, h.runAsync()); err == nil || h.e.aborted.Load() {
+		t.Fatalf("expected an error without an abort, got %v", err)
+	}
+}
+
+func TestUntilSignalCancelsStartup(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	signals <- syscall.SIGINT
+	interrupted, err := untilSignal(signals, func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !interrupted || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, %v", interrupted, err)
+	}
+	interrupted, err = untilSignal(make(chan os.Signal), func(context.Context) error { return nil })
+	if interrupted || err != nil {
+		t.Fatalf("got %v, %v", interrupted, err)
 	}
 }
 

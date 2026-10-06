@@ -666,6 +666,69 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+--- file notice: asymmetric.go, cipher/cbc_hmac.go, cipher/concat_kdf.go, cipher/ecdh_es.go, cipher/key_wrap.go, crypter.go, encoding.go, jwe.go, jwk.go, jws.go, shared.go, signing.go, symmetric.go ---
+
+/*-
+ * Copyright 2014 Square Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+--- file notice: doc.go ---
+
+/*-
+ * Copyright 2014 Square Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/*
+Package jose aims to provide an implementation of the Javascript Object Signing
+and Encryption set of standards. It implements encryption and signing based on
+the JSON Web Encryption and JSON Web Signature standards, with optional JSON Web
+Token support available in a sub-package. The library supports both the compact
+and JWS/JWE JSON Serialization formats, and has optional support for multiple
+recipients.
+*/
+
+--- file notice: opaque.go ---
+
+/*-
+ * Copyright 2018 Square Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 ================================================================================
 github.com/go-viper/mapstructure/v2 v2.5.0
 ================================================================================
@@ -951,6 +1014,67 @@ github.com/google/btree v1.1.3
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+--- file notice: btree_generic.go ---
+
+// Copyright 2014-2022 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+// In Go 1.18 and beyond, a BTreeG generic is created, and BTree is a specific
+// instantiation of that generic for the Item interface, with a backwards-
+// compatible API.  Before go1.18, generics are not supported,
+// and BTree is just an implementation based around the Item interface.
+
+// Package btree implements in-memory B-Trees of arbitrary degree.
+//
+// btree implements an in-memory B-Tree for use as an ordered data structure.
+// It is not meant for persistent storage solutions.
+//
+// It has a flatter structure than an equivalent red-black or other binary tree,
+// which in some cases yields better memory usage and/or performance.
+// See some discussion on the matter here:
+//   http://google-opensource.blogspot.com/2013/01/c-containers-that-save-memory-and-time.html
+// Note, though, that this project is in no way related to the C++ B-Tree
+// implementation written about there.
+//
+// Within this tree, each node contains a slice of items and a (possibly nil)
+// slice of children.  For basic numeric values or raw structs, this can cause
+// efficiency differences when compared to equivalent C++ template code that
+// stores values in arrays within the node:
+//   * Due to the overhead of storing values as interfaces (each
+//     value needs to be stored as the value itself, then 2 words for the
+//     interface pointing to that value and its type), resulting in higher
+//     memory use.
+//   * Since interfaces can point to values anywhere in memory, values are
+//     most likely not stored in contiguous blocks, resulting in a higher
+//     number of cache misses.
+// These issues don't tend to matter, though, when working with strings or other
+// heap-allocated structures, since C++-equivalent structures also must store
+// pointers and also distribute their values across the heap.
+//
+// This implementation is designed to be a drop-in replacement to gollrb.LLRB
+// trees, (http://github.com/petar/gollrb), an excellent and probably the most
+// widely used ordered tree implementation in the Go ecosystem currently.
+// Its functions, therefore, exactly mirror those of
+// llrb.LLRB where possible.  Unlike gollrb, though, we currently don't
+// support storing multiple equivalent values.
+//
+// There are two implementations; those suffixed with 'G' are generics, usable
+// for any type, and require a passed-in "less" function to define their ordering.
+// Those without this prefix are specific to the 'Item' interface, and use
+// its 'Less' function for ordering.
 
 ================================================================================
 github.com/google/uuid v1.6.0
@@ -1497,6 +1621,44 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+--- file notice: cpuid.go ---
+
+// Copyright (c) 2015 Klaus Post, released under MIT License. See LICENSE file.
+
+// Package cpuid provides information about the CPU running the current program.
+//
+// CPU features are detected on startup, and kept for fast access through the life of the application.
+// Currently x86 / x64 (AMD64), arm64, and riscv64 are supported.
+//
+// You can access the CPU information by accessing the shared CPU variable of the cpuid library.
+//
+// Package home: https://github.com/klauspost/cpuid
+
+--- file notice: detect_arm64.go, detect_x86.go ---
+
+// Copyright (c) 2015 Klaus Post, released under MIT License. See LICENSE file.
+
+--- file notice: os_darwin_arm64.go ---
+
+// Copyright (c) 2020 Klaus Post, released under MIT License. See LICENSE file.
+
+--- file notice: os_linux_arm64.go ---
+
+// Copyright (c) 2020 Klaus Post, released under MIT License. See LICENSE file.
+
+// Copyright 2018 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file located
+// here https://github.com/golang/sys/blob/master/LICENSE
+
+--- file notice: os_unsafe_linux_arm64.go ---
+
+// Copyright (c) 2021 Klaus Post, released under MIT License. See LICENSE file.
+
+--- file notice: riscv_isa.go ---
+
+// Copyright (c) 2026 Klaus Post, released under MIT License. See LICENSE file.
+
 ================================================================================
 github.com/klauspost/reedsolomon v1.14.2
 ================================================================================
@@ -1525,6 +1687,66 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--- file notice: galois.go ---
+
+/**
+ * 8-bit Galois Field
+ * Copyright 2015, Klaus Post
+ * Copyright 2015, Backblaze, Inc.  All rights reserved.
+ */
+
+--- file notice: galois_amd64.go ---
+
+// Copyright 2015, Klaus Post, see LICENSE for details.
+
+--- file notice: galois_arm64.go ---
+
+// Copyright 2015, Klaus Post, see LICENSE for details.
+// Copyright 2017, Minio, Inc.
+
+--- file notice: inversion_tree.go ---
+
+/**
+ * A thread-safe tree which caches inverted matrices.
+ *
+ * Copyright 2016, Peter Collins
+ */
+
+--- file notice: matrix.go ---
+
+/**
+ * Matrix Algebra over an 8-bit Galois Field
+ *
+ * Copyright 2015, Klaus Post
+ * Copyright 2015, Backblaze, Inc.
+ */
+
+--- file notice: race_none.go ---
+
+// Copyright (c) 2024+ Klaus Post. See LICENSE for license
+
+--- file notice: reedsolomon.go ---
+
+/**
+ * Reed-Solomon Coding over 8-bit values.
+ *
+ * Copyright 2015, Klaus Post
+ * Copyright 2015, Backblaze, Inc.
+ */
+
+// Package reedsolomon enables Erasure Coding in Go
+//
+// For usage and examples, see https://github.com/klauspost/reedsolomon
+
+--- file notice: streaming.go ---
+
+/**
+ * Reed-Solomon Coding over 8-bit values.
+ *
+ * Copyright 2015, Klaus Post
+ * Copyright 2015, Backblaze, Inc.
+ */
 
 ================================================================================
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
@@ -1888,6 +2110,32 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+--- file notice: prometheus/internal/almost_equal.go ---
+
+// Copyright (c) 2015 Björn Rabenstein
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// The code in this package is copy/paste to avoid a dependency. Hence this file
+// carries the copyright of the original repo.
+// https://github.com/beorn7/floats
+
 ================================================================================
 github.com/prometheus/client_model v0.6.3
 ================================================================================
@@ -2103,6 +2351,27 @@ Copyright 2012-2015 The Prometheus Authors
 
 This product includes software developed at
 SoundCloud Ltd. (http://soundcloud.com/).
+
+--- file notice: go/metrics.pb.go ---
+
+// Copyright 2013 Prometheus Team
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.30.0
+// 	protoc        v3.20.3
+// source: io/prometheus/client/metrics.proto
 
 ================================================================================
 github.com/prometheus/common v0.70.1
@@ -3064,6 +3333,179 @@ third-party archives.
    See the License for the specific language governing permissions and
    limitations under the License.
 
+--- file notice: weed/glog/glog.go ---
+
+// Go support for leveled logs, analogous to https://code.google.com/p/google-glog/
+//
+// Copyright 2013 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package glog implements logging analogous to the Google-internal C++ INFO/ERROR/V setup.
+// It provides functions Info, Warning, Error, Fatal, plus formatting variants such as
+// Infof. It also provides V-style logging controlled by the -v and -vmodule=file=2 flags.
+//
+// Basic examples:
+//
+//	glog.Info("Prepare to repel boarders")
+//
+//	glog.Fatalf("Initialization failed: %s", err)
+//
+// See the documentation for the V function for an explanation of these examples:
+//
+//	if glog.V(2) {
+//		glog.Info("Starting transaction...")
+//	}
+//
+//	glog.V(2).Infoln("Processed", nItems, "elements")
+//
+// Log output is buffered and written periodically using Flush. Programs
+// should call Flush before exiting to guarantee all log output is written.
+//
+// By default, all log statements write to files in a temporary directory.
+// This package provides several flags that modify this behavior.
+// As a result, flag.Parse must be called before any logging is done.
+//
+//	-logtostderr=false
+//		Logs are written to standard error instead of to files.
+//	-alsologtostderr=false
+//		Logs are written to standard error as well as to files.
+//	-stderrthreshold=ERROR
+//		Log events at or above this severity are logged to standard
+//		error as well as to files.
+//	-logdir=""
+//		Log files will be written to this directory instead of the
+//		default temporary directory.
+//
+//	Other flags provide aids to debugging.
+//
+//	-log_backtrace_at=""
+//		When set to a file and line number holding a logging statement,
+//		such as
+//			-log_backtrace_at=gopherflakes.go:234
+//		a stack trace will be written to the Info log whenever execution
+//		hits that statement. (Unlike with -vmodule, the ".go" must be
+//		present.)
+//	-v=0
+//		Enable V-leveled logging at the specified level.
+//	-vmodule=""
+//		The syntax of the argument is a comma-separated list of pattern=N,
+//		where pattern is a literal file name (minus the ".go" suffix) or
+//		"glob" pattern and N is a V level. For instance,
+//			-vmodule=gopher*=3
+//		sets the V level to 3 in all Go files whose names begin "gopher".
+
+--- file notice: weed/glog/glog_file.go ---
+
+// Go support for leveled logs, analogous to https://code.google.com/p/google-glog/
+//
+// Copyright 2013 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// File I/O for logs.
+
+--- file notice: weed/util/fla9/fla9.go ---
+
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+/*
+Package flag implements command-line flag parsing.
+
+Usage:
+
+Define flags using flag.String(), Bool(), Int(), etc.
+
+This declares an integer flag, -flagname, stored in the pointer ip, with type *int.
+
+	import "flag"
+	var ip = flag.Int("flagname", 1234, "help message for flagname")
+
+If you like, you can bind the flag to a variable using the Var() functions.
+
+	var flagvar int
+	func init() {
+		flag.IntVar(&flagvar, "flagname", 1234, "help message for flagname")
+	}
+
+Or you can create custom flags that satisfy the Value interface (with
+pointer receivers) and couple them to flag parsing by
+
+	flag.Var(&flagVal, "name", "help message for flagname")
+
+For such flags, the default value is just the initial value of the variable.
+
+After all flags are defined, call
+
+	flag.Parse()
+
+to parse the command line into the defined flags.
+
+Flags may then be used directly. If you're using the flags themselves,
+they are all pointers; if you bind to variables, they're values.
+
+	fmt.Println("ip has value ", *ip)
+	fmt.Println("flagvar has value ", flagvar)
+
+After parsing, the arguments following the flags are available as the
+slice flag.Args() or individually as flag.Arg(i).
+The arguments are indexed from 0 through flag.NArg()-1.
+
+Command line flag syntax:
+
+	-flag
+	-flag=x
+	-flag x  // non-boolean flags only
+
+One or two minus signs may be used; they are equivalent.
+The last form is not permitted for boolean flags because the
+meaning of the command
+
+	cmd -x *
+
+will change if there is a file called 0, false, etc.  You must
+use the -flag=false form to turn off a boolean flag.
+
+Flag parsing stops just before the first non-flag argument
+("-" is a non-flag argument) or after the terminator "--".
+
+Integer flags accept 1234, 0664, 0x1234 and may be negative.
+Boolean flags may be:
+
+	1, 0, t, f, T, F, true, false, TRUE, FALSE, True, False
+
+Duration flags accept any input valid for time.ParseDuration.
+
+The default set of command-line flags is controlled by
+top-level functions.  The FlagSet type allows one to define
+independent sets of flags, such as to implement subcommands
+in a command-line interface. The methods of FlagSet are
+analogous to the top-level functions for the command-line
+flag set.
+*/
+
 ================================================================================
 github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8
 ================================================================================
@@ -3272,6 +3714,188 @@ github.com/spf13/afero v1.15.0
       defend, and hold each Contributor harmless for any liability
       incurred by, or claims asserted against, such Contributor by reason
       of your accepting any such warranty or additional liability.
+
+--- file notice: afero.go ---
+
+// Copyright © 2014 Steve Francia <spf@spf13.com>.
+// Copyright 2013 tsuru authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package afero provides types and methods for interacting with the filesystem,
+// as an abstraction layer.
+
+// Afero also provides a few implementations that are mostly interoperable. One that
+// uses the operating system filesystem, one that uses memory to store files
+// (cross platform) and an interface that should be implemented if you want to
+// provide your own filesystem.
+
+--- file notice: const_bsds.go, const_win_unix.go ---
+
+// Copyright © 2016 Steve Francia <spf@spf13.com>.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: httpFs.go, mem/dir.go, memmap.go ---
+
+// Copyright © 2014 Steve Francia <spf@spf13.com>.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: internal/common/adapters.go ---
+
+// Copyright © 2022 Steve Francia <spf@spf13.com>.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: ioutil.go, path.go ---
+
+// Copyright ©2015 The Go Authors
+// Copyright ©2015 Steve Francia <spf@spf13.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: lstater.go, symlink.go ---
+
+// Copyright © 2018 Steve Francia <spf@spf13.com>.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: match.go ---
+
+// Copyright © 2014 Steve Francia <spf@spf13.com>.
+// Copyright 2009 The Go Authors. All rights reserved.
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: mem/dirmap.go ---
+
+// Copyright © 2015 Steve Francia <spf@spf13.com>.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: mem/file.go ---
+
+// Copyright © 2015 Steve Francia <spf@spf13.com>.
+// Copyright 2013 tsuru authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: os.go ---
+
+// Copyright © 2014 Steve Francia <spf@spf13.com>.
+// Copyright 2013 tsuru authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+--- file notice: util.go ---
+
+// Copyright ©2015 Steve Francia <spf@spf13.com>
+// Portions Copyright ©2015 The Hugo Authors
+// Portions Copyright 2016-present Bjørn Erik Pedersen <bjorn.erik.pedersen@gmail.com>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 ================================================================================
 github.com/spf13/cast v1.10.0
@@ -3631,6 +4255,99 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+--- file notice: leveldb/journal/journal.go ---
+
+// Copyright 2011 The LevelDB-Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Taken from: https://code.google.com/p/leveldb-go/source/browse/leveldb/record/record.go?r=1d5ccbe03246da926391ee12d1c6caae054ff4b0
+// License, authors and contributors informations can be found at bellow URLs respectively:
+// 	https://code.google.com/p/leveldb-go/source/browse/LICENSE
+//	https://code.google.com/p/leveldb-go/source/browse/AUTHORS
+//  https://code.google.com/p/leveldb-go/source/browse/CONTRIBUTORS
+
+// Package journal reads and writes sequences of journals. Each journal is a stream
+// of bytes that completes before the next journal starts.
+//
+// When reading, call Next to obtain an io.Reader for the next journal. Next will
+// return io.EOF when there are no more journals. It is valid to call Next
+// without reading the current journal to exhaustion.
+//
+// When writing, call Next to obtain an io.Writer for the next journal. Calling
+// Next finishes the current journal. Call Close to finish the final journal.
+//
+// Optionally, call Flush to finish the current journal and flush the underlying
+// writer without starting a new journal. To start a new journal after flushing,
+// call Next.
+//
+// Neither Readers or Writers are safe to use concurrently.
+//
+// Example code:
+//	func read(r io.Reader) ([]string, error) {
+//		var ss []string
+//		journals := journal.NewReader(r, nil, true, true)
+//		for {
+//			j, err := journals.Next()
+//			if err == io.EOF {
+//				break
+//			}
+//			if err != nil {
+//				return nil, err
+//			}
+//			s, err := ioutil.ReadAll(j)
+//			if err != nil {
+//				return nil, err
+//			}
+//			ss = append(ss, string(s))
+//		}
+//		return ss, nil
+//	}
+//
+//	func write(w io.Writer, ss []string) error {
+//		journals := journal.NewWriter(w)
+//		for _, s := range ss {
+//			j, err := journals.Next()
+//			if err != nil {
+//				return err
+//			}
+//			if _, err := j.Write([]byte(s)), err != nil {
+//				return err
+//			}
+//		}
+//		return journals.Close()
+//	}
+//
+// The wire format is that the stream is divided into 32KiB blocks, and each
+// block contains a number of tightly packed chunks. Chunks cannot cross block
+// boundaries. The last block may be shorter than 32 KiB. Any unused bytes in a
+// block must be zero.
+//
+// A journal maps to one or more chunks. Each chunk has a 7 byte header (a 4
+// byte checksum, a 2 byte little-endian uint16 length, and a 1 byte chunk type)
+// followed by a payload. The checksum is over the chunk type and the payload.
+//
+// There are four chunk types: whether the chunk is the full journal, or the
+// first, middle or last chunk of a multi-chunk journal. A multi-chunk journal
+// has one first chunk, zero or more middle chunks, and one last chunk.
+//
+// The wire format allows for limited recovery in the face of data corruption:
+// on a format error (such as a checksum mismatch), the reader moves to the
+// next block and looks for the next full or first chunk.
+
+--- file notice: leveldb/util/buffer.go ---
+
+// Copyright 2009 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+--- file notice: leveldb/util/crc32.go ---
+
+// Copyright 2011 The LevelDB-Go Authors. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 ================================================================================
 github.com/tylertreat/BoomFilters v0.0.0-20210315201527-1a82519a3e43
 ================================================================================
@@ -3838,6 +4555,74 @@ Apache License
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+--- file notice: hyperloglog.go ---
+
+/*
+Original work Copyright 2013 Eric Lesh
+Modified work Copyright 2015 Tyler Treat
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+*/
+
+--- file notice: inverse.go ---
+
+/*
+Original work Copyright (c) 2012 Jeff Hodges. All rights reserved.
+Modified work Copyright (c) 2015 Tyler Treat. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Jeff Hodges nor the names of this project's
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+--- file notice: partitioned.go, scalable.go ---
+
+/*
+Original work Copyright (c) 2013 zhenjl
+Modified work Copyright (c) 2015 Tyler Treat
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+*/
 
 ================================================================================
 github.com/valyala/bytebufferpool v1.0.0
@@ -4569,6 +5354,28 @@ google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
    See the License for the specific language governing permissions and
    limitations under the License.
 
+--- file notice: status/status.pb.go ---
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.26.0
+// 	protoc        v4.24.4
+// source: google/rpc/status.proto
+
 ================================================================================
 google.golang.org/grpc v1.85.0-dev.0.20260915183914-4e49413dcab7
 ================================================================================
@@ -4794,6 +5601,32 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+--- file notice: binarylog/grpc_binarylog_v1/binarylog.pb.go ---
+
+// Copyright 2018 The gRPC Authors
+// All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// The canonical version of this proto can be found at
+// https://github.com/grpc/grpc-proto/blob/master/grpc/binlog/v1/binarylog.proto
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// versions:
+// 	protoc-gen-go v1.36.12
+// 	protoc        v5.27.1
+// source: grpc/binlog/v1/binarylog.proto
+
 ================================================================================
 google.golang.org/grpc/security/advancedtls v1.0.0
 ================================================================================
@@ -5003,6 +5836,98 @@ google.golang.org/grpc/security/advancedtls v1.0.0
    See the License for the specific language governing permissions and
    limitations under the License.
 
+--- file notice: advancedtls.go ---
+
+/*
+ *
+ * Copyright 2019 gRPC authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+// Package advancedtls provides gRPC transport credentials that allow easy
+// configuration of advanced TLS features. The APIs here give the user more
+// customizable control to fit their security landscape, thus the "advanced"
+// moniker. This package provides both interfaces and generally useful
+// implementations of those interfaces, for example periodic credential
+// reloading, support for certificate revocation lists, and customizable
+// certificate verification behaviors. If the provided implementations do not
+// fit a given use case, a custom implementation of the interface can be
+// injected.
+
+--- file notice: crl.go ---
+
+// TODO(@gregorycooke) - Remove when only golang 1.19+ is supported
+
+/*
+ *
+ * Copyright 2021 gRPC authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+--- file notice: crl_provider.go ---
+
+/*
+ *
+ * Copyright 2023 gRPC authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
+--- file notice: sni.go ---
+
+/*
+ *
+ * Copyright 2020 gRPC authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+
 ================================================================================
 google.golang.org/protobuf v1.36.12
 ================================================================================
@@ -5036,3 +5961,271 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+--- file notice: types/known/anypb/any.pb.go ---
+
+// Protocol Buffers - Google's data interchange format
+// Copyright 2008 Google Inc.  All rights reserved.
+// https://developers.google.com/protocol-buffers/
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//     * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//     * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// source: google/protobuf/any.proto
+
+// Package anypb contains generated types for google/protobuf/any.proto.
+//
+// The Any message is a dynamic representation of any other message value.
+// It is functionally a tuple of the full name of the remote message type and
+// the serialized bytes of the remote message value.
+//
+// # Constructing an Any
+//
+// An Any message containing another message value is constructed using New:
+//
+//	any, err := anypb.New(m)
+//	if err != nil {
+//		... // handle error
+//	}
+//	... // make use of any
+//
+// # Unmarshaling an Any
+//
+// With a populated Any message, the underlying message can be serialized into
+// a remote concrete message value in a few ways.
+//
+// If the exact concrete type is known, then a new (or pre-existing) instance
+// of that message can be passed to the UnmarshalTo method:
+//
+//	m := new(foopb.MyMessage)
+//	if err := any.UnmarshalTo(m); err != nil {
+//		... // handle error
+//	}
+//	... // make use of m
+//
+// If the exact concrete type is not known, then the UnmarshalNew method can be
+// used to unmarshal the contents into a new instance of the remote message type:
+//
+//	m, err := any.UnmarshalNew()
+//	if err != nil {
+//		... // handle error
+//	}
+//	... // make use of m
+//
+// UnmarshalNew uses the global type registry to resolve the message type and
+// construct a new instance of that message to unmarshal into. In order for a
+// message type to appear in the global registry, the Go type representing that
+// protobuf message type must be linked into the Go binary. For messages
+// generated by protoc-gen-go, this is achieved through an import of the
+// generated Go package representing a .proto file.
+//
+// A common pattern with UnmarshalNew is to use a type switch with the resulting
+// proto.Message value:
+//
+//	switch m := m.(type) {
+//	case *foopb.MyMessage:
+//		... // make use of m as a *foopb.MyMessage
+//	case *barpb.OtherMessage:
+//		... // make use of m as a *barpb.OtherMessage
+//	case *bazpb.SomeMessage:
+//		... // make use of m as a *bazpb.SomeMessage
+//	}
+//
+// This pattern ensures that the generated packages containing the message types
+// listed in the case clauses are linked into the Go binary and therefore also
+// registered in the global registry.
+//
+// # Type checking an Any
+//
+// In order to type check whether an Any message represents some other message,
+// then use the MessageIs method:
+//
+//	if any.MessageIs((*foopb.MyMessage)(nil)) {
+//		... // make use of any, knowing that it contains a foopb.MyMessage
+//	}
+//
+// The MessageIs method can also be used with an allocated instance of the target
+// message type if the intention is to unmarshal into it if the type matches:
+//
+//	m := new(foopb.MyMessage)
+//	if any.MessageIs(m) {
+//		if err := any.UnmarshalTo(m); err != nil {
+//			... // handle error
+//		}
+//		... // make use of m
+//	}
+
+--- file notice: types/known/durationpb/duration.pb.go ---
+
+// Protocol Buffers - Google's data interchange format
+// Copyright 2008 Google Inc.  All rights reserved.
+// https://developers.google.com/protocol-buffers/
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//     * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//     * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// source: google/protobuf/duration.proto
+
+// Package durationpb contains generated types for google/protobuf/duration.proto.
+//
+// The Duration message represents a signed span of time.
+//
+// # Conversion to a Go Duration
+//
+// The AsDuration method can be used to convert a Duration message to a
+// standard Go time.Duration value:
+//
+//	d := dur.AsDuration()
+//	... // make use of d as a time.Duration
+//
+// Converting to a time.Duration is a common operation so that the extensive
+// set of time-based operations provided by the time package can be leveraged.
+// See https://golang.org/pkg/time for more information.
+//
+// The AsDuration method performs the conversion on a best-effort basis.
+// Durations with denormal values (e.g., nanoseconds beyond -99999999 and
+// +99999999, inclusive; or seconds and nanoseconds with opposite signs)
+// are normalized during the conversion to a time.Duration. To manually check for
+// invalid Duration per the documented limitations in duration.proto,
+// additionally call the CheckValid method:
+//
+//	if err := dur.CheckValid(); err != nil {
+//		... // handle error
+//	}
+//
+// Note that the documented limitations in duration.proto does not protect a
+// Duration from overflowing the representable range of a time.Duration in Go.
+// The AsDuration method uses saturation arithmetic such that an overflow clamps
+// the resulting value to the closest representable value (e.g., math.MaxInt64
+// for positive overflow and math.MinInt64 for negative overflow).
+//
+// # Conversion from a Go Duration
+//
+// The durationpb.New function can be used to construct a Duration message
+// from a standard Go time.Duration value:
+//
+//	dur := durationpb.New(d)
+//	... // make use of d as a *durationpb.Duration
+
+--- file notice: types/known/timestamppb/timestamp.pb.go ---
+
+// Protocol Buffers - Google's data interchange format
+// Copyright 2008 Google Inc.  All rights reserved.
+// https://developers.google.com/protocol-buffers/
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//     * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//     * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Code generated by protoc-gen-go. DO NOT EDIT.
+// source: google/protobuf/timestamp.proto
+
+// Package timestamppb contains generated types for google/protobuf/timestamp.proto.
+//
+// The Timestamp message represents a timestamp,
+// an instant in time since the Unix epoch (January 1st, 1970).
+//
+// # Conversion to a Go Time
+//
+// The AsTime method can be used to convert a Timestamp message to a
+// standard Go time.Time value in UTC:
+//
+//	t := ts.AsTime()
+//	... // make use of t as a time.Time
+//
+// Converting to a time.Time is a common operation so that the extensive
+// set of time-based operations provided by the time package can be leveraged.
+// See https://golang.org/pkg/time for more information.
+//
+// The AsTime method performs the conversion on a best-effort basis. Timestamps
+// with denormal values (e.g., nanoseconds beyond 0 and 99999999, inclusive)
+// are normalized during the conversion to a time.Time. To manually check for
+// invalid Timestamps per the documented limitations in timestamp.proto,
+// additionally call the CheckValid method:
+//
+//	if err := ts.CheckValid(); err != nil {
+//		... // handle error
+//	}
+//
+// # Conversion from a Go Time
+//
+// The timestamppb.New function can be used to construct a Timestamp message
+// from a standard Go time.Time value:
+//
+//	ts := timestamppb.New(t)
+//	... // make use of ts as a *timestamppb.Timestamp
+//
+// In order to construct a Timestamp representing the current time, use Now:
+//
+//	ts := timestamppb.Now()
+//	... // make use of ts as a *timestamppb.Timestamp

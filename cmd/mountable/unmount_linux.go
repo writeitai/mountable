@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -43,7 +44,8 @@ func abortConnection(dir string) error {
 // detach lazily unmounts dir: it leaves the namespace now, whatever still
 // uses it.
 func detach(dir string) error {
-	if err := syscall.Unmount(dir, syscall.MNT_DETACH); err == nil {
+	err := withTimeout(helperTimeout, func() error { return syscall.Unmount(dir, syscall.MNT_DETACH) })
+	if err == nil {
 		return nil
 	}
 	return fusermount(dir, "-uz")
@@ -51,7 +53,7 @@ func detach(dir string) error {
 
 // cleanUnmount unmounts dir; it fails while the mount is busy.
 func cleanUnmount(dir string) error {
-	err := syscall.Unmount(dir, 0)
+	err := withTimeout(helperTimeout, func() error { return syscall.Unmount(dir, 0) })
 	if !errors.Is(err, syscall.EPERM) {
 		return err
 	}
@@ -62,13 +64,15 @@ func cleanUnmount(dir string) error {
 func fusermount(dir, flags string) error {
 	var err error
 	for _, helper := range []string{"fusermount3", "fusermount"} {
+		ctx, cancel := context.WithTimeout(context.Background(), helperTimeout)
 		var output []byte
-		output, err = exec.Command(helper, flags, dir).CombinedOutput()
+		output, err = exec.CommandContext(ctx, helper, flags, dir).CombinedOutput()
+		cancel()
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("%s: %s", helper, bytes.TrimSpace(output))
+			return fmt.Errorf("%s: %v %s", helper, err, bytes.TrimSpace(output))
 		}
 	}
 	return err

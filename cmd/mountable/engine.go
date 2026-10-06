@@ -33,9 +33,6 @@ import (
 // shows them as the local user.
 const ownerID = 1000
 
-// flushTimeout bounds how long an ordinary shutdown waits for pending writes.
-const flushTimeout = 30 * time.Second
-
 // Upstream defaults for the options Mountable does not change.
 const (
 	chunkSizeMB = 2
@@ -45,7 +42,7 @@ const (
 type mountConfig struct {
 	gateway  string // host:port of the gateway's HTTP side; gRPC is port+10000
 	root     string // the filesystem's path in the cell
-	dir      string // local mount point
+	dir      string // local mount point, absolute and symlink-free
 	readOnly bool
 	tls      *tls.Config
 	cacheDir string
@@ -56,10 +53,11 @@ type engine struct {
 	dir    string
 	wfs    *weedmount.WFS
 	server *fuse.Server
-	served chan struct{} // closed when the FUSE server stops serving
+	done   chan struct{} // closed when the FUSE server stops serving
 }
 
-func startEngine(c mountConfig) (*engine, error) {
+// startEngine mounts; ctx ends the steps that wait on the network.
+func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	if err := logToStderr(); err != nil {
 		return nil, err
 	}
@@ -68,15 +66,12 @@ func startEngine(c mountConfig) (*engine, error) {
 	}
 	dialOption := grpcDialOption(c.tls)
 	filers := []pb.ServerAddress{pb.ServerAddress(c.gateway)}
-	cipher, err := filerCipher(filers, dialOption)
+	cipher, err := filerCipher(ctx, filers, dialOption)
 	if err != nil {
 		return nil, fmt.Errorf("reaching the gateway %s: %w", c.gateway, err)
 	}
 
-	dir, err := filepath.Abs(c.dir)
-	if err != nil {
-		return nil, err
-	}
+	dir := c.dir
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -128,7 +123,7 @@ func startEngine(c mountConfig) (*engine, error) {
 		EnableDistributedLock: true,
 	})
 	parent, name := util.FullPath(c.root).DirAndName()
-	if err := filer_pb.Mkdir(context.Background(), wfs, parent, name, nil); err != nil {
+	if err := filer_pb.Mkdir(ctx, wfs, parent, name, nil); err != nil {
 		return nil, fmt.Errorf("creating the filesystem root: %w", err)
 	}
 
@@ -140,10 +135,10 @@ func startEngine(c mountConfig) (*engine, error) {
 		_ = server.Unmount()
 		return nil, err
 	}
-	e := &engine{dir: dir, wfs: wfs, server: server, served: make(chan struct{})}
+	e := &engine{dir: dir, wfs: wfs, server: server, done: make(chan struct{})}
 	go func() {
 		server.Serve()
-		close(e.served)
+		close(e.done)
 	}()
 	if err := server.WaitMount(); err != nil {
 		return nil, fmt.Errorf("mounting %s: %w", dir, err)
@@ -218,10 +213,12 @@ func useHTTPClientTLS(config *tls.Config) error {
 
 // filerCipher asks the gateway for the cell's configuration, retrying while
 // it is unreachable, and returns whether chunks are encrypted.
-func filerCipher(filers []pb.ServerAddress, dialOption grpc.DialOption) (cipher bool, err error) {
+func filerCipher(ctx context.Context, filers []pb.ServerAddress, dialOption grpc.DialOption) (cipher bool, err error) {
 	for attempt := 1; attempt <= 5; attempt++ {
 		err = pb.WithOneOfGrpcFilerClients(false, filers, dialOption, func(client filer_pb.SeaweedFilerClient) error {
-			resp, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
+			callCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+			defer cancel()
+			resp, err := client.GetFilerConfiguration(callCtx, &filer_pb.GetFilerConfigurationRequest{})
 			if err != nil {
 				return err
 			}
@@ -231,44 +228,37 @@ func filerCipher(filers []pb.ServerAddress, dialOption grpc.DialOption) (cipher 
 		if err == nil {
 			return cipher, nil
 		}
-		time.Sleep(time.Duration(attempt) * time.Second)
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
 	}
 	return false, err
 }
 
-// unmount ends the mount cleanly. It fails while the mount is busy.
+func (e *engine) mountPoint() string { return e.dir }
+
+func (e *engine) served() <-chan struct{} { return e.done }
+
+// unmount ends the mount cleanly and waits for serving to stop. It fails
+// while the mount is busy.
 func (e *engine) unmount() error {
 	if err := e.server.Unmount(); err != nil {
 		return err
 	}
-	<-e.served
+	<-e.done
 	return nil
 }
 
-// finish runs once serving has stopped: it waits, within flushTimeout, for
-// pending writes and then drops the local caches.
-func (e *engine) finish() {
-	done := make(chan struct{})
-	go func() {
-		e.wfs.WaitForAsyncFlush()
-		e.wfs.ClearCacheDir()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(flushTimeout):
-		fmt.Fprintln(os.Stderr, "mountable: gave up waiting for pending writes; some may be lost")
-	}
+// flush runs once serving has stopped: it waits for pending writes, then
+// drops the local caches.
+func (e *engine) flush() {
+	e.wfs.WaitForAsyncFlush()
+	e.wfs.ClearCacheDir()
 }
 
 // abort ends the mount at once without flushing: every further operation in
 // it fails. Exiting the process afterwards also closes the FUSE device,
 // which ends the connection even where the abort itself could not be done.
-func (e *engine) abort() {
-	if err := abortConnection(e.dir); err != nil {
-		fmt.Fprintln(os.Stderr, "mountable: aborting the FUSE connection:", err)
-	}
-	if err := detach(e.dir); err != nil {
-		fmt.Fprintln(os.Stderr, "mountable: detaching the mount:", err)
-	}
-}
+func (e *engine) abort() error { return abortMount(e.dir) }

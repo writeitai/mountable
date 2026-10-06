@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,10 @@ type apiError struct {
 func (e *apiError) Error() string { return fmt.Sprintf("api: %d %s", e.Status, e.Code) }
 
 func call(method, path, token string, body any, out any) error {
+	return callContext(context.Background(), method, path, token, body, out)
+}
+
+func callContext(ctx context.Context, method, path, token string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -40,7 +45,7 @@ func call(method, path, token string, body any, out any) error {
 		}
 		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, apiURL()+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, apiURL()+path, reader)
 	if err != nil {
 		return err
 	}

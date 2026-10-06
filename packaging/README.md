@@ -15,8 +15,10 @@ The CLI ships as the npm package `mountable-cli`, the PyPI package
 
 Every channel carries `LICENSE` and `THIRD_PARTY_NOTICES`, the licenses of the
 third-party code compiled into the binary (also printed by
-`mountable licenses`). `go run ./tools/notices > THIRD_PARTY_NOTICES`
-regenerates it from the module graph; CI fails when it is stale.
+`mountable licenses`): each module's license and NOTICE files, plus the
+license headers of compiled-in source files whose copyright those files do
+not carry. `go run ./tools/notices > THIRD_PARTY_NOTICES` regenerates it from
+the module graph; CI fails when it is stale.
 
 ## Releasing
 

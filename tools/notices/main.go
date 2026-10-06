@@ -1,6 +1,8 @@
 // Command notices writes THIRD_PARTY_NOTICES: the license and NOTICE files of
-// every module compiled into cmd/mountable on the release platforms, and the
-// Go distribution's license.
+// every module compiled into cmd/mountable on the release platforms, the
+// license headers of compiled-in source files whose copyright the module's
+// license files do not already carry (code under another license or
+// attribution), and the Go distribution's license.
 //
 //	go run ./tools/notices > THIRD_PARTY_NOTICES
 package main
@@ -14,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -33,6 +36,7 @@ type module struct {
 
 type pkg struct {
 	Dir      string
+	GoFiles  []string
 	Standard bool
 	Module   *module
 }
@@ -47,6 +51,8 @@ func main() {
 func run(out io.Writer) error {
 	// module path -> the license and notice files found for it.
 	files := map[string]map[string]bool{}
+	sources := map[string]map[string]bool{} // module path -> compiled-in .go files
+	roots := map[string]string{}
 	versions := map[string]string{}
 	for _, platform := range platforms {
 		pkgs, err := listDeps(platform)
@@ -63,8 +69,13 @@ func run(out io.Writer) error {
 			}
 			if files[m.Path] == nil {
 				files[m.Path] = map[string]bool{}
+				sources[m.Path] = map[string]bool{}
 			}
 			versions[m.Path] = m.Version
+			roots[m.Path] = m.Dir
+			for _, f := range p.GoFiles {
+				sources[m.Path][filepath.Join(p.Dir, f)] = true
+			}
 			for _, f := range noticeFiles(m.Dir, p.Dir) {
 				files[m.Path][f] = true
 			}
@@ -100,12 +111,116 @@ func run(out io.Writer) error {
 		if err := section(out, p, versions[p], list); err != nil {
 			return err
 		}
+		headers, err := fileHeaders(roots[p], list, sources[p])
+		if err != nil {
+			return err
+		}
+		for _, h := range headers {
+			fmt.Fprintf(out, "\n--- file notice: %s ---\n\n%s\n", strings.Join(h.files, ", "), h.text)
+		}
 	}
 	return nil
 }
 
+type fileHeader struct {
+	text  string
+	files []string
+}
+
+// fileHeaders returns the distinct leading comments of sources with a
+// copyright line that no copyright line of the module's license files
+// (licenses) carries.
+func fileHeaders(root string, licenses []string, sources map[string]bool) ([]fileHeader, error) {
+	var known strings.Builder
+	for _, f := range licenses {
+		text, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(string(text), "\n") {
+			if i := strings.Index(strings.ToLower(line), "copyright"); i >= 0 {
+				known.WriteString(normalize(line[i:]))
+				known.WriteString("\n")
+			}
+		}
+	}
+	byText := map[string]*fileHeader{}
+	var order []string
+	paths := make([]string, 0, len(sources))
+	for f := range sources {
+		paths = append(paths, f)
+	}
+	sort.Strings(paths)
+	for _, f := range paths {
+		source, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		header := leadingComment(string(source))
+		if !foreignCopyright(header, known.String()) {
+			continue
+		}
+		rel, _ := filepath.Rel(root, f)
+		if byText[header] == nil {
+			byText[header] = &fileHeader{text: header}
+			order = append(order, header)
+		}
+		byText[header].files = append(byText[header].files, filepath.ToSlash(rel))
+	}
+	headers := make([]fileHeader, 0, len(order))
+	for _, text := range order {
+		headers = append(headers, *byText[text])
+	}
+	return headers, nil
+}
+
+// leadingComment is the comment text before the package clause, without
+// build constraints.
+func leadingComment(source string) string {
+	var lines []string
+	for _, line := range strings.Split(source, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "package ") {
+			break
+		}
+		if strings.HasPrefix(trimmed, "//go:build") || strings.HasPrefix(trimmed, "// +build") {
+			continue
+		}
+		lines = append(lines, strings.TrimRight(line, " \t\r"))
+	}
+	return strings.Trim(strings.Join(lines, "\n"), "\n")
+}
+
+// foreignCopyright reports whether a line of header mentioning copyright
+// says something the module's license copyright lines (known, normalized) do
+// not.
+func foreignCopyright(header, known string) bool {
+	for _, line := range strings.Split(header, "\n") {
+		i := strings.Index(strings.ToLower(line), "copyright")
+		if i < 0 {
+			continue
+		}
+		if claim := normalize(line[i:]); claim != "" && !strings.Contains(known, claim) {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	noise      = regexp.MustCompile(`copyright|\(c\)|©|all rights reserved|[0-9]{4}(\s*[-,]\s*[0-9]{4})*|<[^>]*>|[.,*/]`)
+	whitespace = regexp.MustCompile(`\s+`)
+)
+
+// normalize lowercases text and drops years, (c) marks, e-mail addresses and
+// punctuation, so the same holder matches across files and license texts.
+func normalize(text string) string {
+	text = noise.ReplaceAllString(strings.ToLower(text), " ")
+	return strings.TrimSpace(whitespace.ReplaceAllString(text, " "))
+}
+
 func listDeps(platform string) ([]pkg, error) {
-	cmd := exec.Command("go", "list", "-deps", "-json=Dir,Standard,Module", "./cmd/mountable")
+	cmd := exec.Command("go", "list", "-deps", "-json=Dir,GoFiles,Standard,Module", "./cmd/mountable")
 	goos, goarch, _ := strings.Cut(platform, "/")
 	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED=0")
 	cmd.Stderr = os.Stderr
