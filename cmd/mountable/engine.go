@@ -33,6 +33,10 @@ import (
 // shows them as the local user.
 const ownerID = 1000
 
+// startupTimeout bounds mounting, from the first call to the gateway until
+// the kernel has the mount.
+const startupTimeout = 2 * time.Minute
+
 // Upstream defaults for the options Mountable does not change.
 const (
 	chunkSizeMB = 2
@@ -56,8 +60,13 @@ type engine struct {
 	done   chan struct{} // closed when the FUSE server stops serving
 }
 
-// startEngine mounts; ctx ends the steps that wait on the network.
+// startEngine mounts. Every step that talks to the gateway runs before
+// FUSE is attached and ends with ctx or startupTimeout, even where the
+// engine's own calls ignore their context; once attached, a failure or
+// cancellation aborts the mount before returning.
 func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
+	ctx, cancel := context.WithTimeout(ctx, startupTimeout)
+	defer cancel()
 	if err := logToStderr(); err != nil {
 		return nil, err
 	}
@@ -66,7 +75,11 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	}
 	dialOption := grpcDialOption(c.tls)
 	filers := []pb.ServerAddress{pb.ServerAddress(c.gateway)}
-	cipher, err := filerCipher(ctx, filers, dialOption)
+	var cipher bool
+	err := unlessCancelled(ctx, func() (err error) {
+		cipher, err = filerCipher(ctx, filers, dialOption)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reaching the gateway %s: %w", c.gateway, err)
 	}
@@ -123,27 +136,54 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		EnableDistributedLock: true,
 	})
 	parent, name := util.FullPath(c.root).DirAndName()
-	if err := filer_pb.Mkdir(ctx, wfs, parent, name, nil); err != nil {
+	if err := unlessCancelled(ctx, func() error {
+		return filer_pb.Mkdir(ctx, wfs, parent, name, nil)
+	}); err != nil {
 		return nil, fmt.Errorf("creating the filesystem root: %w", err)
+	}
+	// Reads the cell's configuration (without a deadline of its own) and
+	// starts the metadata subscription; nothing here needs FUSE.
+	if err := unlessCancelled(ctx, wfs.StartBackgroundTasks); err != nil {
+		return nil, fmt.Errorf("starting the mount engine: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	server, err := fuse.NewServer(wfs, dir, fuseOptions(dir, c.readOnly))
 	if err != nil {
 		return nil, fmt.Errorf("mounting %s: %w", dir, err)
 	}
-	if err := wfs.StartBackgroundTasks(); err != nil {
-		_ = server.Unmount()
-		return nil, err
-	}
 	e := &engine{dir: dir, wfs: wfs, server: server, done: make(chan struct{})}
 	go func() {
 		server.Serve()
 		close(e.done)
 	}()
-	if err := server.WaitMount(); err != nil {
+	if err := unlessCancelled(ctx, server.WaitMount); err != nil {
+		// Attached but not serving: never leave it behind.
+		if abortErr := e.abort(); abortErr != nil {
+			err = fmt.Errorf("%w; cleaning up the mount: %v", err, abortErr)
+		}
 		return nil, fmt.Errorf("mounting %s: %w", dir, err)
 	}
 	return e, nil
+}
+
+// unlessCancelled runs fn and returns its error, or ctx's error as soon as
+// ctx ends, whether or not fn honours ctx (it then finishes in the
+// background).
+func unlessCancelled(ctx context.Context, fn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	result := make(chan error, 1)
+	go func() { result <- fn() }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // logToStderr sends the engine's log to stderr, never to files.
