@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/writeitai/mountable"
 )
@@ -34,6 +36,7 @@ Environment:
 var version = "dev"
 
 func main() {
+	takeOverSignals()
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, usage, defaultAPI)
 		os.Exit(2)
@@ -64,6 +67,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mountable:", err)
 		os.Exit(1)
 	}
+}
+
+// takeOverSignals removes the handler the mount engine's packages install at
+// init, which exits the process on SIGINT, SIGTERM, SIGHUP or SIGALRM. This
+// process decides how a mount ends (see lifecycle.go); other signals keep
+// their default behaviour.
+func takeOverSignals() {
+	signal.Reset(os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGALRM)
 }
 
 func printVersion(out io.Writer) {

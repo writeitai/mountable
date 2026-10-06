@@ -204,11 +204,11 @@ func end(e *engine, ev event) error {
 			e.finish()
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%v); aborting the mount\n", e.dir, err)
+		fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%s); aborting the mount\n", e.dir, oneLine(err))
 		e.abort()
 		return errors.New("the mount was aborted; writes not yet committed may be lost")
 	default:
-		reason := "revoked"
+		reason := "was revoked"
 		if ev == eventExpired {
 			reason = "expired"
 		}
@@ -280,7 +280,7 @@ func unmount(dir string) error {
 	if err == nil {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%v); aborting the mount\n", dir, err)
+	fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%s); aborting the mount\n", dir, oneLine(err))
 	if err := abortConnection(dir); err != nil {
 		fmt.Fprintln(os.Stderr, "mountable: aborting the FUSE connection:", err)
 	}
@@ -288,6 +288,11 @@ func unmount(dir string) error {
 		return err
 	}
 	return errors.New("the mount was aborted; writes not yet committed may be lost")
+}
+
+// oneLine flattens an error from an unmount helper, which may span lines.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 func certificateRequest(key *ecdsa.PrivateKey) (string, error) {

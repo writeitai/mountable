@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/user"
@@ -20,9 +19,11 @@ import (
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 	"github.com/seaweedfs/seaweedfs/weed/mount/meta_cache"
+	"github.com/seaweedfs/seaweedfs/weed/operation"
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
+	"github.com/seaweedfs/seaweedfs/weed/util/fla9"
 	util_http "github.com/seaweedfs/seaweedfs/weed/util/http"
 	"google.golang.org/grpc"
 	grpccredentials "google.golang.org/grpc/credentials"
@@ -59,8 +60,7 @@ type engine struct {
 }
 
 func startEngine(c mountConfig) (*engine, error) {
-	// The engine's log goes to stderr, never to files.
-	if err := flag.CommandLine.Set("logtostderr", "true"); err != nil {
+	if err := logToStderr(); err != nil {
 		return nil, err
 	}
 	if err := useHTTPClientTLS(c.tls); err != nil {
@@ -151,6 +151,11 @@ func startEngine(c mountConfig) (*engine, error) {
 	return e, nil
 }
 
+// logToStderr sends the engine's log to stderr, never to files.
+func logToStderr() error {
+	return fla9.Set("logtostderr", "true")
+}
+
 func fuseOptions(dir string, readOnly bool) *fuse.MountOptions {
 	options := &fuse.MountOptions{
 		AllowOther:    false,
@@ -186,9 +191,9 @@ func grpcDialOption(config *tls.Config) grpc.DialOption {
 	return grpc.WithTransportCredentials(grpccredentials.NewTLS(config))
 }
 
-// useHTTPClientTLS makes the engine's process-wide HTTP client (chunk reads
-// and writes through the gateway) use https with config. It must run before
-// the client's first use.
+// useHTTPClientTLS makes the engine's HTTP clients (chunk reads and writes
+// through the gateway) use https with config. It must run before their first
+// use.
 func useHTTPClientTLS(config *tls.Config) error {
 	v := util.GetViper()
 	v.Set("https.client.enabled", true)
@@ -202,6 +207,12 @@ func useHTTPClientTLS(config *tls.Config) error {
 		return errors.New("the mount engine's HTTP client was initialised without TLS")
 	}
 	client.Transport.TLSClientConfig = config
+	// Chunk uploads go through a second, shared client; make it this one.
+	uploader, err := operation.NewUploader()
+	if err != nil {
+		return err
+	}
+	*uploader = *operation.NewUploaderWithHttpClient(client)
 	return nil
 }
 

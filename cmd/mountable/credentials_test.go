@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/seaweedfs/weed/operation"
 	util_http "github.com/seaweedfs/seaweedfs/weed/util/http"
 	"google.golang.org/grpc"
 	grpccredentials "google.golang.org/grpc/credentials"
@@ -51,10 +52,10 @@ func TestTLSConfigRejectsMissingCA(t *testing.T) {
 	}
 }
 
-// Both of the engine's TLS paths, gRPC (metadata) and the process-wide HTTP
-// client (chunks), present the current certificate, and the renewed one on
-// the next connection.
-func TestBothTLSPathsServeTheCurrentCertificate(t *testing.T) {
+// Every TLS path of the engine, gRPC (metadata) and the HTTP clients (chunk
+// reads and uploads), presents the current certificate, and the renewed one
+// on the next connection.
+func TestEveryTLSPathServesTheCurrentCertificate(t *testing.T) {
 	ca := newTestCA(t)
 	key := newKey(t)
 	source := &certSource{}
@@ -64,8 +65,15 @@ func TestBothTLSPathsServeTheCurrentCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	uploaded := make(chan string, 10)
 	web := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, r.TLS.PeerCertificates[0].Subject.CommonName)
+		name := r.TLS.PeerCertificates[0].Subject.CommonName
+		if r.Method == http.MethodPost {
+			uploaded <- name
+			io.WriteString(w, `{"size": 1}`)
+			return
+		}
+		io.WriteString(w, name)
 	}))
 	web.TLS = ca.serverTLS(t)
 	web.StartTLS()
@@ -84,6 +92,20 @@ func TestBothTLSPathsServeTheCurrentCertificate(t *testing.T) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		return string(body)
+	}
+
+	uploadName := func() string {
+		client.CloseIdleConnections()
+		uploader, err := operation.NewUploader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := uploader.UploadData(context.Background(), []byte("x"), &operation.UploadOption{
+			UploadUrl: web.URL + "/1,01", MaxAttempts: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return <-uploaded
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -116,12 +138,18 @@ func TestBothTLSPathsServeTheCurrentCertificate(t *testing.T) {
 	if got := httpName(); got != "first" {
 		t.Fatalf("HTTP presented %q, want first", got)
 	}
+	if got := uploadName(); got != "first" {
+		t.Fatalf("the uploader presented %q, want first", got)
+	}
 	if got := grpcName(); got != "first" {
 		t.Fatalf("gRPC presented %q, want first", got)
 	}
 	source.set(ca.sessionCert(t, "second", key, time.Now().Add(time.Hour)))
 	if got := httpName(); got != "second" {
 		t.Fatalf("HTTP presented %q after renewal, want second", got)
+	}
+	if got := uploadName(); got != "second" {
+		t.Fatalf("the uploader presented %q after renewal, want second", got)
 	}
 	if got := grpcName(); got != "second" {
 		t.Fatalf("gRPC presented %q after renewal, want second", got)

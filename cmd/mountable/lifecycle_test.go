@@ -128,3 +128,9 @@ func TestRenewRefusedMeansRevoked(t *testing.T) {
 		t.Fatal("a 503 renewal must be a retryable error")
 	}
 }
+
+func TestEngineLogsToStderr(t *testing.T) {
+	if err := logToStderr(); err != nil {
+		t.Fatal(err)
+	}
+}
