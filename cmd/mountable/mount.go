@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,22 +14,26 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
-)
 
-// The filesystem owner's uid/gid as stored by the Mountable gateway; the mount
-// shows them as the local user.
-const ownerID = 1000
+	"github.com/seaweedfs/seaweedfs/weed/pb"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
 
 // How often the certificate is renewed; a refused renewal means the session
 // was revoked, and the mount is aborted.
 const renewEvery = 2 * time.Minute
+
+// How often the gateway is asked whether it still accepts the session, and
+// the certificate's expiry is checked.
+const checkEvery = 5 * time.Second
 
 type mountCredentials struct {
 	SessionID            string `json:"session_id"`
@@ -39,18 +44,6 @@ type mountCredentials struct {
 	Root                 string `json:"root"`
 	Mode                 string `json:"mode"`
 }
-
-const securityTOML = `[grpc]
-ca = "%[1]s/ca.pem"
-[grpc.client]
-cert = "%[1]s/session.pem"
-key = "%[1]s/session.key"
-[https.client]
-enabled = true
-cert = "%[1]s/session.pem"
-key = "%[1]s/session.key"
-ca = "%[1]s/ca.pem"
-`
 
 func mountCommand(args []string) error {
 	flags := flag.NewFlagSet("mount", flag.ContinueOnError)
@@ -98,12 +91,16 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 	return created.Ticket, err
 }
 
+// mountSession is the live session behind a mount: its key, its current
+// certificate, and a way to ask the gateway whether it still accepts it.
+type mountSession struct {
+	id    string
+	key   *ecdsa.PrivateKey
+	certs *certSource
+	probe func() error
+}
+
 func mount(ticket, dir string) error {
-	// Before the exchange: a ticket is single-use.
-	weedPath, err := weedBinary()
-	if err != nil {
-		return err
-	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -118,93 +115,135 @@ func mount(ticket, dir string) error {
 	}, &creds); err != nil {
 		return err
 	}
-
-	// Credentials and caches live in a private directory removed on exit.
-	work, err := os.MkdirTemp("", "mountable-mount-")
+	cert, err := sessionCertificate(key, creds.Certificate)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work)
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	session := &mountSession{id: creds.SessionID, key: key, certs: &certSource{}}
+	session.certs.set(cert)
+	tlsConfig, err := session.certs.tlsConfig(creds.CACertificate)
 	if err != nil {
 		return err
 	}
-	files := map[string]string{
-		"session.key":   string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
-		"session.pem":   creds.Certificate,
-		"ca.pem":        creds.CACertificate,
-		"security.toml": fmt.Sprintf(securityTOML, work),
+
+	// Caches live in a private directory removed on exit.
+	cacheDir, err := mountCacheDir()
+	if err != nil {
+		return err
 	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(work, name), []byte(content), 0o600); err != nil {
-			return err
-		}
+	defer os.RemoveAll(cacheDir)
+
+	probeConn, err := grpc.NewClient(pb.ServerAddress(creds.GatewayAddress).ToGrpcAddress(), grpcDialOption(tlsConfig))
+	if err != nil {
+		return err
+	}
+	defer probeConn.Close()
+	session.probe = func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := filer_pb.NewSeaweedFilerClient(probeConn).GetFilerConfiguration(ctx, &filer_pb.GetFilerConfigurationRequest{})
+		return err
 	}
 
-	weed := exec.Command(weedPath, weedArgs(work, creds, dir)...)
-	// Pick up renewed certificates quickly (SeaweedFS rereads them on this
-	// interval; its default is 5 hours).
-	weed.Env = append(os.Environ(), "WEED_TLS_CERT_REFRESH_INTERVAL=1m")
-	weed.Stdout, weed.Stderr = os.Stdout, os.Stderr
-	if err := weed.Start(); err != nil {
-		return fmt.Errorf("starting weed: %w", err)
+	e, err := startEngine(mountConfig{
+		gateway:  creds.GatewayAddress,
+		root:     creds.Root,
+		dir:      dir,
+		readOnly: creds.Mode == "ro",
+		tls:      tlsConfig,
+		cacheDir: cacheDir,
+	})
+	if err != nil {
+		return err
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- weed.Wait() }()
+	fmt.Fprintf(os.Stderr, "mountable: mounted at %s\n", e.dir)
+	return serve(e, session)
+}
 
+// serve keeps the session alive until something ends the mount, then ends
+// it the way that event requires.
+func serve(e *engine, session *mountSession) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	ticker := time.NewTicker(renewEvery)
-	defer ticker.Stop()
+	defer signal.Stop(signals)
+	renewal := time.NewTicker(renewEvery)
+	defer renewal.Stop()
+	check := time.NewTicker(checkEvery)
+	defer check.Stop()
 	for {
+		var ev event
 		select {
-		case err := <-exited:
-			return err
+		case <-e.served:
+			ev = eventUnmounted
 		case <-signals:
-			return stop(weed, exited, dir)
-		case <-ticker.C:
-			revoked, err := renew(key, creds.SessionID, filepath.Join(work, "session.pem"))
+			ev = eventSignal
+		case <-renewal.C:
+			revoked, err := session.renew()
 			if revoked {
-				// Fail closed: cached data must not stay readable.
-				fmt.Fprintln(os.Stderr, "mountable: the mount session was revoked or expired; unmounting")
-				_ = stop(weed, exited, dir)
-				return err
-			}
-			if err != nil {
+				ev = eventRevoked
+			} else if err != nil {
 				fmt.Fprintln(os.Stderr, "mountable: renewal failed, retrying:", err)
 			}
+		case <-check.C:
+			ev = session.check(time.Now())
+		}
+		if ev != 0 {
+			return end(e, ev)
 		}
 	}
 }
 
-func weedArgs(work string, creds mountCredentials, dir string) []string {
-	args := []string{
-		"-config_dir=" + work, "mount",
-		"-filer=" + creds.GatewayAddress,
-		"-filer.path=" + creds.Root,
-		"-volumeServerAccess=filerProxy",
-		"-dlm",
-		"-dir=" + dir,
-		"-allowOthers=false",
-		"-cacheDir=" + filepath.Join(work, "cache"),
-		fmt.Sprintf("-map.uid=%d:%d", os.Getuid(), ownerID),
-		fmt.Sprintf("-map.gid=%d:%d", os.Getgid(), ownerID),
+func end(e *engine, ev event) error {
+	switch endingFor(ev) {
+	case endFinish:
+		e.finish()
+		return nil
+	case endUnmount:
+		err := e.unmount()
+		if err == nil {
+			e.finish()
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%v); aborting the mount\n", e.dir, err)
+		e.abort()
+		return errors.New("the mount was aborted; writes not yet committed may be lost")
+	default:
+		reason := "revoked"
+		if ev == eventExpired {
+			reason = "expired"
+		}
+		fmt.Fprintf(os.Stderr, "mountable: the mount session %s; aborting the mount\n", reason)
+		e.abort()
+		return fmt.Errorf("the mount session %s; the mount was aborted and writes not yet committed may be lost", reason)
 	}
-	if creds.Mode == "ro" {
-		args = append(args, "-readOnly")
-	}
-	return args
 }
 
-// renew gets a new certificate for the same key. revoked is true when the
-// API refused: the session no longer exists or lost its authority.
-func renew(key *ecdsa.PrivateKey, sessionID, certPath string) (revoked bool, err error) {
-	csr, err := certificateRequest(key)
+// check reports eventExpired once the certificate has run out, and
+// eventRevoked once the gateway refuses the session and the API, the
+// authority, confirms it. Otherwise it returns 0.
+func (s *mountSession) check(now time.Time) event {
+	if !now.Before(s.certs.get().Leaf.NotAfter) {
+		return eventExpired
+	}
+	if status.Code(s.probe()) != codes.Unauthenticated {
+		return 0
+	}
+	if revoked, _ := s.renew(); revoked {
+		return eventRevoked
+	}
+	return 0
+}
+
+// renew gets a new certificate for the same key and serves it from then on.
+// revoked is true when the API refused: the session no longer exists or lost
+// its authority.
+func (s *mountSession) renew() (revoked bool, err error) {
+	csr, err := certificateRequest(s.key)
 	if err != nil {
 		return false, err
 	}
 	var creds mountCredentials
-	err = call("POST", "/api/v1/mount-sessions/"+sessionID+":renew", "", map[string]string{"csr": csr}, &creds)
+	err = call("POST", "/api/v1/mount-sessions/"+s.id+":renew", "", map[string]string{"csr": csr}, &creds)
 	var api *apiError
 	if errors.As(err, &api) && (api.Status == 403 || api.Status == 404) {
 		return true, err
@@ -212,32 +251,43 @@ func renew(key *ecdsa.PrivateKey, sessionID, certPath string) (revoked bool, err
 	if err != nil {
 		return false, err
 	}
-	tmp := certPath + ".new"
-	if err := os.WriteFile(tmp, []byte(creds.Certificate), 0o600); err != nil {
+	cert, err := sessionCertificate(s.key, creds.Certificate)
+	if err != nil {
 		return false, err
 	}
-	return false, os.Rename(tmp, certPath)
+	s.certs.set(cert)
+	return false, nil
 }
 
-func stop(weed *exec.Cmd, exited chan error, dir string) error {
-	_ = unmount(dir)
-	_ = weed.Process.Signal(syscall.SIGTERM)
-	select {
-	case <-exited:
-	case <-time.After(10 * time.Second):
-		_ = weed.Process.Kill()
+// mountCacheDir creates a private cache directory for one mount.
+func mountCacheDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
 	}
-	return nil
+	base = filepath.Join(base, "mountable")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(base, "mount-")
 }
 
+// unmount is `mountable unmount DIR`: a clean unmount, after which the
+// mounting process finishes its pending writes and exits. A busy mount is
+// aborted instead.
 func unmount(dir string) error {
-	if runtime.GOOS == "linux" {
-		if err := exec.Command("fusermount", "-uz", dir).Run(); err == nil {
-			return nil
-		}
-		return exec.Command("umount", "-l", dir).Run()
+	err := cleanUnmount(dir)
+	if err == nil {
+		return nil
 	}
-	return exec.Command("umount", "-f", dir).Run()
+	fmt.Fprintf(os.Stderr, "mountable: %s could not be unmounted cleanly (%v); aborting the mount\n", dir, err)
+	if err := abortConnection(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "mountable: aborting the FUSE connection:", err)
+	}
+	if err := detach(dir); err != nil {
+		return err
+	}
+	return errors.New("the mount was aborted; writes not yet committed may be lost")
 }
 
 func certificateRequest(key *ecdsa.PrivateKey) (string, error) {

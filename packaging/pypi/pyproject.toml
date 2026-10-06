@@ -1,5 +1,6 @@
-# The `mountable` wheel: the four CLI binaries under mountable/bin/ (copied in
-# by packaging/build.sh) and a launcher. Build: uv build --wheel.
+# The `mountable` wheel: the four CLI binaries under mountable/bin/ and
+# THIRD_PARTY_NOTICES (copied in by packaging/build.sh) and a launcher.
+# Build: uv build --wheel.
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
@@ -10,7 +11,7 @@ version = "0.0.0.dev0"  # set from the release tag
 description = "The Mountable CLI: mount a Mountable filesystem on Linux or macOS."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
 requires-python = ">=3.9"
 classifiers = [
     "Operating System :: MacOS",

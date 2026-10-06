@@ -8,14 +8,20 @@ The CLI ships as the npm package `mountable-cli`, the PyPI package
 - `pypi/`: the wheel: the `mountable` entry point runs
   `mountable/bin/mountable-{linux,darwin}-{amd64,arm64}`.
 - `npm-placeholder/`: `mountable-cli@0.0.0`, published once by hand (below).
-- `build.sh VERSION`: builds the four binaries, `SHA256SUMS`, the npm tarball
-  and the wheel into `dist/`. The release workflow runs it; run it locally for
-  a dry run.
+- `build.sh VERSION`: builds the four binaries, the release archives
+  `mountable-<os>-<arch>.tar.gz` (executable, `LICENSE`, `THIRD_PARTY_NOTICES`)
+  with `SHA256SUMS`, the npm tarball and the wheel into `dist/`. The release
+  workflow runs it; run it locally for a dry run.
+
+Every channel carries `LICENSE` and `THIRD_PARTY_NOTICES`, the licenses of the
+third-party code compiled into the binary (also printed by
+`mountable licenses`). `go run ./tools/notices > THIRD_PARTY_NOTICES`
+regenerates it from the module graph; CI fails when it is stale.
 
 ## Releasing
 
 Push a tag `vX.Y.Z`. `.github/workflows/release.yml` builds and checks both
-packages, creates the GitHub release with the binaries, publishes to npm and
+packages, creates the GitHub release with the archives, publishes to npm and
 PyPI through trusted publishing in the `release` environment, then
 smoke-tests `npx`, `uvx` and `install.sh`.
 

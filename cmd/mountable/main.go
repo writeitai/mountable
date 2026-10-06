@@ -6,11 +6,15 @@
 //	mountable unmount DIR
 //	mountable logout
 //	mountable version
+//	mountable licenses
 package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+
+	"github.com/writeitai/mountable"
 )
 
 const usage = `usage:
@@ -20,10 +24,10 @@ const usage = `usage:
   mountable unmount DIR
   mountable logout
   mountable version
+  mountable licenses   third-party licenses and notices
 
 Environment:
   MOUNTABLE_API_URL  the Mountable API (default %s)
-  MOUNTABLE_WEED     path to weed (default: SeaweedFS %s, downloaded on first mount)
 `
 
 // version is set at release build time: -ldflags "-X main.version=X.Y.Z".
@@ -31,7 +35,7 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, usage, defaultAPI, weedVersion)
+		fmt.Fprintf(os.Stderr, usage, defaultAPI)
 		os.Exit(2)
 	}
 	var err error
@@ -43,7 +47,9 @@ func main() {
 	case "mount":
 		err = mountCommand(os.Args[2:])
 	case "version":
-		fmt.Printf("mountable %s (SeaweedFS %s)\n", version, weedVersion)
+		printVersion(os.Stdout)
+	case "licenses":
+		printLicenses(os.Stdout)
 	case "unmount":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("usage: mountable unmount DIR")
@@ -51,11 +57,19 @@ func main() {
 			err = unmount(os.Args[2])
 		}
 	default:
-		fmt.Fprintf(os.Stderr, usage, defaultAPI, weedVersion)
+		fmt.Fprintf(os.Stderr, usage, defaultAPI)
 		os.Exit(2)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mountable:", err)
 		os.Exit(1)
 	}
+}
+
+func printVersion(out io.Writer) {
+	fmt.Fprintf(out, "mountable %s\n", version)
+}
+
+func printLicenses(out io.Writer) {
+	fmt.Fprint(out, mountable.ThirdPartyNotices)
 }

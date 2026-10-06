@@ -8,7 +8,8 @@
     "mountable": "bin/mountable.js"
   },
   "files": [
-    "bin/"
+    "bin/",
+    "THIRD_PARTY_NOTICES"
   ],
   "engines": {
     "node": ">=18"

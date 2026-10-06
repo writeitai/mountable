@@ -44,24 +44,24 @@ jobs:
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" node:22-slim \
             npx -y --package "/dist/mountable-cli-$VERSION.tgz" mountable version \
-            | grep -x "mountable $VERSION (SeaweedFS .*)"
+            | grep -x "mountable $VERSION"
       - name: Check the wheel in a clean container
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" python:3.12-slim \
             sh -c "pip install -q /dist/mountable-$VERSION-py3-none-any.whl && mountable version" \
-            | grep -x "mountable $VERSION (SeaweedFS .*)"
+            | grep -x "mountable $VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: packages
           path: |
             dist/*.tgz
             dist/*.whl
-      - name: GitHub release with the binaries
+      - name: GitHub release with the archives and SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/bin/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --repo "$GITHUB_REPOSITORY" --generate-notes
 
   publish:
     name: Publish to npm and PyPI
@@ -113,14 +113,14 @@ jobs:
       - name: npx
         run: |
           for _ in 1 2 3 4 5 6 7 8 9 10; do
-            npx -y "mountable-cli@$VERSION" version && exit 0
+            npx -y "mountable-cli@$VERSION" version | grep -x "mountable $VERSION" && exit 0
             sleep 30
           done
           exit 1
       - name: uvx
         run: |
           for _ in 1 2 3 4 5 6 7 8 9 10; do
-            uvx --refresh "mountable==$VERSION" version && exit 0
+            uvx --refresh "mountable==$VERSION" version | grep -x "mountable $VERSION" && exit 0
             sleep 30
           done
           exit 1
@@ -128,4 +128,4 @@ jobs:
         run: |
           curl -fsSL https://mountable.io/install.sh -o "$RUNNER_TEMP/install.sh"
           MOUNTABLE_VERSION="$VERSION" sh "$RUNNER_TEMP/install.sh"
-          ~/.local/bin/mountable version | grep -x "mountable $VERSION (SeaweedFS .*)"
+          ~/.local/bin/mountable version | grep -x "mountable $VERSION"
