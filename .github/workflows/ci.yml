@@ -37,8 +37,29 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+      - name: THIRD_PARTY_NOTICES matches the module graph
+        run: |
+          go run ./tools/notices > THIRD_PARTY_NOTICES
+          git diff --exit-code THIRD_PARTY_NOTICES || {
+            echo "::error::THIRD_PARTY_NOTICES is stale; run: go run ./tools/notices > THIRD_PARTY_NOTICES"
+            exit 1
+          }
       - name: Build and install both packages
         run: |
           packaging/build.sh 0.0.0
-          npx -y --package ./dist/mountable-cli-0.0.0.tgz mountable version | grep -x "mountable 0.0.0 (SeaweedFS .*)"
-          uvx --from ./dist/mountable-0.0.0-py3-none-any.whl mountable version | grep -x "mountable 0.0.0 (SeaweedFS .*)"
+          npx -y --package ./dist/mountable-cli-0.0.0.tgz mountable version | grep -x "mountable 0.0.0"
+          uvx --from ./dist/mountable-0.0.0-py3-none-any.whl mountable version | grep -x "mountable 0.0.0"
+      - name: Every channel carries the license and notices
+        run: |
+          tar -tzf dist/mountable-cli-0.0.0.tgz | grep -x package/THIRD_PARTY_NOTICES
+          tar -tzf dist/mountable-cli-0.0.0.tgz | grep -x package/LICENSE
+          unzip -l dist/mountable-0.0.0-py3-none-any.whl | grep -q "licenses/THIRD_PARTY_NOTICES$"
+          unzip -l dist/mountable-0.0.0-py3-none-any.whl | grep -q "licenses/LICENSE$"
+          for archive in dist/release/mountable-*.tar.gz; do
+            test "$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')" = "LICENSE THIRD_PARTY_NOTICES mountable "
+          done
+          (cd dist/release && shasum -a 256 -c SHA256SUMS)
+          tar -xzOf dist/release/mountable-linux-amd64.tar.gz mountable > "$RUNNER_TEMP/mountable"
+          chmod +x "$RUNNER_TEMP/mountable"
+          "$RUNNER_TEMP/mountable" version | grep -x "mountable 0.0.0"
+          "$RUNNER_TEMP/mountable" licenses | cmp - THIRD_PARTY_NOTICES
