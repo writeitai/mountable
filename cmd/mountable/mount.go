@@ -66,7 +66,8 @@ func mountCommand(o *output, args []string) error {
 	var api *apiError
 	var network *url.Error
 	var reported *alreadyReported
-	if err == nil || errors.As(err, &api) || errors.As(err, &network) || errors.As(err, &reported) {
+	var known *cliError
+	if err == nil || errors.As(err, &api) || errors.As(err, &network) || errors.As(err, &reported) || errors.As(err, &known) {
 		return err
 	}
 	return &cliError{Code: "mount_failed", Message: err.Error()}
@@ -96,6 +97,11 @@ func mount(o *output, ticket, dir string) error {
 	dir, err := canonicalDir(dir)
 	if err != nil {
 		return err
+	}
+	// Check the directory before the ticket is exchanged, so a missing
+	// directory does not use up the ticket. Bounded: dir may be a stale mount.
+	if err := withTimeout(helperTimeout, func() error { return isDirectory(dir) }); err != nil {
+		return &cliError{Code: "mount_failed", Message: fmt.Sprintf("mount directory %s: %v", dir, err), Hint: "create it first: mkdir -p " + dir}
 	}
 	// Signals are ours from here on, including while the mount starts.
 	signals := make(chan os.Signal, 2)
@@ -259,6 +265,17 @@ func untilSignal(signals <-chan os.Signal, fn func(ctx context.Context) error) (
 		cancel()
 		return true, <-result
 	}
+}
+
+func isDirectory(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("not a directory")
+	}
+	return nil
 }
 
 // mountCacheDir creates a private cache directory for one mount.

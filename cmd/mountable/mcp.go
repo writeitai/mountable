@@ -17,9 +17,10 @@ const (
 	orgNote    = " org_id is optional: an API key uses its own organisation, and a login with one organisation uses that one."
 )
 
-// mountCommandTemplate mounts with the ticket from MOUNTABLE_TICKET, read on
-// stdin so it never appears in an argument list.
-const mountCommandTemplate = `printf '%s\n' "$MOUNTABLE_TICKET" | mountable mount --ticket-stdin --json /mnt/mountable`
+// mountCommandTemplate creates the mount directory, then mounts with the
+// ticket from MOUNTABLE_TICKET, read on stdin so it never appears in an
+// argument list.
+const mountCommandTemplate = `mkdir -p /mnt/mountable && printf '%s\n' "$MOUNTABLE_TICKET" | mountable mount --ticket-stdin --json /mnt/mountable`
 
 type orgInput struct {
 	OrgID string `json:"org_id,omitempty" jsonschema:"the organisation ID; optional"`
@@ -78,8 +79,8 @@ func newMCPServer() *mcp.Server {
 	}))
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "create_mount_ticket",
-		Description: "Create a one-time mount ticket for a sandbox. The result is the mount session with its ticket (single use, valid for minutes) and mount_command, the command to run in the sandbox with the ticket in the environment variable MOUNTABLE_TICKET; it reads the ticket on stdin, so never put the ticket in an argument list. The sandbox needs the mountable CLI (curl -fsSL https://mountable.io/install.sh | sh) and FUSE; wait for the JSON line {\"event\":\"mounted\"} before using the directory." +
-			" Retries: pass your own idempotency_key and reuse it when retrying after an unknown outcome. A replay returns the existing session without a ticket. If that session is still requested, its ticket was lost: this tool revokes it and creates a new one with a fresh key, and the result names the old one as replaced_session_id. If it is active or later, the ticket was used: nothing is revoked and the tool fails with ticket_already_used; use a new idempotency_key for another mount. idempotency_conflict means an identical request is in progress." + rateLimits,
+		Description: "Create a one-time mount ticket for a sandbox. The result is the mount session with its ticket (single use, valid for minutes) and mount_command, the command to run in the sandbox with the ticket in the environment variable MOUNTABLE_TICKET; it reads the ticket on stdin, so never put the ticket in an argument list. /mnt/mountable is only a default: any writable directory works. The sandbox needs the mountable CLI (curl -fsSL https://mountable.io/install.sh | sh) and FUSE; wait for the JSON line {\"event\":\"mounted\"} before using the directory." +
+			" Retries: pass your own idempotency_key and reuse it when retrying after an unknown outcome. A replay returns the existing session without a ticket. If that session is still requested, its ticket was lost: this tool revokes it and creates a new one with a fresh key, and the result names the old one as replaced_session_id. If it is active or later, the ticket was used: nothing is revoked and the tool fails with ticket_already_used; use a new idempotency_key for another mount. idempotency_conflict means an identical request is in progress. If the outcome is unknown (network_error or outcome_unknown), the error's idempotency_key is the key that request was sent with: retry with exactly that key, even if you did not choose it." + rateLimits,
 	}, tool(func(ctx context.Context, c *client, in ticketInput) (any, error) {
 		raw, err := c.createTicket(ctx, in.FilesystemID, in.ReadOnly, in.IdempotencyKey, func(string) {})
 		if err != nil {

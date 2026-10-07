@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -114,7 +115,8 @@ func TestMCPCreateMountTicket(t *testing.T) {
 		t.Fatalf("result = %v %s", isError, text)
 	}
 	command, _ := out["mount_command"].(string)
-	if out["ticket"] != "mtbltk_theticket" || !strings.Contains(command, "| mountable mount --ticket-stdin") || strings.Contains(command, "mtbltk_") {
+	if out["ticket"] != "mtbltk_theticket" || !strings.HasPrefix(command, "mkdir -p /mnt/mountable && ") ||
+		!strings.Contains(command, "| mountable mount --ticket-stdin") || strings.Contains(command, "mtbltk_") {
 		t.Fatalf("result = %s", text)
 	}
 	if b := api.bodies[0]; b["mode"] != "ro" || b["idempotency_key"] != "job-1" {
@@ -156,5 +158,57 @@ func TestMCPErrorsCarryCodeAndHint(t *testing.T) {
 	text, isError = callTool(t, s, "list_filesystems", nil)
 	if !isError || !strings.Contains(text, `"unauthenticated"`) {
 		t.Fatalf("without credentials: %v %s", isError, text)
+	}
+}
+
+// A replacement whose 201 answer is cut short leaves the caller the fresh
+// key, and retrying with it recovers a working ticket.
+func TestMCPLostReplacementCanBeRecovered(t *testing.T) {
+	useAPIKey(t)
+	var mu sync.Mutex
+	lost := map[string]bool{} // keys whose session was created but whose answer was lost
+	posts := 0
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			key := body["idempotency_key"]
+			mu.Lock()
+			defer mu.Unlock()
+			posts++
+			switch {
+			case key == "job-1" || lost[key]:
+				reply(201, session("s-"+key, "requested", ""))(w, r)
+			case posts == 2:
+				lost[key] = true
+				cutShort(w, r)
+			default:
+				reply(201, session("s-"+key, "requested", "mtbltk_recovered"))(w, r)
+			}
+		},
+		"DELETE /api/v1/mount-sessions/s-job-1": reply(204, ""),
+	})
+	s := connectMCP(t)
+	text, isError := callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "job-1"})
+	var out struct {
+		Error cliError `json:"error"`
+	}
+	if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != "outcome_unknown" || out.Error.IdempotencyKey == "" {
+		t.Fatalf("lost replacement: %v %s", isError, text)
+	}
+	key := out.Error.IdempotencyKey
+	mu.Lock()
+	created := lost[key]
+	mu.Unlock()
+	if !created || !strings.Contains(out.Error.Hint, key) {
+		t.Fatalf("the error names %q, not the replacement's key", key)
+	}
+
+	// Retrying with that key finds the unused replacement and replaces it.
+	api.routes["DELETE /api/v1/mount-sessions/s-"+key] = reply(204, "")
+	text, isError = callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": key})
+	var ok map[string]any
+	if isError || json.Unmarshal([]byte(text), &ok) != nil || ok["ticket"] != "mtbltk_recovered" || ok["replaced_session_id"] != "s-"+key {
+		t.Fatalf("retry: %v %s", isError, text)
 	}
 }

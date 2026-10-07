@@ -31,7 +31,8 @@ const usage = `usage:
   mountable licenses                       third-party licenses and notices
 
 Every command takes --json: one JSON document on stdout (JSON lines for
-mount), diagnostics on stderr. Nothing prompts.
+mount; {"usage": …} for help), diagnostics on stderr. The exception is mcp,
+whose stdout is the MCP protocol. Nothing prompts.
 
 Exit codes: 0 success, 1 error (API, network, mount or credentials),
 2 wrong usage.
@@ -73,8 +74,11 @@ func dispatch(o *output, command string, args []string) error {
 	}
 	switch command {
 	case "help", "-h", "--help":
-		fmt.Fprintf(o.stdout, usage, defaultAPI)
-		return nil
+		text := fmt.Sprintf(usage, defaultAPI)
+		return o.result(map[string]string{"usage": text}, func(w io.Writer) error {
+			_, err := fmt.Fprint(w, text)
+			return err
+		})
 	case "login":
 		return simple(o, args, "login", func() (any, error) {
 			return map[string]bool{"signed_in": true}, login(o.messages())
@@ -110,6 +114,7 @@ func dispatch(o *output, command string, args []string) error {
 	case "mount":
 		return mountCommand(o, args)
 	case "mcp":
+		// stdout carries the MCP protocol, so --json changes nothing.
 		if _, err := newFlags("mcp").parse(args, 0); err != nil {
 			return err
 		}

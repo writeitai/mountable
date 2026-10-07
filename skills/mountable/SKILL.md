@@ -57,7 +57,8 @@ mountable ticket create FS_ID --idempotency-key job-42 --json
 Add `--ro` for a read-only mount. The ticket works once and expires within
 minutes, so hand it to the sandbox right away.
 
-**3. Sandbox: mount**, giving the ticket on stdin (here from an environment
+**3. Sandbox: mount** onto an existing, writable directory (any path),
+giving the ticket on stdin (here from an environment
 variable passed to the sandbox), and wait for the `mounted` event:
 
 ```sh
@@ -116,7 +117,7 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 | `ticket_already_used` | Use a new `--idempotency-key` for another mount. |
 | `ticket_invalid` | The ticket was used or expired; create a new one. |
 | `idempotency_conflict` | An identical request is in progress; retry shortly with the same key. |
-| `network_error` | Retry reads; for `ticket create`, retry with the same key. |
+| `network_error`, `outcome_unknown` | Retry reads; for `ticket create`, retry with the error's `idempotency_key`. |
 
 ## Retries
 
@@ -124,7 +125,8 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
   retry.
 - **`ticket create`**: always pass a caller-known `--idempotency-key` (without
   one, the CLI prints a generated key to stderr before sending). After a
-  timeout, retry with the same key. A replay returns the existing session
+  timeout or an unknown outcome, retry with the key in the error's
+  `idempotency_key`. A replay returns the existing session
   without a ticket, and the CLI handles it:
   - still `requested`: the ticket was lost. The CLI revokes that session,
     creates a new one under a fresh key, and returns it with

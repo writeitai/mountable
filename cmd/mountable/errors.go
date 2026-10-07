@@ -19,6 +19,8 @@ type cliError struct {
 	Hint    string `json:"hint,omitempty"`
 	// RetryAfter is how many seconds to wait after rate_limited.
 	RetryAfter int `json:"retry_after,omitempty"`
+	// IdempotencyKey is the key a failed ticket request was sent with.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// Session is the existing session behind ticket_already_used.
 	Session json.RawMessage `json:"session,omitempty"`
 }

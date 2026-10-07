@@ -173,9 +173,10 @@ func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, k
 	}
 	if created.State != "requested" {
 		return nil, &cliError{
-			Code:    "ticket_already_used",
-			Message: fmt.Sprintf("idempotency key %s already created session %s, whose ticket was used (state %s)", key, created.ID, created.State),
-			Session: raw,
+			Code:           "ticket_already_used",
+			Message:        fmt.Sprintf("idempotency key %s already created session %s, whose ticket was used (state %s)", key, created.ID, created.State),
+			IdempotencyKey: key,
+			Session:        raw,
 		}
 	}
 	if err := c.revokeSession(ctx, created.ID); err != nil {
@@ -193,27 +194,36 @@ func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, k
 	return withField(raw, "replaced_session_id", created.ID)
 }
 
-// postSession sends one create request. On a failure whose outcome is
-// unknown, the error names the key to retry with.
+// postSession sends one create request. Every error names the key it was
+// sent with. When the outcome is unknown (the request or its answer was
+// lost, cut short or unreadable, or the API failed with a 5xx), a session
+// may exist under that key, and the error says to retry with it.
 func (c *client) postSession(ctx context.Context, fsID, mode, key string) (json.RawMessage, sessionCreated, error) {
 	var raw json.RawMessage
 	var created sessionCreated
 	err := c.call(ctx, "POST", "/api/v1/mount-sessions", map[string]string{
 		"filesystem_id": fsID, "mode": mode, "idempotency_key": key,
 	}, &raw)
-	var network *url.Error
-	if errors.As(err, &network) {
-		return nil, created, &cliError{
-			Code:    "network_error",
-			Message: network.Error(),
-			Hint:    fmt.Sprintf("retry with the same idempotency key %s", key),
+	if err == nil {
+		err = json.Unmarshal(raw, &created)
+	}
+	if err == nil && created.ID == "" {
+		err = errors.New("the API's answer has no session ID")
+	}
+	if err == nil {
+		return raw, created, nil
+	}
+	e := toCLIError(err)
+	e.IdempotencyKey = key
+	var api *apiError
+	if !errors.As(err, &api) || api.Status >= 500 {
+		if e.Code != "network_error" {
+			e.Code = "outcome_unknown"
 		}
+		e.Message = fmt.Sprintf("the outcome of creating a session with idempotency key %s is unknown: %s", key, e.Message)
+		e.Hint = fmt.Sprintf("retry with the same idempotency key %s", key)
 	}
-	if err != nil {
-		return nil, created, err
-	}
-	err = json.Unmarshal(raw, &created)
-	return raw, created, err
+	return nil, created, e
 }
 
 // withField adds one field to a JSON object.

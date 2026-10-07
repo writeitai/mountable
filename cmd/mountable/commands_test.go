@@ -445,7 +445,7 @@ func TestErrorMapping(t *testing.T) {
 		}, "rate_limited", "wait `retry_after` seconds, then retry", 7},
 		{"conflict", reply(409, `{"detail":{"code":"idempotency_conflict"}}`), "idempotency_conflict", "wait a moment, then retry with the same idempotency key", 0},
 		{"invalid", reply(422, `{"detail":[{"loc":["body","mode"],"msg":"bad value mtbl_leakedsecret","type":"x"}]}`), "invalid_request", "check the command's arguments", 0},
-		{"no code", reply(502, `<html>bad gateway</html>`), "api_error", "retry later", 0},
+		{"server error", reply(502, `<html>bad gateway</html>`), "outcome_unknown", "retry with the same idempotency key k", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -476,7 +476,7 @@ func TestNetworkErrorNamesTheKeyToRetryWith(t *testing.T) {
 	}}
 	r := runCLI(t, "ticket", "create", "fsone", "--idempotency-key", "job-42", "--json")
 	e := jsonError(t, r)
-	if r.code != 1 || e.Code != "network_error" || !strings.Contains(e.Hint, "job-42") {
+	if r.code != 1 || e.Code != "network_error" || e.IdempotencyKey != "job-42" || !strings.Contains(e.Hint, "job-42") {
 		t.Fatalf("got %d %+v", r.code, e)
 	}
 	// A dead API is a network error too.
@@ -547,6 +547,11 @@ func TestVersionAndHelp(t *testing.T) {
 	r = runCLI(t, "help")
 	if r.code != 0 || !strings.Contains(r.stdout, "mountable ticket create") {
 		t.Fatalf("help = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "help", "--json")
+	var help map[string]string
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &help) != nil || !strings.Contains(help["usage"], "mountable ticket create") {
+		t.Fatalf("help --json = %d %q", r.code, r.stdout)
 	}
 }
 
@@ -633,5 +638,73 @@ func TestLoginAndLogoutJSON(t *testing.T) {
 	r = runCLI(t, "logout", "--json")
 	if e := jsonError(t, r); r.code != 1 || e.Code != "unauthenticated" {
 		t.Fatalf("second logout = %d %+v", r.code, e)
+	}
+}
+
+// cutShort answers 201 but drops the connection partway through the body.
+func cutShort(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(201)
+	fmt.Fprint(w, `{"id":"new","ticket":"mtbltk_`)
+}
+
+// Every uncertain outcome of a ticket request reports the key that request
+// was sent with, including the fresh key of a replacement.
+func TestUncertainTicketOutcomesNameTheKey(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply http.HandlerFunc
+	}{
+		{"body cut short", cutShort},
+		{"undecodable body", reply(201, `{"id":`)},
+		{"server error", reply(500, `{"detail":"boom"}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useAPIKey(t)
+			api := newFakeAPI(t, map[string]http.HandlerFunc{
+				"POST /api/v1/mount-sessions": func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if body["idempotency_key"] == "job-42" {
+						reply(201, session("old", "requested", ""))(w, r)
+						return
+					}
+					tc.reply(w, r)
+				},
+				"DELETE /api/v1/mount-sessions/old": reply(204, ""),
+			})
+			r := runCLI(t, "ticket", "create", "fsone", "--idempotency-key", "job-42", "--json")
+			e := jsonError(t, r)
+			fresh := api.bodies[len(api.bodies)-1]["idempotency_key"]
+			if r.code != 1 || fresh == "job-42" || e.IdempotencyKey != fresh || !strings.Contains(e.Hint, fresh) ||
+				(e.Code != "outcome_unknown" && e.Code != "network_error") {
+				t.Fatalf("got %d %+v (fresh key %q)", r.code, e, fresh)
+			}
+		})
+	}
+}
+
+// A missing mount directory is reported before the ticket is exchanged.
+func TestMountChecksTheDirectoryBeforeUsingTheTicket(t *testing.T) {
+	api := newFakeAPI(t, nil)
+	isolateConfig(t)
+	stdin, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdin
+	os.Stdin = stdin
+	defer func() { os.Stdin = saved }()
+	fmt.Fprintln(w, "mtbltk_unusedticket")
+	w.Close()
+
+	r := runCLI(t, "mount", "--ticket-stdin", "--json", t.TempDir()+"/missing")
+	e := jsonError(t, r)
+	if r.code != 1 || e.Code != "mount_failed" || !strings.Contains(e.Hint, "mkdir -p") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("the ticket was used: %v", calls)
 	}
 }

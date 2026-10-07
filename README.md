@@ -48,7 +48,9 @@ Deleting a filesystem is done in the console.
 ### Output, errors and exit codes
 
 - `--json` on every command writes one JSON document to stdout, with the
-  API's field names. Diagnostics go to stderr. Nothing ever prompts.
+  API's field names (`help --json` writes `{"usage": …}`). Diagnostics go to
+  stderr. Nothing ever prompts. The exception is `mountable mcp`, whose stdout
+  is the MCP protocol.
 - `mountable mount --json` writes JSON lines as the mount progresses:
   `{"event":"mounted","path":…,"filesystem_id":…,"mode":…}` once the mount is
   usable, and `{"event":"unmounted","reason":"signal|unmount|revoked|expired|error","detail":…}`
@@ -69,7 +71,10 @@ Deleting a filesystem is done in the console.
 - Reads (`list`, `usage`) are safe to retry.
 - `ticket create` sends an idempotency key: the one given with
   `--idempotency-key`, or a random one it prints to stderr before sending.
-  Retry with the same key after a timeout. A replay returns the existing
+  Retry with the same key after a timeout. When the outcome is unknown
+  (`network_error` or `outcome_unknown`), the error's `idempotency_key` is the
+  key that request was sent with: retry with exactly that key. A replay
+  returns the existing
   session without a ticket:
   - still `requested`: its ticket was lost. The CLI revokes that session,
     creates a new one with a fresh key and reports both session IDs
@@ -92,12 +97,15 @@ FS_ID=$(mountable fs create agent-workspace)
 mountable ticket create "$FS_ID" --idempotency-key job-42 --json   # → {"ticket": "mtbltk_…", …}
 
 # Sandbox, with the ticket in MOUNTABLE_TICKET
+mkdir -p /mnt/work
 printf '%s\n' "$MOUNTABLE_TICKET" | mountable mount --ticket-stdin --json /mnt/work &
 # wait for {"event":"mounted",…}, use /mnt/work, then:
 mountable unmount /mnt/work
 ```
 
-The ticket is read from stdin, so it never appears in an argument list.
+Any existing, writable directory works as the mount point; `mount` checks it
+before it uses the ticket. The ticket is read from stdin, so it never appears
+in an argument list.
 
 ## Skill
 
@@ -119,14 +127,28 @@ authenticates like the CLI. Results are the API's JSON; errors return the
 code and hint. Mounting stays a process in the sandbox:
 `create_mount_ticket` returns the ticket and the command that mounts with it.
 
-**Claude Code:**
+Give the server `MOUNTABLE_API_KEY` through its environment: inherited from
+the environment the MCP client starts in, or set in the client's MCP
+configuration under `env`. Never pass the key as a command-line argument,
+where it would end up in process listings and shell history.
 
-```sh
-claude mcp add mountable --env MOUNTABLE_API_KEY=mtbl_… -- npx -y mountable-cli mcp
+**Claude Code** (`.mcp.json` in the project; `${MOUNTABLE_API_KEY}` is taken
+from the environment Claude Code runs in, so the key stays out of the file):
+
+```json
+{
+  "mcpServers": {
+    "mountable": {
+      "command": "npx",
+      "args": ["-y", "mountable-cli", "mcp"],
+      "env": { "MOUNTABLE_API_KEY": "${MOUNTABLE_API_KEY}" }
+    }
+  }
+}
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`) and **Cursor**
-(`~/.cursor/mcp.json` or `.cursor/mcp.json`):
+(`~/.cursor/mcp.json`); keep these files private, since they hold the key:
 
 ```json
 {
