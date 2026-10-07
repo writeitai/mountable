@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,7 +38,7 @@ func TestLoginRetriesDroppedPoll(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if err := login(); err != nil {
+	if err := login(io.Discard); err != nil {
 		t.Fatalf("login: %v", err)
 	}
 	if n := polls.Load(); n != 3 {
@@ -60,7 +61,7 @@ func TestLoginStopsOnAPIError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if err := login(); err == nil {
+	if err := login(io.Discard); err == nil {
 		t.Fatal("login succeeded after access_denied")
 	}
 }
@@ -79,7 +80,7 @@ func TestLoginReportsMalformedResponse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	err := login()
+	err := login(io.Discard)
 	if err == nil || strings.Contains(err.Error(), "expired") {
 		t.Fatalf("login error = %v, want the decoding error", err)
 	}

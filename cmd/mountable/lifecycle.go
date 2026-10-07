@@ -76,10 +76,13 @@ type lifecycle struct {
 	renewed  <-chan struct{}
 	notAfter func() time.Time
 	timeout  time.Duration // for the ordinary shutdown
+	// ended is the event that ended the mount, once run returns.
+	ended event
 }
 
 func (l *lifecycle) run() error {
 	ev := l.wait()
+	l.ended = ev
 	switch endingFor(ev) {
 	case endFinish:
 		return l.shutdown(false)
@@ -165,6 +168,23 @@ func (l *lifecycle) abort(why string) error {
 		return fmt.Errorf("%s, and the mount could not be fully aborted (%s): it ends when this process exits; writes not yet committed may be lost", why, oneLine(err))
 	}
 	return fmt.Errorf("%s; the mount was aborted and writes not yet committed may be lost", why)
+}
+
+// endReason names why the mount ended, for the "unmounted" event: what
+// ended it, or "error" when an ordinary ending (unmount, signal) failed.
+func (l *lifecycle) endReason(err error) string {
+	switch {
+	case l.ended == eventRevoked:
+		return "revoked"
+	case l.ended == eventExpired:
+		return "expired"
+	case err != nil:
+		return "error"
+	case l.ended == eventSignal:
+		return "signal"
+	default:
+		return "unmount"
+	}
 }
 
 func reason(ev event) string {

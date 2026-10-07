@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -84,7 +85,8 @@ func accessToken() (string, error) {
 	return t.AccessToken, saveCredentials(t)
 }
 
-func login() error {
+// login signs this machine in, writing its instructions to w.
+func login(w io.Writer) error {
 	host, _ := os.Hostname()
 	var code struct {
 		DeviceCode              string `json:"device_code"`
@@ -98,7 +100,7 @@ func login() error {
 	}, &code); err != nil {
 		return err
 	}
-	fmt.Printf("Open %s\nand check that it shows the code %s\n", code.VerificationURIComplete, code.UserCode)
+	fmt.Fprintf(w, "Open %s\nand check that it shows the code %s\n", code.VerificationURIComplete, code.UserCode)
 	deadline := time.Now().Add(time.Duration(code.ExpiresIn) * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Duration(code.Interval) * time.Second)
@@ -120,7 +122,7 @@ func login() error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("Signed in.")
+		fmt.Fprintln(w, "Signed in.")
 		return saveCredentials(t)
 	}
 	return errors.New("the code expired; run `mountable login` again")
@@ -129,7 +131,7 @@ func login() error {
 func logout() error {
 	token, err := accessToken()
 	if err != nil {
-		return err
+		return &cliError{Code: "unauthenticated", Message: err.Error()}
 	}
 	if err := call("POST", "/auth/cli/sign-out", token, nil, nil); err != nil {
 		return err

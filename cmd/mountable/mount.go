@@ -12,10 +12,11 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
-	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -35,38 +36,46 @@ type mountCredentials struct {
 	Mode                 string `json:"mode"`
 }
 
-func mountCommand(args []string) error {
-	flags := flag.NewFlagSet("mount", flag.ContinueOnError)
-	readOnly := flags.Bool("ro", false, "mount read-only")
-	ticketStdin := flags.Bool("ticket-stdin", false, "read a mount ticket from stdin")
-	if err := flags.Parse(args); err != nil {
+func mountCommand(o *output, args []string) error {
+	f := newFlags("mount [--ro] FS_ID DIR | mountable mount --ticket-stdin DIR")
+	readOnly := f.Bool("ro", false, "mount read-only")
+	ticketStdin := f.Bool("ticket-stdin", false, "read a mount ticket from stdin")
+	positional, err := f.parse(args, -1)
+	if err != nil {
 		return err
 	}
 	var ticket, dir string
 	switch {
-	case *ticketStdin && flags.NArg() == 1:
-		dir = flags.Arg(0)
+	case *ticketStdin && len(positional) == 1:
+		dir = positional[0]
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil && line == "" {
 			return fmt.Errorf("reading ticket: %w", err)
 		}
 		ticket = strings.TrimSpace(line)
-	case !*ticketStdin && flags.NArg() == 2:
-		dir = flags.Arg(1)
+	case !*ticketStdin && len(positional) == 2:
+		dir = positional[1]
 		var err error
-		if ticket, err = createSession(flags.Arg(0), *readOnly); err != nil {
+		if ticket, err = createSession(positional[0], *readOnly); err != nil {
 			return err
 		}
 	default:
-		return errors.New("usage: mountable mount [--ro] FILESYSTEM_ID DIR | mountable mount --ticket-stdin DIR")
+		return usageError(f.usage)
 	}
-	return mount(ticket, dir)
+	err = mount(o, ticket, dir)
+	var api *apiError
+	var network *url.Error
+	var reported *alreadyReported
+	if err == nil || errors.As(err, &api) || errors.As(err, &network) || errors.As(err, &reported) {
+		return err
+	}
+	return &cliError{Code: "mount_failed", Message: err.Error()}
 }
 
 func createSession(filesystemID string, readOnly bool) (string, error) {
 	token, err := accessToken()
 	if err != nil {
-		return "", err
+		return "", &cliError{Code: "unauthenticated", Message: err.Error()}
 	}
 	mode := "rw"
 	if readOnly {
@@ -81,7 +90,9 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 	return created.Ticket, err
 }
 
-func mount(ticket, dir string) error {
+// mount mounts until the mount ends. With --json it writes the events
+// "mounted" and "unmounted" as JSON lines.
+func mount(o *output, ticket, dir string) error {
 	dir, err := canonicalDir(dir)
 	if err != nil {
 		return err
@@ -130,7 +141,18 @@ func mount(ticket, dir string) error {
 		}
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "mountable: mounted at %s\n", e.dir)
+	fmt.Fprintf(o.stderr, "mountable: mounted at %s\n", e.dir)
+	if o.json {
+		mode := "rw"
+		if session.readOnly {
+			mode = "ro"
+		}
+		if err := o.emit(map[string]string{
+			"event": "mounted", "path": e.dir, "filesystem_id": path.Base(session.root), "mode": mode,
+		}); err != nil {
+			fmt.Fprintln(o.stderr, "mountable: writing the mounted event:", err)
+		}
+	}
 
 	ctx, stopWatching := context.WithCancel(context.Background())
 	defer stopWatching() // cancels any outstanding renewal or gateway check
@@ -145,9 +167,23 @@ func mount(ticket, dir string) error {
 		timeout:  shutdownTimeout,
 	}
 	if interrupted {
-		return l.shutdown(true)
+		l.ended = eventSignal
+		err = l.shutdown(true)
+	} else {
+		err = l.run()
 	}
-	return l.run()
+	if !o.json {
+		return err
+	}
+	detail := ""
+	if err != nil {
+		detail = redact(err.Error())
+	}
+	_ = o.emit(map[string]string{"event": "unmounted", "reason": l.endReason(err), "detail": detail})
+	if err != nil {
+		return &alreadyReported{err}
+	}
+	return nil
 }
 
 // startedSession is a session exchanged for its first certificate, with

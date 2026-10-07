@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,9 +29,21 @@ var httpClient = &http.Client{Timeout: 60 * time.Second}
 type apiError struct {
 	Status int
 	Code   string
+	// URL is where a person settles payment_required.
+	URL string
+	// Message describes a rejected request (HTTP 422).
+	Message string
+	// RetryAfter is how many seconds to wait after rate_limited.
+	RetryAfter int
 }
 
-func (e *apiError) Error() string { return fmt.Sprintf("api: %d %s", e.Status, e.Code) }
+func (e *apiError) Error() string {
+	msg := fmt.Sprintf("api: %d %s", e.Status, e.Code)
+	if e.Message != "" {
+		msg += ": " + e.Message
+	}
+	return msg
+}
 
 func call(method, path, token string, body any, out any) error {
 	return callContext(context.Background(), method, path, token, body, out)
@@ -78,21 +91,45 @@ func do(req *http.Request, out any) error {
 		return err
 	}
 	if resp.StatusCode >= 300 {
-		var problem struct {
-			Error  string `json:"error"`
-			Detail struct {
-				Code string `json:"code"`
-			} `json:"detail"`
-		}
-		_ = json.Unmarshal(data, &problem)
-		code := problem.Detail.Code
-		if code == "" {
-			code = problem.Error
-		}
-		return &apiError{Status: resp.StatusCode, Code: code}
+		return parseAPIError(resp, data)
 	}
 	if out == nil || len(data) == 0 {
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+// parseAPIError reads the API's error forms: {"detail": {"code": …}},
+// {"detail": [validation errors]} and the device flow's {"error": …}.
+func parseAPIError(resp *http.Response, data []byte) *apiError {
+	var problem struct {
+		Error  string          `json:"error"`
+		Detail json.RawMessage `json:"detail"`
+	}
+	_ = json.Unmarshal(data, &problem)
+	e := &apiError{Status: resp.StatusCode, Code: problem.Error}
+	var detail struct {
+		Code       string `json:"code"`
+		URL        string `json:"url"`
+		RetryAfter int    `json:"retry_after"`
+	}
+	if json.Unmarshal(problem.Detail, &detail) == nil && detail.Code != "" {
+		e.Code, e.URL, e.RetryAfter = detail.Code, detail.URL, detail.RetryAfter
+	}
+	var invalid []struct {
+		Loc []any  `json:"loc"`
+		Msg string `json:"msg"`
+	}
+	if resp.StatusCode == http.StatusUnprocessableEntity && json.Unmarshal(problem.Detail, &invalid) == nil && len(invalid) > 0 {
+		e.Code = "invalid_request"
+		loc := make([]string, 0, len(invalid[0].Loc))
+		for _, part := range invalid[0].Loc {
+			loc = append(loc, fmt.Sprint(part))
+		}
+		e.Message = strings.Join(loc, ".") + ": " + invalid[0].Msg
+	}
+	if e.RetryAfter == 0 {
+		e.RetryAfter, _ = strconv.Atoi(resp.Header.Get("Retry-After"))
+	}
+	return e
 }
