@@ -682,7 +682,7 @@ func TestEveryErrorFieldIsRedacted(t *testing.T) {
 			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
 		}
 		if strings.HasSuffix(args[len(args)-1], "json") {
-			if e := jsonError(t, r); args[3] == "mtbl_keysecret" && (e.IdempotencyKey != "mtbl_[redacted]" || !json.Valid(e.Session) || !strings.Contains(string(e.Session), `"created_by":"mtblat_[redacted]"`) || !strings.Contains(string(e.Session), `"note":"mtbl_[redacted]"`)) {
+			if e := jsonError(t, r); args[4] == "mtbl_keysecret" && (e.IdempotencyKey != "mtbl_[redacted]" || !json.Valid(e.Session) || !strings.Contains(string(e.Session), `"created_by":"mtblat_[redacted]"`) || !strings.Contains(string(e.Session), `"note":"mtbl_[redacted]"`)) {
 				t.Fatalf("%v: %+v", args, e)
 			}
 		}
