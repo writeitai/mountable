@@ -210,10 +210,7 @@ func TestFailedCleanUnmountAborts(t *testing.T) {
 
 // Diagnostics written outside a command's output are redacted.
 func TestDiagnosticsAreRedacted(t *testing.T) {
-	var buf syncBuffer
-	saved := diagnostics
-	diagnostics = &buf
-	defer func() { diagnostics = saved }()
+	buf := captureDiagnostics(t)
 	h := newHarness(time.Hour)
 	h.e.unmountFn = func() error { return errors.New("busy with " + testJWT) }
 	h.signals <- syscall.SIGTERM

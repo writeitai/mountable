@@ -18,8 +18,15 @@ const (
 	testLogin = "mtblat_testloginsecret"
 	// testJWT is an access token shaped like the API's JWTs.
 	testJWT = "mtblat_eyJhbGciOi.eyJzdWIi.c2lnbmF0dXJl"
-	orgA    = "11111111-1111-1111-1111-111111111111"
-	orgB    = "22222222-2222-2222-2222-222222222222"
+	// testGeneration is the generation of useLogin's login.
+	testGeneration = "gen-1"
+	// escapedSession hides secrets behind JSON escapes: in a value, behind
+	// an escaped prefix, and in a key.
+	escapedSession = `{"id":"s1","state":"active","ticket":null,` +
+		`"created_by":"mtblat_eyJhead\u002epayloadsecret\u002esignaturesecret",` +
+		`"note":"mtbl\u005fhiddensecret","mtbl_keyinkeysecret":1}`
+	orgA = "11111111-1111-1111-1111-111111111111"
+	orgB = "22222222-2222-2222-2222-222222222222"
 )
 
 // syncBuffer is a buffer the fake API may read while a command writes it.
@@ -100,9 +107,24 @@ func useAPIKey(t *testing.T) {
 func useLogin(t *testing.T) {
 	t.Setenv("MOUNTABLE_API_KEY", "")
 	isolateConfig(t)
-	if err := saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: 3600}); err != nil {
+	if err := saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: 3600}, testGeneration); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// captureDiagnostics collects diagnostics until the test ends.
+func captureDiagnostics(t *testing.T) *syncBuffer {
+	buf := &syncBuffer{}
+	diagnosticsMu.Lock()
+	saved := diagnostics
+	diagnostics = buf
+	diagnosticsMu.Unlock()
+	t.Cleanup(func() {
+		diagnosticsMu.Lock()
+		diagnostics = saved
+		diagnosticsMu.Unlock()
+	})
+	return buf
 }
 
 func isolateConfig(t *testing.T) {
@@ -623,6 +645,16 @@ func TestJWTRedactedInErrors(t *testing.T) {
 	}
 }
 
+// leaksEscapedSecret reports whether s shows a secret from escapedSession.
+func leaksEscapedSecret(s string) bool {
+	for _, secret := range []string{"payloadsecret", "signaturesecret", "hiddensecret", "keyinkeysecret"} {
+		if strings.Contains(s, secret) {
+			return true
+		}
+	}
+	return false
+}
+
 // Every field of a reported error is redacted: the API's code, the
 // idempotency key and the session carried by ticket_already_used.
 func TestEveryErrorFieldIsRedacted(t *testing.T) {
@@ -632,7 +664,7 @@ func TestEveryErrorFieldIsRedacted(t *testing.T) {
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body["idempotency_key"] == "mtbl_keysecret" {
-				reply(201, `{"id":"s1","state":"active","ticket":null,"created_by":"`+testJWT+`"}`)(w, r)
+				reply(201, escapedSession)(w, r)
 				return
 			}
 			reply(400, `{"detail":{"code":"bad_`+testJWT+`"}}`)(w, r)
@@ -646,11 +678,11 @@ func TestEveryErrorFieldIsRedacted(t *testing.T) {
 	} {
 		r := runCLI(t, args...)
 		out := r.stdout + r.stderr
-		if r.code != 1 || strings.Contains(out, "keysecret") || strings.Contains(out, "eyJ") || !strings.Contains(out, "_[redacted]") {
+		if r.code != 1 || leaksEscapedSecret(out) || strings.Contains(out, "keysecret") || strings.Contains(out, "eyJ") || !strings.Contains(out, "_[redacted]") {
 			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
 		}
 		if strings.HasSuffix(args[len(args)-1], "json") {
-			if e := jsonError(t, r); args[3] == "mtbl_keysecret" && (e.IdempotencyKey != "mtbl_[redacted]" || !json.Valid(e.Session) || !strings.Contains(string(e.Session), `"created_by":"mtblat_[redacted]"`)) {
+			if e := jsonError(t, r); args[3] == "mtbl_keysecret" && (e.IdempotencyKey != "mtbl_[redacted]" || !json.Valid(e.Session) || !strings.Contains(string(e.Session), `"created_by":"mtblat_[redacted]"`) || !strings.Contains(string(e.Session), `"note":"mtbl_[redacted]"`)) {
 				t.Fatalf("%v: %+v", args, e)
 			}
 		}

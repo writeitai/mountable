@@ -94,6 +94,7 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 // mount mounts until the mount ends. With --json it writes the events
 // "mounted" and "unmounted" as JSON lines.
 func mount(o *output, ticket, dir string) error {
+	defer flushEngineLog()
 	dir, err := canonicalDir(dir)
 	if err != nil {
 		return err
@@ -304,7 +305,7 @@ func unmount(dir string) error {
 		return nil
 	}
 	why := fmt.Sprintf("%s could not be unmounted cleanly (%s)", dir, oneLine(err))
-	note(diagnostics, "%s; aborting the mount", why)
+	diagnose("%s; aborting the mount", why)
 	if err := abortMount(dir); err != nil {
 		return fmt.Errorf("%s, and the mount could not be fully aborted (%s); writes not yet committed may be lost", why, oneLine(err))
 	}

@@ -165,7 +165,7 @@ func TestMCPErrorsCarryCodeAndHint(t *testing.T) {
 func TestMCPErrorFieldsAreRedacted(t *testing.T) {
 	useAPIKey(t)
 	newFakeAPI(t, map[string]http.HandlerFunc{
-		"POST /api/v1/mount-sessions": reply(201, `{"id":"s1","state":"active","ticket":null,"created_by":"`+testJWT+`"}`),
+		"POST /api/v1/mount-sessions": reply(201, escapedSession),
 	})
 	s := connectMCP(t)
 	text, isError := callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "mtbl_keysecret"})
@@ -173,7 +173,7 @@ func TestMCPErrorFieldsAreRedacted(t *testing.T) {
 		Error cliError `json:"error"`
 	}
 	if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != "ticket_already_used" ||
-		out.Error.IdempotencyKey != "mtbl_[redacted]" || strings.Contains(text, "keysecret") ||
+		out.Error.IdempotencyKey != "mtbl_[redacted]" || strings.Contains(text, "keysecret") || leaksEscapedSecret(text) ||
 		!strings.Contains(string(out.Error.Session), `"created_by":"mtblat_[redacted]"`) {
 		t.Fatalf("result = %v %s", isError, text)
 	}

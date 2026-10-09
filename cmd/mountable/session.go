@@ -57,7 +57,7 @@ func (s *mountSession) watch(ctx context.Context, revoked chan<- struct{}) {
 			var err error
 			gone, err = s.renew(ctx)
 			if !gone && err != nil && ctx.Err() == nil {
-				note(diagnostics, "renewal failed, retrying: %v", err)
+				diagnose("renewal failed, retrying: %v", err)
 			}
 		case <-check.C:
 			gone = s.rejected(ctx)

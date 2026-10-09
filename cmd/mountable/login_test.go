@@ -149,7 +149,7 @@ func TestRefusedLoginIsRefreshedAndRetried(t *testing.T) {
 		t.Fatalf("bodies = %v", api.bodies)
 	}
 	c, err := loadCredentials()
-	if err != nil || c.AccessToken != testJWT || c.RefreshToken != "mtblrt_rotated" {
+	if err != nil || c.AccessToken != testJWT || c.RefreshToken != "mtblrt_rotated" || c.Generation != testGeneration {
 		t.Fatalf("saved %+v, %v", c, err)
 	}
 	// The next command uses the saved login without refreshing.
@@ -249,13 +249,13 @@ func TestConcurrentRefreshRedeemsOnce(t *testing.T) {
 		expiresIn int
 		get       func() (string, error)
 	}{
-		{"expiry", 0, accessToken},
-		{"refusal", 3600, func() (string, error) { return refreshRejected(testLogin) }},
+		{"expiry", 0, func() (string, error) { token, _, err := accessToken(); return token, err }},
+		{"refusal", 3600, func() (string, error) { return refreshRejected(testLogin, testGeneration) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refreshes := rotatingTokenAPI(t)
 			isolateConfig(t)
-			if err := saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: tc.expiresIn}); err != nil {
+			if err := saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: tc.expiresIn}, testGeneration); err != nil {
 				t.Fatal(err)
 			}
 			var wg sync.WaitGroup
@@ -299,7 +299,7 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: 3600})
+		done <- saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: 3600}, testGeneration)
 	}()
 	select {
 	case <-done:
@@ -334,7 +334,7 @@ func TestCredentialsAreReplacedOwnerOnly(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}); err != nil {
+	if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}, testGeneration); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -351,5 +351,46 @@ func TestCredentialsAreReplacedOwnerOnly(t *testing.T) {
 	}
 	if !slices.Equal(names, []string{"credentials.json", "credentials.json.lock"}) {
 		t.Fatalf("files = %v", names)
+	}
+}
+
+// A new `mountable login` saved while a request was in flight is not used
+// to retry that request: it may be another account.
+func TestRefusedRequestIsNotRetriedUnderANewLogin(t *testing.T) {
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET /api/v1/orgs/" + orgA + "/filesystems": func(w http.ResponseWriter, r *http.Request) {
+			if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}, "gen-2"); err != nil {
+				t.Error(err)
+			}
+			reply(401, `{"detail":{"code":"unauthenticated"}}`)(w, r)
+		},
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	useLogin(t)
+	r := runCLI(t, "fs", "list", "--json")
+	if e := jsonError(t, r); r.code != 1 || e.Code != "unauthenticated" || !strings.Contains(e.Hint, "mountable login") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	if calls := api.called(); len(calls) != 1 || api.auth[0] != "Bearer "+testLogin {
+		t.Fatalf("calls = %v %v", calls, api.auth)
+	}
+}
+
+// A login saved while logout's sign-out was in flight survives the logout.
+func TestLogoutKeepsALoginSavedMeanwhile(t *testing.T) {
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /auth/cli/sign-out": func(w http.ResponseWriter, r *http.Request) {
+			if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}, "gen-2"); err != nil {
+				t.Error(err)
+			}
+			reply(204, "")(w, r)
+		},
+	})
+	useLogin(t)
+	if r := runCLI(t, "logout", "--json"); r.code != 0 {
+		t.Fatalf("logout = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if c, err := loadCredentials(); err != nil || c.Generation != "gen-2" || c.AccessToken != testJWT {
+		t.Fatalf("the new login was removed: %+v, %v", c, err)
 	}
 }

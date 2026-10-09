@@ -22,6 +22,9 @@ type credentials struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	// Generation identifies one `mountable login`; refreshes keep it. A
+	// request is retried only under the login it started with.
+	Generation string `json:"generation"`
 }
 
 type tokenResponse struct {
@@ -72,20 +75,21 @@ func withCredentials(fn func() error) error {
 	return fn()
 }
 
-func saveCredentials(t tokenResponse) error {
-	return withCredentials(func() error { return writeCredentials(t) })
+func saveCredentials(t tokenResponse, generation string) error {
+	return withCredentials(func() error { return writeCredentials(t, generation) })
 }
 
 // writeCredentials replaces the credentials file atomically with an
 // owner-only one. The caller holds the credentials lock.
-func writeCredentials(t tokenResponse) error {
+func writeCredentials(t tokenResponse, generation string) error {
 	path, err := credentialsPath()
 	if err != nil {
 		return err
 	}
 	data, err := json.Marshal(credentials{
 		API: apiURL(), AccessToken: t.AccessToken, RefreshToken: t.RefreshToken,
-		ExpiresAt: time.Now().Add(time.Duration(t.ExpiresIn) * time.Second),
+		ExpiresAt:  time.Now().Add(time.Duration(t.ExpiresIn) * time.Second),
+		Generation: generation,
 	})
 	if err != nil {
 		return err
@@ -116,13 +120,15 @@ func writeCredentials(t tokenResponse) error {
 	return nil
 }
 
-// accessToken returns a valid access token, refreshing it when needed.
-func accessToken() (token string, err error) {
+// accessToken returns a valid access token, refreshing it when needed, and
+// the generation of the login it belongs to.
+func accessToken() (token, generation string, err error) {
 	err = withCredentials(func() error {
 		c, err := loadCredentials()
 		if err != nil {
 			return err
 		}
+		generation = c.Generation
 		if time.Until(c.ExpiresAt) > time.Minute {
 			token = c.AccessToken
 			return nil
@@ -130,17 +136,21 @@ func accessToken() (token string, err error) {
 		token, err = refresh(c)
 		return err
 	})
-	return token, err
+	return token, generation, err
 }
 
-// refreshRejected returns a new access token after the API refused
-// rejected: the stored one, when another caller has already replaced
-// rejected, otherwise a refreshed one.
-func refreshRejected(rejected string) (token string, err error) {
+// refreshRejected returns a new access token for the same login after the
+// API refused rejected: the stored one, when another caller has already
+// refreshed this login, otherwise a refreshed one. It fails when the stored
+// login is no longer generation (a new `mountable login` or a logout).
+func refreshRejected(rejected, generation string) (token string, err error) {
 	err = withCredentials(func() error {
 		c, err := loadCredentials()
 		if err != nil {
 			return err
+		}
+		if c.Generation != generation {
+			return errors.New("signed in again since the request was made")
 		}
 		if c.AccessToken != rejected {
 			token = c.AccessToken
@@ -184,7 +194,7 @@ func refresh(c credentials) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("session ended (%v); run `mountable login`", err)
 	}
-	return t.AccessToken, writeCredentials(t)
+	return t.AccessToken, writeCredentials(t, c.Generation)
 }
 
 // login signs this machine in, writing its instructions to w.
@@ -224,7 +234,7 @@ func login(w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := saveCredentials(t); err != nil {
+		if err := saveCredentials(t, randomHex(16)); err != nil {
 			return err
 		}
 		fmt.Fprintln(w, "Signed in.")
@@ -233,6 +243,8 @@ func login(w io.Writer) error {
 	return errors.New("the code expired; run `mountable login` again")
 }
 
+// logout signs the login out and removes it, unless a new login replaced
+// it while the sign-out was in flight.
 func logout() error {
 	c, err := loginClient("")
 	if err != nil {
@@ -242,6 +254,10 @@ func logout() error {
 		return err
 	}
 	return withCredentials(func() error {
+		stored, err := loadCredentials()
+		if err != nil || stored.Generation != c.generation {
+			return nil // already removed, or a newer login: keep it
+		}
 		path, err := credentialsPath()
 		if err != nil {
 			return err
