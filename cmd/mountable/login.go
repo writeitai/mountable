@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,29 +55,57 @@ func saveCredentials(t tokenResponse) error {
 
 // accessToken returns a valid access token, refreshing it when needed.
 func accessToken() (string, error) {
-	path, err := credentialsPath()
+	c, err := loadCredentials()
 	if err != nil {
 		return "", err
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", errors.New("not signed in; run `mountable login`")
-	}
-	if err != nil {
-		return "", err
-	}
-	var c credentials
-	if err := json.Unmarshal(data, &c); err != nil {
-		return "", err
-	}
-	if c.API != apiURL() {
-		return "", fmt.Errorf("signed in to %s, not %s; run `mountable login`", c.API, apiURL())
 	}
 	if time.Until(c.ExpiresAt) > time.Minute {
 		return c.AccessToken, nil
 	}
+	return refresh(c)
+}
+
+// refreshRejected returns a new access token after the API refused
+// rejected: the stored one, when another process has already replaced
+// rejected, otherwise a refreshed one.
+func refreshRejected(rejected string) (string, error) {
+	c, err := loadCredentials()
+	if err != nil {
+		return "", err
+	}
+	if c.AccessToken != rejected {
+		return c.AccessToken, nil
+	}
+	return refresh(c)
+}
+
+func loadCredentials() (credentials, error) {
+	var c credentials
+	path, err := credentialsPath()
+	if err != nil {
+		return c, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return c, errors.New("not signed in; run `mountable login`")
+	}
+	if err != nil {
+		return c, err
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		return c, err
+	}
+	if c.API != apiURL() {
+		return c, fmt.Errorf("signed in to %s, not %s; run `mountable login`", c.API, apiURL())
+	}
+	return c, nil
+}
+
+// refresh exchanges the refresh token for a new pair and saves it; the
+// refresh token rotates.
+func refresh(c credentials) (string, error) {
 	var t tokenResponse
-	err = postForm("/auth/device/token", url.Values{
+	err := postForm("/auth/device/token", url.Values{
 		"grant_type": {"refresh_token"}, "refresh_token": {c.RefreshToken},
 	}, &t)
 	if err != nil {
@@ -129,11 +158,11 @@ func login(w io.Writer) error {
 }
 
 func logout() error {
-	token, err := accessToken()
+	c, err := loginClient("")
 	if err != nil {
-		return &cliError{Code: "unauthenticated", Message: err.Error()}
+		return err
 	}
-	if err := call("POST", "/auth/cli/sign-out", token, nil, nil); err != nil {
+	if err := c.call(context.Background(), "POST", "/auth/cli/sign-out", nil, nil); err != nil {
 		return err
 	}
 	path, err := credentialsPath()

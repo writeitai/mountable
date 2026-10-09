@@ -16,8 +16,10 @@ import (
 const (
 	testKey   = "mtbl_testkeysecret"
 	testLogin = "mtblat_testloginsecret"
-	orgA      = "11111111-1111-1111-1111-111111111111"
-	orgB      = "22222222-2222-2222-2222-222222222222"
+	// testJWT is an access token shaped like the API's JWTs.
+	testJWT = "mtblat_eyJhbGciOi.eyJzdWIi.c2lnbmF0dXJl"
+	orgA    = "11111111-1111-1111-1111-111111111111"
+	orgB    = "22222222-2222-2222-2222-222222222222"
 )
 
 // syncBuffer is a buffer the fake API may read while a command writes it.
@@ -125,7 +127,7 @@ func runWith(t *testing.T, stdout, stderr *syncBuffer, args ...string) result {
 	t.Helper()
 	code := run(args, stdout, stderr)
 	r := result{stdout: stdout.String(), stderr: stderr.String(), code: code}
-	for _, secret := range []string{testKey, testLogin, "mtblrt_refreshsecret"} {
+	for _, secret := range []string{testKey, testLogin, testJWT, "eyJzdWIi", "mtblrt_refreshsecret", "mtblrt_rotated"} {
 		if strings.Contains(r.stdout+r.stderr, secret) {
 			t.Fatalf("%v leaked a credential:\nstdout: %s\nstderr: %s", args, r.stdout, r.stderr)
 		}
@@ -587,10 +589,33 @@ func TestRedact(t *testing.T) {
 		"key mtbl_abc-DEF_1 refused":    "key mtbl_[redacted] refused",
 		"ticket mtbltk_xyz":             "ticket mtbltk_[redacted]",
 		"tokens mtblat_a and mtblrt_b.": "tokens mtblat_[redacted] and mtblrt_[redacted].",
+		"jwt " + testJWT + " refused":   "jwt mtblat_[redacted] refused",
+		"jwt " + testJWT + ".":          "jwt mtblat_[redacted].",
+		"(" + testJWT + "), then":       "(mtblat_[redacted]), then",
+		"odd mtblat_a..b.c-d_e":         "odd mtblat_[redacted]",
 		"nothing secret here":           "nothing secret here",
 	} {
 		if got := redact(in); got != want {
 			t.Errorf("redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A JWT-shaped token in an error is redacted whole, payload and signature
+// included, in plain and JSON output.
+func TestJWTRedactedInErrors(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": reply(422, `{"detail":[{"loc":["body","mode"],"msg":"bad value `+testJWT+`.","type":"x"}]}`),
+	})
+	for _, args := range [][]string{
+		{"ticket", "create", "fsone", "--idempotency-key", "k", "--json"},
+		{"ticket", "create", "fsone", "--idempotency-key", "k"},
+	} {
+		r := runCLI(t, args...)
+		out := r.stdout + r.stderr
+		if r.code != 1 || strings.Contains(out, "eyJ") || strings.Contains(out, "c2lnbmF0dXJl") || !strings.Contains(out, "bad value mtblat_[redacted].") {
+			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
 		}
 	}
 }

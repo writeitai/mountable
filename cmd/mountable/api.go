@@ -45,10 +45,6 @@ func (e *apiError) Error() string {
 	return msg
 }
 
-func call(method, path, token string, body any, out any) error {
-	return callContext(context.Background(), method, path, token, body, out)
-}
-
 func callContext(ctx context.Context, method, path, token string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {

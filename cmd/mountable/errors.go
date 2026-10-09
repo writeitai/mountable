@@ -102,7 +102,11 @@ func toCLIError(err error) *cliError {
 
 // Every secret the API issues starts with "mtbl": API keys (mtbl_), login
 // tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
-var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_-]+`)
+// An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so a
+// secret runs up to the first character outside [A-Za-z0-9_.-]. A dot is
+// part of it only when another secret character follows, so a full stop
+// after a secret stays in the sentence.
+var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_-]+(?:\.+[A-Za-z0-9_-]+)*`)
 
 // redact removes anything shaped like a Mountable secret from s.
 func redact(s string) string {

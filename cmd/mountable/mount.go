@@ -74,9 +74,9 @@ func mountCommand(o *output, args []string) error {
 }
 
 func createSession(filesystemID string, readOnly bool) (string, error) {
-	token, err := accessToken()
+	c, err := loginClient("")
 	if err != nil {
-		return "", &cliError{Code: "unauthenticated", Message: err.Error()}
+		return "", err
 	}
 	mode := "rw"
 	if readOnly {
@@ -85,7 +85,7 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 	var created struct {
 		Ticket string `json:"ticket"`
 	}
-	err = call("POST", "/api/v1/mount-sessions", token, map[string]any{
+	err = c.call(context.Background(), "POST", "/api/v1/mount-sessions", map[string]any{
 		"filesystem_id": filesystemID, "mode": mode, "idempotency_key": randomHex(16),
 	}, &created)
 	return created.Ticket, err

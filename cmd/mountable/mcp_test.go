@@ -40,7 +40,7 @@ func callTool(t *testing.T, s *mcp.ClientSession, name string, args map[string]a
 		t.Fatalf("%s: %d content blocks", name, len(res.Content))
 	}
 	text := res.Content[0].(*mcp.TextContent).Text
-	for _, secret := range []string{testKey, testLogin} {
+	for _, secret := range []string{testKey, testLogin, testJWT, "eyJzdWIi"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("%s leaked a credential: %s", name, text)
 		}

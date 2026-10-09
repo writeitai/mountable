@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 )
@@ -26,6 +27,11 @@ func newClient(org string) (*client, error) {
 	if key := os.Getenv("MOUNTABLE_API_KEY"); key != "" {
 		return &client{token: key, apiKey: true, org: org}, nil
 	}
+	return loginClient(org)
+}
+
+// loginClient authenticates with the login from `mountable login`.
+func loginClient(org string) (*client, error) {
 	token, err := accessToken()
 	if err != nil {
 		return nil, &cliError{Code: "unauthenticated", Message: err.Error()}
@@ -33,8 +39,28 @@ func newClient(org string) (*client, error) {
 	return &client{token: token, org: org}, nil
 }
 
+// call sends one request. When the API refuses a login's access token
+// before it expires (e.g. it was revoked or the API's keys rotated), call
+// refreshes the login once and sends the request once more; the request is
+// rebuilt, so its body is sent again in full. If the refresh fails, the
+// API's refusal is the error. An API key is never retried.
 func (c *client) call(ctx context.Context, method, path string, body any, out any) error {
+	err := callContext(ctx, method, path, c.token, body, out)
+	if c.apiKey || !unauthenticated(err) {
+		return err
+	}
+	token, refreshErr := refreshRejected(c.token)
+	if refreshErr != nil {
+		return err
+	}
+	c.token = token
 	return callContext(ctx, method, path, c.token, body, out)
+}
+
+// unauthenticated reports whether the API refused the credentials.
+func unauthenticated(err error) bool {
+	var api *apiError
+	return errors.As(err, &api) && (api.Status == http.StatusUnauthorized || api.Code == "unauthenticated")
 }
 
 type me struct {
