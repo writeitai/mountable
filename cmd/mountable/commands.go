@@ -45,9 +45,9 @@ func (o *output) fail(err error) int {
 	case o.json && !reported:
 		_ = o.emit(map[string]any{"error": e})
 	case !o.json:
-		fmt.Fprintf(o.stderr, "mountable: %s (%s)\n", e.Message, e.Code)
+		note(o.stderr, "%s (%s)", e.Message, e.Code)
 		if e.Hint != "" {
-			fmt.Fprintf(o.stderr, "mountable: hint: %s\n", e.Hint)
+			note(o.stderr, "hint: %s", e.Hint)
 		}
 	}
 	return e.exitCode()
@@ -236,7 +236,7 @@ func ticketCreate(o *output, args []string) error {
 		return err
 	}
 	raw, err := c.createTicket(context.Background(), positional[0], *readOnly, *key, func(key string) {
-		fmt.Fprintf(o.stderr, "mountable: idempotency key %s (retry with --idempotency-key %s)\n", key, key)
+		note(o.stderr, "idempotency key %s (retry with --idempotency-key %s)", key, key)
 	})
 	if err != nil {
 		return err
@@ -253,9 +253,9 @@ func ticketCreate(o *output, args []string) error {
 			return err
 		}
 		if s.Replaced != "" {
-			fmt.Fprintf(o.stderr, "mountable: revoked unused session %s, whose ticket was lost\n", s.Replaced)
+			note(o.stderr, "revoked unused session %s, whose ticket was lost", s.Replaced)
 		}
-		fmt.Fprintf(o.stderr, "mountable: session %s (%s); the ticket works once, until %s\n", s.ID, s.Mode, s.TicketExpiresAt)
+		note(o.stderr, "session %s (%s); the ticket works once, until %s", s.ID, s.Mode, s.TicketExpiresAt)
 		_, err := fmt.Fprintln(w, s.Ticket)
 		return err
 	})

@@ -163,7 +163,7 @@ func (l *lifecycle) abort(why string) error {
 		return fmt.Errorf("%s; writes not yet committed may be lost", why)
 	default:
 	}
-	fmt.Fprintf(os.Stderr, "mountable: %s; aborting the mount\n", why)
+	diagnose("%s; aborting the mount", why)
 	if err := l.e.abort(); err != nil {
 		return fmt.Errorf("%s, and the mount could not be fully aborted (%s): it ends when this process exits; writes not yet committed may be lost", why, oneLine(err))
 	}

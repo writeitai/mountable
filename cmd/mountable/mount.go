@@ -74,9 +74,9 @@ func mountCommand(o *output, args []string) error {
 }
 
 func createSession(filesystemID string, readOnly bool) (string, error) {
-	token, err := accessToken()
+	c, err := loginClient("")
 	if err != nil {
-		return "", &cliError{Code: "unauthenticated", Message: err.Error()}
+		return "", err
 	}
 	mode := "rw"
 	if readOnly {
@@ -85,7 +85,7 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 	var created struct {
 		Ticket string `json:"ticket"`
 	}
-	err = call("POST", "/api/v1/mount-sessions", token, map[string]any{
+	err = c.call(context.Background(), "POST", "/api/v1/mount-sessions", map[string]any{
 		"filesystem_id": filesystemID, "mode": mode, "idempotency_key": randomHex(16),
 	}, &created)
 	return created.Ticket, err
@@ -94,6 +94,7 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 // mount mounts until the mount ends. With --json it writes the events
 // "mounted" and "unmounted" as JSON lines.
 func mount(o *output, ticket, dir string) error {
+	defer flushEngineLog()
 	dir, err := canonicalDir(dir)
 	if err != nil {
 		return err
@@ -147,7 +148,7 @@ func mount(o *output, ticket, dir string) error {
 		}
 		return err
 	}
-	fmt.Fprintf(o.stderr, "mountable: mounted at %s\n", e.dir)
+	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
 		if session.readOnly {
@@ -156,7 +157,7 @@ func mount(o *output, ticket, dir string) error {
 		if err := o.emit(map[string]string{
 			"event": "mounted", "path": e.dir, "filesystem_id": path.Base(session.root), "mode": mode,
 		}); err != nil {
-			fmt.Fprintln(o.stderr, "mountable: writing the mounted event:", err)
+			note(o.stderr, "writing the mounted event: %v", err)
 		}
 	}
 
@@ -304,7 +305,7 @@ func unmount(dir string) error {
 		return nil
 	}
 	why := fmt.Sprintf("%s could not be unmounted cleanly (%s)", dir, oneLine(err))
-	fmt.Fprintf(os.Stderr, "mountable: %s; aborting the mount\n", why)
+	diagnose("%s; aborting the mount", why)
 	if err := abortMount(dir); err != nil {
 		return fmt.Errorf("%s, and the mount could not be fully aborted (%s); writes not yet committed may be lost", why, oneLine(err))
 	}

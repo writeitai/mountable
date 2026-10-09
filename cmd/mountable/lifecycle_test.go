@@ -208,6 +208,18 @@ func TestFailedCleanUnmountAborts(t *testing.T) {
 	}
 }
 
+// Diagnostics written outside a command's output are redacted.
+func TestDiagnosticsAreRedacted(t *testing.T) {
+	buf := captureDiagnostics(t)
+	h := newHarness(time.Hour)
+	h.e.unmountFn = func() error { return errors.New("busy with " + testJWT) }
+	h.signals <- syscall.SIGTERM
+	err := await(t, h.runAsync())
+	if err == nil || !strings.Contains(buf.String(), "(busy with mtblat_[redacted]); aborting the mount") || strings.Contains(buf.String(), "eyJ") {
+		t.Fatalf("diagnostics %q, err %v", buf.String(), err)
+	}
+}
+
 func TestAFailedAbortIsReported(t *testing.T) {
 	h := newHarness(time.Hour)
 	h.e.abortErr = errors.New("aborting the FUSE connection: no abort file")

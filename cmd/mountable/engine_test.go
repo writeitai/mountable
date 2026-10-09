@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -97,6 +98,21 @@ func TestSignalEndsAStalledStartup(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a stalled startup ignored the signal")
+	}
+}
+
+// The engine's own log, which it writes to os.Stderr, reaches stderr with
+// secrets removed: here its parse error for a gateway address holding a
+// token.
+func TestEngineLogIsRedacted(t *testing.T) {
+	buf := captureDiagnostics(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, err := startEngine(ctx, mountConfig{gateway: testJWT + ":abc", root: "/c/fs1", dir: t.TempDir(), cacheDir: t.TempDir()})
+	flushEngineLog()
+	logged := buf.String()
+	if err == nil || !strings.Contains(logged, "server address mtblat_[redacted]:abc parse error") || strings.Contains(logged, "eyJ") {
+		t.Fatalf("err %v, engine log %q", err, logged)
 	}
 }
 

@@ -40,7 +40,7 @@ func callTool(t *testing.T, s *mcp.ClientSession, name string, args map[string]a
 		t.Fatalf("%s: %d content blocks", name, len(res.Content))
 	}
 	text := res.Content[0].(*mcp.TextContent).Text
-	for _, secret := range []string{testKey, testLogin} {
+	for _, secret := range []string{testKey, testLogin, testJWT, "eyJzdWIi"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("%s leaked a credential: %s", name, text)
 		}
@@ -158,6 +158,24 @@ func TestMCPErrorsCarryCodeAndHint(t *testing.T) {
 	text, isError = callTool(t, s, "list_filesystems", nil)
 	if !isError || !strings.Contains(text, `"unauthenticated"`) {
 		t.Fatalf("without credentials: %v %s", isError, text)
+	}
+}
+
+// MCP errors are redacted in every field, including the session.
+func TestMCPErrorFieldsAreRedacted(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": reply(201, escapedSession),
+	})
+	s := connectMCP(t)
+	text, isError := callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "mtbl_keysecret"})
+	var out struct {
+		Error cliError `json:"error"`
+	}
+	if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != "ticket_already_used" ||
+		out.Error.IdempotencyKey != "mtbl_[redacted]" || strings.Contains(text, "keysecret") || leaksEscapedSecret(text) ||
+		!strings.Contains(string(out.Error.Session), `"created_by":"mtblat_[redacted]"`) {
+		t.Fatalf("result = %v %s", isError, text)
 	}
 }
 

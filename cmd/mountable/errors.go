@@ -3,11 +3,15 @@ package main
 // Errors as callers see them: a stable code, a message and a next step.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"regexp"
+	"sync"
 )
 
 // cliError is what a command reports on failure. Code is the API's stable
@@ -95,16 +99,84 @@ func toCLIError(err error) *cliError {
 	if e.Message == "" {
 		e.Message = e.Code
 	}
+	e.Code = redact(e.Code)
 	e.Message = redact(e.Message)
 	e.Hint = redact(e.Hint)
+	e.IdempotencyKey = redact(e.IdempotencyKey)
+	e.Session = redactJSON(e.Session)
 	return e
+}
+
+// redactJSON redacts every string and key in a JSON document, as decoded,
+// so escapes (\u002e, \u005f) cannot hide a secret. A document that does not
+// decode is dropped.
+func redactJSON(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var v any
+	if err := d.Decode(&v); err != nil {
+		return nil
+	}
+	out, err := json.Marshal(redactValue(v))
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+func redactValue(v any) any {
+	switch v := v.(type) {
+	case string:
+		return redact(v)
+	case []any:
+		for i := range v {
+			v[i] = redactValue(v[i])
+		}
+	case map[string]any:
+		redacted := make(map[string]any, len(v))
+		for key, value := range v {
+			redacted[redact(key)] = redactValue(value)
+		}
+		return redacted
+	}
+	return v
 }
 
 // Every secret the API issues starts with "mtbl": API keys (mtbl_), login
 // tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
-var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_-]+`)
+// An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so
+// a secret runs up to the first character outside [A-Za-z0-9_.-]; a dot
+// right after a secret is redacted with it.
+var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
 
 // redact removes anything shaped like a Mountable secret from s.
 func redact(s string) string {
 	return secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+}
+
+// diagnostics is where diagnostics outside a command's output go: stderr
+// (as it was when the process started), or a buffer in tests.
+var (
+	diagnosticsMu sync.Mutex
+	diagnostics   io.Writer = os.Stderr
+)
+
+// diagnose writes one diagnostic line with secrets removed.
+func diagnose(format string, args ...any) {
+	writeDiagnostic(fmt.Sprintf("mountable: "+format+"\n", args...))
+}
+
+// writeDiagnostic writes s with secrets removed.
+func writeDiagnostic(s string) {
+	diagnosticsMu.Lock()
+	defer diagnosticsMu.Unlock()
+	io.WriteString(diagnostics, redact(s))
+}
+
+// note writes one diagnostic line to w with secrets removed.
+func note(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, redact(fmt.Sprintf("mountable: "+format+"\n", args...)))
 }

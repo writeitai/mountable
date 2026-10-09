@@ -5,15 +5,19 @@ package main
 // does, keeping only the options Mountable uses.
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
@@ -186,9 +190,77 @@ func unlessCancelled(ctx context.Context, fn func() error) error {
 	}
 }
 
-// logToStderr sends the engine's log to stderr, never to files.
+// engineLog carries what the engine writes to os.Stderr through a pipe, so
+// its lines reach the real stderr with secrets removed.
+var engineLog struct {
+	mu      sync.Mutex
+	pipe    *os.File      // os.Stderr once redirected
+	flushed chan struct{} // receives when a flush marker is read
+}
+
+const engineLogFlush = "\x00mountable: flush\n"
+
+// logToStderr sends the engine's log to stderr, never to files, with
+// secrets removed. The engine writes to os.Stderr directly, so os.Stderr
+// becomes a pipe whose lines are redacted onto the process's stderr.
 func logToStderr() error {
-	return fla9.Set("logtostderr", "true")
+	if err := fla9.Set("logtostderr", "true"); err != nil {
+		return err
+	}
+	engineLog.mu.Lock()
+	defer engineLog.mu.Unlock()
+	if engineLog.pipe != nil {
+		return nil
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	engineLog.pipe, engineLog.flushed = w, make(chan struct{}, 1)
+	flushed := engineLog.flushed
+	os.Stderr = w
+	log.SetOutput(w) // the standard logger kept the original stderr
+	go func() {
+		lines := bufio.NewReader(r)
+		for {
+			line, err := lines.ReadString('\n')
+			if line == engineLogFlush {
+				select {
+				case flushed <- struct{}{}:
+				default:
+				}
+				continue
+			}
+			if line != "" {
+				writeDiagnostic(line)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// flushEngineLog waits, briefly, until what the engine logged so far is
+// written out.
+func flushEngineLog() {
+	engineLog.mu.Lock()
+	defer engineLog.mu.Unlock()
+	if engineLog.pipe == nil {
+		return
+	}
+	select {
+	case <-engineLog.flushed: // a stale marker from a flush that timed out
+	default:
+	}
+	if _, err := io.WriteString(engineLog.pipe, engineLogFlush); err != nil {
+		return
+	}
+	select {
+	case <-engineLog.flushed:
+	case <-time.After(time.Second):
+	}
 }
 
 func fuseOptions(dir string, readOnly bool) *fuse.MountOptions {
