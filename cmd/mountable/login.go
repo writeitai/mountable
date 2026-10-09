@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // credentials are kept in an owner-only file.
@@ -35,12 +38,49 @@ func credentialsPath() (string, error) {
 	return filepath.Join(dir, "mountable", "credentials.json"), nil
 }
 
-func saveCredentials(t tokenResponse) error {
+// credentialsMu serializes this process's credential use (simultaneous MCP
+// tool calls); the lock file serializes it across processes.
+var credentialsMu sync.Mutex
+
+// withCredentials runs fn while holding the credentials lock, so reading the
+// stored login, deciding to refresh, redeeming the single-use refresh token
+// and saving the new pair happen as one step.
+func withCredentials(fn func() error) error {
+	credentialsMu.Lock()
+	defer credentialsMu.Unlock()
 	path, err := credentialsPath()
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() // closing releases the lock
+	for {
+		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("locking %s: %w", lock.Name(), err)
+	}
+	return fn()
+}
+
+func saveCredentials(t tokenResponse) error {
+	return withCredentials(func() error { return writeCredentials(t) })
+}
+
+// writeCredentials replaces the credentials file atomically with an
+// owner-only one. The caller holds the credentials lock.
+func writeCredentials(t tokenResponse) error {
+	path, err := credentialsPath()
+	if err != nil {
 		return err
 	}
 	data, err := json.Marshal(credentials{
@@ -50,33 +90,66 @@ func saveCredentials(t tokenResponse) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".credentials-*.tmp") // mode 0600
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // fails harmlessly once renamed
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync() // makes the rename durable where the platform supports it
+		d.Close()
+	}
+	return nil
 }
 
 // accessToken returns a valid access token, refreshing it when needed.
-func accessToken() (string, error) {
-	c, err := loadCredentials()
-	if err != nil {
-		return "", err
-	}
-	if time.Until(c.ExpiresAt) > time.Minute {
-		return c.AccessToken, nil
-	}
-	return refresh(c)
+func accessToken() (token string, err error) {
+	err = withCredentials(func() error {
+		c, err := loadCredentials()
+		if err != nil {
+			return err
+		}
+		if time.Until(c.ExpiresAt) > time.Minute {
+			token = c.AccessToken
+			return nil
+		}
+		token, err = refresh(c)
+		return err
+	})
+	return token, err
 }
 
 // refreshRejected returns a new access token after the API refused
-// rejected: the stored one, when another process has already replaced
+// rejected: the stored one, when another caller has already replaced
 // rejected, otherwise a refreshed one.
-func refreshRejected(rejected string) (string, error) {
-	c, err := loadCredentials()
-	if err != nil {
-		return "", err
-	}
-	if c.AccessToken != rejected {
-		return c.AccessToken, nil
-	}
-	return refresh(c)
+func refreshRejected(rejected string) (token string, err error) {
+	err = withCredentials(func() error {
+		c, err := loadCredentials()
+		if err != nil {
+			return err
+		}
+		if c.AccessToken != rejected {
+			token = c.AccessToken
+			return nil
+		}
+		token, err = refresh(c)
+		return err
+	})
+	return token, err
 }
 
 func loadCredentials() (credentials, error) {
@@ -102,7 +175,7 @@ func loadCredentials() (credentials, error) {
 }
 
 // refresh exchanges the refresh token for a new pair and saves it; the
-// refresh token rotates.
+// refresh token rotates. The caller holds the credentials lock.
 func refresh(c credentials) (string, error) {
 	var t tokenResponse
 	err := postForm("/auth/device/token", url.Values{
@@ -111,7 +184,7 @@ func refresh(c credentials) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("session ended (%v); run `mountable login`", err)
 	}
-	return t.AccessToken, saveCredentials(t)
+	return t.AccessToken, writeCredentials(t)
 }
 
 // login signs this machine in, writing its instructions to w.
@@ -151,8 +224,11 @@ func login(w io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if err := saveCredentials(t); err != nil {
+			return err
+		}
 		fmt.Fprintln(w, "Signed in.")
-		return saveCredentials(t)
+		return nil
 	}
 	return errors.New("the code expired; run `mountable login` again")
 }
@@ -165,9 +241,11 @@ func logout() error {
 	if err := c.call(context.Background(), "POST", "/auth/cli/sign-out", nil, nil); err != nil {
 		return err
 	}
-	path, err := credentialsPath()
-	if err != nil {
-		return err
-	}
-	return os.Remove(path)
+	return withCredentials(func() error {
+		path, err := credentialsPath()
+		if err != nil {
+			return err
+		}
+		return os.Remove(path)
+	})
 }

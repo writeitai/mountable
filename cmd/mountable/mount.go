@@ -147,7 +147,7 @@ func mount(o *output, ticket, dir string) error {
 		}
 		return err
 	}
-	fmt.Fprintf(o.stderr, "mountable: mounted at %s\n", e.dir)
+	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
 		if session.readOnly {
@@ -156,7 +156,7 @@ func mount(o *output, ticket, dir string) error {
 		if err := o.emit(map[string]string{
 			"event": "mounted", "path": e.dir, "filesystem_id": path.Base(session.root), "mode": mode,
 		}); err != nil {
-			fmt.Fprintln(o.stderr, "mountable: writing the mounted event:", err)
+			note(o.stderr, "writing the mounted event: %v", err)
 		}
 	}
 
@@ -304,7 +304,7 @@ func unmount(dir string) error {
 		return nil
 	}
 	why := fmt.Sprintf("%s could not be unmounted cleanly (%s)", dir, oneLine(err))
-	fmt.Fprintf(os.Stderr, "mountable: %s; aborting the mount\n", why)
+	note(diagnostics, "%s; aborting the mount", why)
 	if err := abortMount(dir); err != nil {
 		return fmt.Errorf("%s, and the mount could not be fully aborted (%s); writes not yet committed may be lost", why, oneLine(err))
 	}

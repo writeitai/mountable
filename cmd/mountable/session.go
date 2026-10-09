@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
-	"fmt"
-	"os"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -59,7 +57,7 @@ func (s *mountSession) watch(ctx context.Context, revoked chan<- struct{}) {
 			var err error
 			gone, err = s.renew(ctx)
 			if !gone && err != nil && ctx.Err() == nil {
-				fmt.Fprintln(os.Stderr, "mountable: renewal failed, retrying:", err)
+				note(diagnostics, "renewal failed, retrying: %v", err)
 			}
 		case <-check.C:
 			gone = s.rejected(ctx)

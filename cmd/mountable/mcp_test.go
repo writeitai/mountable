@@ -161,6 +161,24 @@ func TestMCPErrorsCarryCodeAndHint(t *testing.T) {
 	}
 }
 
+// MCP errors are redacted in every field, including the session.
+func TestMCPErrorFieldsAreRedacted(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": reply(201, `{"id":"s1","state":"active","ticket":null,"created_by":"`+testJWT+`"}`),
+	})
+	s := connectMCP(t)
+	text, isError := callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "mtbl_keysecret"})
+	var out struct {
+		Error cliError `json:"error"`
+	}
+	if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != "ticket_already_used" ||
+		out.Error.IdempotencyKey != "mtbl_[redacted]" || strings.Contains(text, "keysecret") ||
+		!strings.Contains(string(out.Error.Session), `"created_by":"mtblat_[redacted]"`) {
+		t.Fatalf("result = %v %s", isError, text)
+	}
+}
+
 // A replacement whose 201 answer is cut short leaves the caller the fresh
 // key, and retrying with it recovers a working ticket.
 func TestMCPLostReplacementCanBeRecovered(t *testing.T) {

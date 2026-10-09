@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"regexp"
 )
 
@@ -95,20 +97,34 @@ func toCLIError(err error) *cliError {
 	if e.Message == "" {
 		e.Message = e.Code
 	}
+	e.Code = redact(e.Code)
 	e.Message = redact(e.Message)
 	e.Hint = redact(e.Hint)
+	e.IdempotencyKey = redact(e.IdempotencyKey)
+	// A secret never contains a JSON quote, so the session stays valid JSON.
+	if e.Session != nil {
+		e.Session = json.RawMessage(redact(string(e.Session)))
+	}
 	return e
 }
 
 // Every secret the API issues starts with "mtbl": API keys (mtbl_), login
 // tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
-// An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so a
-// secret runs up to the first character outside [A-Za-z0-9_.-]. A dot is
-// part of it only when another secret character follows, so a full stop
-// after a secret stays in the sentence.
-var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_-]+(?:\.+[A-Za-z0-9_-]+)*`)
+// An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so
+// a secret runs up to the first character outside [A-Za-z0-9_.-]; a dot
+// right after a secret is redacted with it.
+var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
 
 // redact removes anything shaped like a Mountable secret from s.
 func redact(s string) string {
 	return secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+}
+
+// diagnostics is where diagnostics outside a command's output go: stderr,
+// or a buffer in tests.
+var diagnostics io.Writer = os.Stderr
+
+// note writes one diagnostic line to w with secrets removed.
+func note(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, redact(fmt.Sprintf("mountable: "+format+"\n", args...)))
 }

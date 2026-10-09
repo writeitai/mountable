@@ -5,11 +5,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The first poll's connection is dropped mid-request, the second is still
@@ -207,5 +212,144 @@ func TestMCPRefreshesRefusedLogin(t *testing.T) {
 	text, isError := callTool(t, s, "list_filesystems", nil)
 	if isError || !strings.Contains(text, "fsone") || len(*refreshed) != 1 {
 		t.Fatalf("result = %v %s, calls %v", isError, text, api.called())
+	}
+}
+
+// rotatingTokenAPI redeems each refresh token once, as the API does, and
+// counts the refreshes.
+func rotatingTokenAPI(t *testing.T) *atomic.Int32 {
+	var mu sync.Mutex
+	used := map[string]bool{}
+	refreshes := new(atomic.Int32)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /auth/device/token": func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			token := r.PostForm.Get("refresh_token")
+			mu.Lock()
+			reused := used[token]
+			used[token] = true
+			mu.Unlock()
+			if reused {
+				reply(400, `{"error":"invalid_grant"}`)(w, r)
+				return
+			}
+			refreshes.Add(1)
+			reply(200, `{"access_token":"`+testJWT+`","refresh_token":"mtblrt_rotated","expires_in":900}`)(w, r)
+		},
+	})
+	return refreshes
+}
+
+// Simultaneous callers (MCP tool calls, or processes) redeem the
+// single-use refresh token once and all end up with the new access token,
+// whether the refresh is due to expiry or to a refusal.
+func TestConcurrentRefreshRedeemsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		expiresIn int
+		get       func() (string, error)
+	}{
+		{"expiry", 0, accessToken},
+		{"refusal", 3600, func() (string, error) { return refreshRejected(testLogin) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refreshes := rotatingTokenAPI(t)
+			isolateConfig(t)
+			if err := saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: tc.expiresIn}); err != nil {
+				t.Fatal(err)
+			}
+			var wg sync.WaitGroup
+			tokens := make([]string, 8)
+			errs := make([]error, 8)
+			for i := range tokens {
+				wg.Go(func() { tokens[i], errs[i] = tc.get() })
+			}
+			wg.Wait()
+			for i := range tokens {
+				if errs[i] != nil || tokens[i] != testJWT {
+					t.Fatalf("caller %d: %q, %v", i, tokens[i], errs[i])
+				}
+			}
+			if n := refreshes.Load(); n != 1 {
+				t.Fatalf("refreshes = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// The credentials lock is a file lock, so another process holding it
+// blocks this one.
+func TestCredentialsLockIsAFileLock(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("MOUNTABLE_API_URL", "http://127.0.0.1:1")
+	path, err := credentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := unix.Flock(int(other.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- saveCredentials(tokenResponse{AccessToken: testLogin, RefreshToken: "mtblrt_refreshsecret", ExpiresIn: 3600})
+	}()
+	select {
+	case <-done:
+		t.Fatal("saved while another holder had the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := unix.Flock(int(other.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still blocked after the lock was released")
+	}
+}
+
+// Saving replaces the file with an owner-only one, even over a file with
+// wider permissions, and leaves no temporary file behind.
+func TestCredentialsAreReplacedOwnerOnly(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("MOUNTABLE_API_URL", "http://127.0.0.1:1")
+	path, err := credentialsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, %v", info.Mode(), err)
+	}
+	if c, err := loadCredentials(); err != nil || c.AccessToken != testJWT {
+		t.Fatalf("loaded %+v, %v", c, err)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"credentials.json", "credentials.json.lock"}) {
+		t.Fatalf("files = %v", names)
 	}
 }

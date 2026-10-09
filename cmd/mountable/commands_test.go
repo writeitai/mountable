@@ -586,13 +586,16 @@ func TestMountJSONReportsStartupErrors(t *testing.T) {
 
 func TestRedact(t *testing.T) {
 	for in, want := range map[string]string{
-		"key mtbl_abc-DEF_1 refused":    "key mtbl_[redacted] refused",
-		"ticket mtbltk_xyz":             "ticket mtbltk_[redacted]",
-		"tokens mtblat_a and mtblrt_b.": "tokens mtblat_[redacted] and mtblrt_[redacted].",
+		"key mtbl_abc-DEF_1 refused": "key mtbl_[redacted] refused",
+		"ticket mtbltk_xyz":          "ticket mtbltk_[redacted]",
+		// A trailing dot is consumed with the secret, as the API specifies.
+		"tokens mtblat_a and mtblrt_b.": "tokens mtblat_[redacted] and mtblrt_[redacted]",
 		"jwt " + testJWT + " refused":   "jwt mtblat_[redacted] refused",
-		"jwt " + testJWT + ".":          "jwt mtblat_[redacted].",
+		"jwt " + testJWT + ".":          "jwt mtblat_[redacted]",
 		"(" + testJWT + "), then":       "(mtblat_[redacted]), then",
 		"odd mtblat_a..b.c-d_e":         "odd mtblat_[redacted]",
+		"jwt mtblat_.payload.signature": "jwt mtblat_[redacted]",
+		"refresh mtblrt_... refused":    "refresh mtblrt_[redacted] refused",
 		"nothing secret here":           "nothing secret here",
 	} {
 		if got := redact(in); got != want {
@@ -614,8 +617,42 @@ func TestJWTRedactedInErrors(t *testing.T) {
 	} {
 		r := runCLI(t, args...)
 		out := r.stdout + r.stderr
-		if r.code != 1 || strings.Contains(out, "eyJ") || strings.Contains(out, "c2lnbmF0dXJl") || !strings.Contains(out, "bad value mtblat_[redacted].") {
+		if r.code != 1 || strings.Contains(out, "eyJ") || strings.Contains(out, "c2lnbmF0dXJl") || !strings.Contains(out, "bad value mtblat_[redacted]") {
 			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+	}
+}
+
+// Every field of a reported error is redacted: the API's code, the
+// idempotency key and the session carried by ticket_already_used.
+func TestEveryErrorFieldIsRedacted(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["idempotency_key"] == "mtbl_keysecret" {
+				reply(201, `{"id":"s1","state":"active","ticket":null,"created_by":"`+testJWT+`"}`)(w, r)
+				return
+			}
+			reply(400, `{"detail":{"code":"bad_`+testJWT+`"}}`)(w, r)
+		},
+	})
+	for _, args := range [][]string{
+		{"ticket", "create", "fsone", "--idempotency-key", "mtbl_keysecret", "--json"},
+		{"ticket", "create", "fsone", "--idempotency-key", "mtbl_keysecret"},
+		{"ticket", "create", "fsone", "--idempotency-key", "k", "--json"},
+		{"ticket", "create", "fsone", "--idempotency-key", "k"},
+	} {
+		r := runCLI(t, args...)
+		out := r.stdout + r.stderr
+		if r.code != 1 || strings.Contains(out, "keysecret") || strings.Contains(out, "eyJ") || !strings.Contains(out, "_[redacted]") {
+			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+		if strings.HasSuffix(args[len(args)-1], "json") {
+			if e := jsonError(t, r); args[3] == "mtbl_keysecret" && (e.IdempotencyKey != "mtbl_[redacted]" || !json.Valid(e.Session) || !strings.Contains(string(e.Session), `"created_by":"mtblat_[redacted]"`)) {
+				t.Fatalf("%v: %+v", args, e)
+			}
 		}
 	}
 }
