@@ -37,6 +37,8 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+      - name: LLM provider starters keep the API key out of the sandbox
+        run: python3 examples/llm-providers/test_starters.py
       - name: THIRD_PARTY_NOTICES matches the module graph
         run: |
           go run ./tools/notices > THIRD_PARTY_NOTICES
