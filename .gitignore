@@ -1,3 +1,5 @@
 dist/
 packaging/pypi/src/mountable/bin/
 /mountable
+__pycache__/
+*.pyc

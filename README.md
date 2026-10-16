@@ -162,6 +162,14 @@ from the environment Claude Code runs in, so the key stays out of the file):
 }
 ```
 
+## LLM provider starters
+
+[`examples/llm-providers`](examples/llm-providers) has stdlib-only tools for
+the OpenAI Agents SDK and Responses API, Anthropic Messages API and Claude
+Code, Gemini ADK, and xAI Grok. The orchestrator holds `MOUNTABLE_API_KEY`
+and the sandbox receives the one-time ticket on stdin. The guide is
+<https://mountable.io/docs/integrations>.
+
 ## Licenses
 
 `mountable licenses` prints the licenses and notices of the third-party code
