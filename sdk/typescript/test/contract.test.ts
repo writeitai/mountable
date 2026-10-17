@@ -95,7 +95,7 @@ test("C04 delete returns nothing", async () => {
 
 test("C05 list pages through a directory", async () => {
   const page = {
-    entries: [fileInfo("/tickets/a.md"), fileInfo("/tickets/sub", { etag: null, type: "directory", size: 0 })],
+    entries: [fileInfo("/tickets/a.md"), fileInfo("/tickets/sub", { etag: undefined, type: "directory", size: 0 }) /* the API omits etag for anything but a file */],
     next: "sub",
   };
   api.route("GET", `${LIST}/tickets`, reply(200, page));

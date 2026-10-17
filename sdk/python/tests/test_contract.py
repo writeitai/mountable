@@ -113,7 +113,12 @@ def test_c05_list_pages_through_a_directory(api: MockAPI, client: Mountable):
     page = {
         "entries": [
             file_info("/tickets/a.md"),
-            file_info("/tickets/sub", etag=None, type="directory", size=0),
+            # The API omits etag for anything but a file.
+            {
+                k: v
+                for k, v in file_info("/tickets/sub", type="directory", size=0).items()
+                if k != "etag"
+            },
         ],
         "next": "sub",
     }

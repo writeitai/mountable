@@ -19,7 +19,7 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | C02 | `write` over an existing file returns the answer's `FileInfo` (`200` replaced). |
 | C03 | `read` sends `GET /files/{path}` and returns `File`: `.data` is the body, `.info` comes from `ETag`, `Content-Length` and `Last-Modified` (path with a leading `/`, type `file`). |
 | C04 | `delete` sends `DELETE /files/{path}`; `204` returns nothing. |
-| C05 | `list` sends `GET /list/{path}` with `after` and `limit` only when given (`list()` is `GET /list/`) and returns `ListPage`: `.entries` as `FileInfo` with parsed datetimes, `.next` the API's (`None` on the last page). |
+| C05 | `list` sends `GET /list/{path}` with `after` and `limit` only when given (`list()` is `GET /list/`) and returns `ListPage`: `.entries` as `FileInfo` with parsed datetimes (`etag` `None` for a directory, whose JSON omits it), `.next` the API's (`None` on the last page). |
 | C06 | `changes()` without a cursor sends `GET /changes` with no query and returns no events and the API's cursor. |
 | C07 | `changes(cursor, wait)` sends `cursor` and `wait` (default 25) and returns the events: `type`, `path`, and `file` as `FileInfo` or `None`. |
 | C08 | Paths are percent-encoded per segment (a space, `%`, `#`, `?`, non-ASCII and `!'()*` are encoded; `/` separates segments); leading and trailing `/` are dropped. A `.` or `..` segment raises `bad_path` without a request (URL normalisation would resolve it). |
