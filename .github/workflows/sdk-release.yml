@@ -1,0 +1,117 @@
+name: SDK release
+
+# Push a tag sdk-vX.Y.Z to release both SDKs at that version: test and build
+# them, then publish mountable-sdk to PyPI and npm with trusted publishing and
+# provenance. CLI tags vX.Y.Z are released by release.yml.
+on:
+  push:
+    tags: ["sdk-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and check the SDKs
+    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
+    # array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+      - id: version
+        name: Version from the tag
+        run: |
+          version=${GITHUB_REF_NAME#sdk-v}
+          # X.Y.Z only, so PyPI and npm publish the same version string.
+          echo "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || {
+            echo "::error::tag $GITHUB_REF_NAME is not sdk-vX.Y.Z"
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Test and build the Python SDK
+        working-directory: sdk/python
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pyright
+          uv run --locked pytest
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          uv build --out-dir ../../dist/python
+      - name: Test and build the TypeScript SDK
+        working-directory: sdk/typescript
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm pkg set version="$VERSION"
+          mkdir -p ../../dist/npm
+          npm pack --pack-destination ../../dist/npm
+      - name: Install both packages from the built files
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv run --isolated --no-project --with "dist/python/mountable_sdk-$VERSION-py3-none-any.whl" \
+            python -c "import mountable_sdk; print(mountable_sdk.Mountable)"
+          mkdir "$RUNNER_TEMP/npm-check"
+          cp "dist/npm/mountable-sdk-$VERSION.tgz" "$RUNNER_TEMP/npm-check/"
+          cd "$RUNNER_TEMP/npm-check"
+          npm init -y > /dev/null
+          npm install "./mountable-sdk-$VERSION.tgz"
+          node --input-type=module -e "import { Mountable } from 'mountable-sdk'; console.log(typeof Mountable)" | grep -x function
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-packages
+          path: dist/
+
+  publish:
+    name: Publish to PyPI and npm
+    needs: build
+    # Always GitHub-hosted: npm trusted publishing does not support
+    # self-hosted runners, so publishing waits for hosted capacity.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      id-token: write # trusted publishing; no tokens are stored
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-packages
+          path: dist
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm 11.5.1+ for trusted publishing
+        run: npm install -g npm@11.19.0
+      # Both steps skip a version already published, so a failed run can be
+      # re-run.
+      - name: npm publish
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ "$(npm view "mountable-sdk@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "mountable-sdk@$VERSION is already on npm"
+          else
+            npm publish "./dist/npm/mountable-sdk-$VERSION.tgz" --access public --provenance
+          fi
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/python/
+          skip-existing: true
