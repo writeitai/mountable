@@ -55,7 +55,10 @@ mountable ticket create FS_ID --idempotency-key job-42 --json
 ```
 
 Add `--ro` for a read-only mount. The ticket works once and expires within
-minutes, so hand it to the sandbox right away.
+minutes, so hand it to the sandbox right away. The mount itself lasts 12 hours
+by default; `--max-duration 720h` (any Go duration) asks for longer, up to the
+API key's or login's expiry. A mount that must stay up permanently needs a
+long `--max-duration`, and a new ticket whenever it restarts.
 
 **3. Sandbox: mount** onto an existing, writable directory (any path),
 giving the ticket on stdin (here from an environment
@@ -146,7 +149,15 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 (`list_organizations`, `list_filesystems`, `create_filesystem`,
 `filesystem_usage`, `create_mount_ticket`, `list_mount_sessions`,
 `revoke_mount_session`). Mounting stays a command in the sandbox:
-`create_mount_ticket` returns the ticket and the exact `mount_command`.
+`create_mount_ticket` returns the ticket and the exact `mount_command`, and
+takes an optional `max_duration_seconds`.
+
+## Files without mounting
+
+A backend that only reads and writes files can skip mounting and use the
+SDKs (`pip install mountable-sdk`, `npm install mountable-sdk`): conditional
+writes with ETags, listings, and a change feed (take a cursor first, then
+list, then follow changes).
 
 ## Limitations
 

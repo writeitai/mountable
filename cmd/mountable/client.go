@@ -177,14 +177,15 @@ type sessionCreated struct {
 // createTicket creates a mount session and returns the API's answer, which
 // carries the one-time ticket. key is the idempotency key; when empty, a
 // random one is generated and passed to announce before it is sent, so it
-// survives a lost response. A replay of key returns the existing session
+// survives a lost response. maxDuration is the session's
+// max_duration_seconds; 0 leaves it to the API's default. A replay of key returns the existing session
 // without a ticket:
 //   - still requested: its ticket was never exchanged, so its response was
 //     lost. The session is revoked and replaced under a fresh key; the result
 //     names the old one as replaced_session_id.
 //   - active or later: the ticket was used. Nothing is revoked, and the
 //     error ticket_already_used carries the existing session.
-func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, key string, announce func(key string)) (json.RawMessage, error) {
+func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, key string, maxDuration int64, announce func(key string)) (json.RawMessage, error) {
 	mode := "rw"
 	if readOnly {
 		mode = "ro"
@@ -193,7 +194,7 @@ func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, k
 		key = randomHex(16)
 		announce(key)
 	}
-	raw, created, err := c.postSession(ctx, fsID, mode, key)
+	raw, created, err := c.postSession(ctx, fsID, mode, key, maxDuration)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +214,7 @@ func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, k
 	}
 	fresh := randomHex(16)
 	announce(fresh)
-	raw, replacement, err := c.postSession(ctx, fsID, mode, fresh)
+	raw, replacement, err := c.postSession(ctx, fsID, mode, fresh, maxDuration)
 	if err != nil {
 		return nil, err
 	}
@@ -227,12 +228,14 @@ func (c *client) createTicket(ctx context.Context, fsID string, readOnly bool, k
 // sent with. When the outcome is unknown (the request or its answer was
 // lost, cut short or unreadable, or the API failed with a 5xx), a session
 // may exist under that key, and the error says to retry with it.
-func (c *client) postSession(ctx context.Context, fsID, mode, key string) (json.RawMessage, sessionCreated, error) {
+func (c *client) postSession(ctx context.Context, fsID, mode, key string, maxDuration int64) (json.RawMessage, sessionCreated, error) {
 	var raw json.RawMessage
 	var created sessionCreated
-	err := c.call(ctx, "POST", "/api/v1/mount-sessions", map[string]string{
-		"filesystem_id": fsID, "mode": mode, "idempotency_key": key,
-	}, &raw)
+	body := map[string]any{"filesystem_id": fsID, "mode": mode, "idempotency_key": key}
+	if maxDuration > 0 {
+		body["max_duration_seconds"] = maxDuration
+	}
+	err := c.call(ctx, "POST", "/api/v1/mount-sessions", body, &raw)
 	if err == nil {
 		err = json.Unmarshal(raw, &created)
 	}

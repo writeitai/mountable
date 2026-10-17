@@ -65,3 +65,52 @@ jobs:
           chmod +x "$RUNNER_TEMP/mountable"
           "$RUNNER_TEMP/mountable" version | grep -x "mountable 0.0.0"
           "$RUNNER_TEMP/mountable" licenses | cmp - THIRD_PARTY_NOTICES
+
+  sdk-python:
+    name: Python SDK
+    # Never run fork pull requests: CI may use a self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5 # pyright runs on Node
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.6"
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked ruff check .
+      - run: uv run --locked pyright
+      - run: uv run --locked pytest
+      - name: Tests on the oldest supported Python
+        run: uv run --locked --isolated --python 3.10 pytest
+      - run: uv build
+
+  sdk-typescript:
+    name: TypeScript SDK
+    # Never run fork pull requests: CI may use a self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run

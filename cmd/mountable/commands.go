@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+	"time"
 )
 
 // output is where a command writes: with --json, one JSON document (or JSON
@@ -223,19 +224,26 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", value, "KMGTP"[exp])
 }
 
+const ticketUsage = "ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration DURATION]"
+
 func ticketCreate(o *output, args []string) error {
-	f := newFlags("ticket create FS_ID [--ro] [--idempotency-key KEY]")
+	f := newFlags(ticketUsage)
 	readOnly := f.Bool("ro", false, "read-only")
 	key := f.String("idempotency-key", "", "idempotency key")
+	maxDuration := f.Duration("max-duration", 0, "the session's maximum duration, such as 12h or 720h")
 	positional, err := f.parse(args, 1)
 	if err != nil {
 		return err
+	}
+	// A duration is sent in whole seconds; 0 leaves it to the API's default.
+	if *maxDuration < 0 || *maxDuration%time.Second != 0 {
+		return usageError(ticketUsage)
 	}
 	c, err := newClient("")
 	if err != nil {
 		return err
 	}
-	raw, err := c.createTicket(context.Background(), positional[0], *readOnly, *key, func(key string) {
+	raw, err := c.createTicket(context.Background(), positional[0], *readOnly, *key, int64(*maxDuration/time.Second), func(key string) {
 		note(o.stderr, "idempotency key %s (retry with --idempotency-key %s)", key, key)
 	})
 	if err != nil {

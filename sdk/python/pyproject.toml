@@ -1,0 +1,47 @@
+# The Mountable SDK for Python: the files API and mount tickets.
+# The release workflow stamps the version from the tag sdk-vX.Y.Z.
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mountable-sdk"
+version = "0.0.0.dev0"  # set from the release tag
+description = "Read, write, list and follow files in a Mountable filesystem over HTTPS."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Documentation = "https://mountable.io/docs"
+Source = "https://github.com/writeitai/mountable"
+Issues = "https://github.com/writeitai/mountable/issues"
+
+[dependency-groups]
+dev = ["pyright>=1.1.400", "pytest>=8", "ruff>=0.12"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mountable_sdk"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "UP"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+# Filesystem handles call their client's internals in the same module.
+reportPrivateUsage = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

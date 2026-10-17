@@ -54,8 +54,10 @@ type fakeAPI struct {
 	mu     sync.Mutex
 	calls  []string
 	bodies []map[string]string
-	auth   []string
-	url    string
+	// json holds each request's body decoded with its value types.
+	json []map[string]any
+	auth []string
+	url  string
 }
 
 func newFakeAPI(t *testing.T, routes map[string]http.HandlerFunc) *fakeAPI {
@@ -63,12 +65,15 @@ func newFakeAPI(t *testing.T, routes map[string]http.HandlerFunc) *fakeAPI {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route := r.Method + " " + r.URL.Path
 		var body map[string]string
+		var typed map[string]any
 		data, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(data, &body)
+		_ = json.Unmarshal(data, &typed)
 		r.Body = io.NopCloser(bytes.NewReader(data))
 		f.mu.Lock()
 		f.calls = append(f.calls, route)
 		f.bodies = append(f.bodies, body)
+		f.json = append(f.json, typed)
 		f.auth = append(f.auth, r.Header.Get("Authorization"))
 		f.mu.Unlock()
 		if h, ok := f.routes[route]; ok {
@@ -379,6 +384,51 @@ func TestTicketCreateWithKey(t *testing.T) {
 	}
 	if b := api.bodies[0]; b["idempotency_key"] != "job-42" || b["mode"] != "ro" || b["filesystem_id"] != "fsone" {
 		t.Errorf("body = %v", b)
+	}
+}
+
+// --max-duration is sent in seconds, also when a lost ticket's session is
+// replaced; without it the API's default applies.
+func TestTicketCreateMaxDuration(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST /api/v1/mount-sessions": func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["idempotency_key"] == "lost" {
+				reply(201, session("old", "requested", ""))(w, r)
+				return
+			}
+			reply(201, session("s1", "requested", "mtbltk_theticket"))(w, r)
+		},
+		"DELETE /api/v1/mount-sessions/old": reply(204, ""),
+	})
+	if r := runCLI(t, "ticket", "create", "fsone", "--max-duration", "720h", "--json"); r.code != 0 {
+		t.Fatalf("ticket create = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if got := api.json[0]["max_duration_seconds"]; got != float64(720*3600) {
+		t.Fatalf("max_duration_seconds = %v", got)
+	}
+	if r := runCLI(t, "ticket", "create", "fsone", "--json"); r.code != 0 {
+		t.Fatalf("ticket create = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if _, ok := api.json[1]["max_duration_seconds"]; ok {
+		t.Fatalf("sent max_duration_seconds without --max-duration: %v", api.json[1])
+	}
+	if r := runCLI(t, "ticket", "create", "fsone", "--idempotency-key", "lost", "--max-duration", "12h", "--json"); r.code != 0 {
+		t.Fatalf("ticket create = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if got := api.json[4]["max_duration_seconds"]; got != float64(12*3600) {
+		t.Fatalf("replacement max_duration_seconds = %v (%v)", got, api.called())
+	}
+	for _, d := range []string{"-1h", "1500ms", "soon"} {
+		r := runCLI(t, "ticket", "create", "fsone", "--max-duration", d)
+		if r.code != 2 || !strings.Contains(r.stderr, "--max-duration") {
+			t.Errorf("--max-duration %s = %d %q", d, r.code, r.stderr)
+		}
+	}
+	if calls := api.called(); len(calls) != 5 {
+		t.Fatalf("calls = %v", calls)
 	}
 }
 

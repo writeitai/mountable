@@ -119,8 +119,15 @@ func TestMCPCreateMountTicket(t *testing.T) {
 		!strings.Contains(command, "| mountable mount --ticket-stdin") || strings.Contains(command, "mtbltk_") {
 		t.Fatalf("result = %s", text)
 	}
-	if b := api.bodies[0]; b["mode"] != "ro" || b["idempotency_key"] != "job-1" {
+	if b := api.json[0]; b["mode"] != "ro" || b["idempotency_key"] != "job-1" {
 		t.Fatalf("body = %v", b)
+	}
+	if _, ok := api.json[0]["max_duration_seconds"]; ok {
+		t.Fatalf("body = %v", api.json[0])
+	}
+	text, isError = callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "job-2", "max_duration_seconds": 86400})
+	if isError || api.json[1]["max_duration_seconds"] != float64(86400) {
+		t.Fatalf("result = %v %s, body = %v", isError, text, api.json[1])
 	}
 }
 
