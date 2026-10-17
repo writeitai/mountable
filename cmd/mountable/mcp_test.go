@@ -129,6 +129,11 @@ func TestMCPCreateMountTicket(t *testing.T) {
 	if isError || api.json[1]["max_duration_seconds"] != float64(86400) {
 		t.Fatalf("result = %v %s, body = %v", isError, text, api.json[1])
 	}
+	// A negative duration is the API's to refuse, not a silent default.
+	callTool(t, s, "create_mount_ticket", map[string]any{"filesystem_id": "fsone", "idempotency_key": "job-3", "max_duration_seconds": -5})
+	if got := api.json[2]["max_duration_seconds"]; got != float64(-5) {
+		t.Fatalf("body = %v", api.json[2])
+	}
 }
 
 func TestMCPTicketReplayFollowsTheCLIRules(t *testing.T) {

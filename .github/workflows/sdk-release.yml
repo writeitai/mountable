@@ -96,8 +96,18 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: npm 11.5.1+ for trusted publishing
         run: npm install -g npm@11.19.0
+      # Both steps skip a version already published, so a failed run can be
+      # re-run.
       - name: npm publish
-        run: npm publish "./dist/npm/mountable-sdk-${{ needs.build.outputs.version }}.tgz" --access public --provenance
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ "$(npm view "mountable-sdk@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "mountable-sdk@$VERSION is already on npm"
+          else
+            npm publish "./dist/npm/mountable-sdk-$VERSION.tgz" --access public --provenance
+          fi
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/python/
+          skip-existing: true

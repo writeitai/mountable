@@ -114,3 +114,8 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm pack --dry-run
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 18
+      - name: The built package on the oldest supported Node
+        run: node test/smoke.mjs

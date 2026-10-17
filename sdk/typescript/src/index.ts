@@ -172,13 +172,12 @@ export class Mountable {
   readonly #apiKey: string;
 
   constructor(options: MountableOptions = {}) {
-    const env = globalThis.process?.env ?? {};
-    const apiKey = options.apiKey || env.MOUNTABLE_API_KEY;
+    const apiKey = options.apiKey || env("MOUNTABLE_API_KEY");
     if (!apiKey) {
       throw new MountableError(null, "unauthenticated", "pass apiKey or set MOUNTABLE_API_KEY");
     }
     this.#apiKey = apiKey;
-    this.baseUrl = (options.baseUrl || env.MOUNTABLE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = (options.baseUrl || env("MOUNTABLE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
   }
 
   /** A handle on one filesystem. It sends nothing until it is used. */
@@ -196,7 +195,7 @@ export class Mountable {
     const body: Record<string, unknown> = {
       filesystem_id: fsId,
       mode: options.mode ?? "rw",
-      idempotency_key: options.idempotencyKey || randomKey(),
+      idempotency_key: options.idempotencyKey || (await randomKey()),
     };
     if (options.maxDurationSeconds !== undefined) {
       body.max_duration_seconds = options.maxDurationSeconds;
@@ -229,7 +228,7 @@ export class Mountable {
       filesystem_id: fsId,
       mode,
       max_duration_seconds: SESSION_SECONDS,
-      idempotency_key: randomKey(),
+      idempotency_key: await randomKey(),
       credential: "token",
     });
     if (typeof session.token !== "string") {
@@ -243,18 +242,39 @@ export class Mountable {
     for (const [name, value] of Object.entries(options.query ?? {})) {
       url.searchParams.set(name, String(value));
     }
+    const timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The timeout restarts whenever part of the answer arrives, as httpx's
+    // read timeout does in the Python SDK.
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(new Error(`no answer for ${timeoutMs / 1000} s`)), timeoutMs);
+    };
+    arm();
     try {
       const response = await fetch(url, {
         method,
         headers: { Authorization: `Bearer ${bearer}`, ...options.headers },
         body: options.body,
-        signal: AbortSignal.timeout(options.timeoutMs ?? TIMEOUT_MS),
+        signal: controller.signal,
       });
       // Read the whole body here, so a body cut short is a network failure.
-      const data = new Uint8Array(await response.arrayBuffer());
-      return { status: response.status, headers: response.headers, data };
+      const chunks: Uint8Array[] = [];
+      const reader = response.body?.getReader();
+      for (;;) {
+        arm();
+        const chunk = await reader?.read();
+        if (!chunk || chunk.done) {
+          break;
+        }
+        chunks.push(chunk.value);
+      }
+      return { status: response.status, headers: response.headers, data: concat(chunks) };
     } catch (error) {
       throw new MountableError(null, "network_error", `the API could not be reached: ${describe(error)}`);
+    } finally {
+      clearTimeout(timer);
     }
   }
 }
@@ -405,18 +425,34 @@ class FilesystemHandle implements Filesystem {
   }
 }
 
-function randomKey(): string {
+type RandomSource = { getRandomValues(bytes: Uint8Array): Uint8Array };
+
+async function randomKey(): Promise<string> {
   const bytes = new Uint8Array(16);
-  const webCrypto = (globalThis as { crypto?: { getRandomValues(bytes: Uint8Array): Uint8Array } }).crypto;
-  if (webCrypto) {
-    webCrypto.getRandomValues(bytes);
-  } else {
-    // Node 18 has no global Web Crypto; the key need only be unique.
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
-  }
+  // Node 18 has no global Web Crypto in ES modules.
+  const source: RandomSource =
+    (globalThis as { crypto?: RandomSource }).crypto ?? (await import("node:crypto")).webcrypto;
+  source.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function concat(chunks: Uint8Array[]): Uint8Array {
+  const data = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return data;
+}
+
+/** An environment variable; undefined where there is none or reading it is not allowed (Deno without --allow-env). */
+function env(name: string): string | undefined {
+  try {
+    return globalThis.process?.env?.[name];
+  } catch {
+    return undefined;
+  }
 }
 
 function trimSlashes(path: string): string {

@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from types import TracebackType
@@ -238,7 +238,7 @@ class Mountable:
 
 @dataclass
 class _Session:
-    token: str
+    token: str = field(repr=False)
     expires_at: datetime
 
 

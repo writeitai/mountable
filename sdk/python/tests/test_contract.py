@@ -415,7 +415,14 @@ def test_c23_secrets_never_appear_in_errors(api: MockAPI, client: Mountable):
         raises(lambda: client.create_mount_ticket(FS)),
     ]
     for e in errors:
-        for text in (str(e), repr(e), e.message, repr(fs), repr(client)):
+        for text in (
+            str(e),
+            repr(e),
+            e.message,
+            repr(fs),
+            repr(fs._session),
+            repr(client),
+        ):
             assert API_KEY not in text and "token1secret" not in text
 
 

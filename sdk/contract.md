@@ -23,7 +23,7 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | C06 | `changes()` without a cursor sends `GET /changes` with no query and returns no events and the API's cursor. |
 | C07 | `changes(cursor, wait)` sends `cursor` and `wait` (default 25) and returns the events: `type`, `path`, and `file` as `FileInfo` or `None`. |
 | C08 | Paths are percent-encoded per segment (a space, `%`, `#`, `?`, non-ASCII and `!'()*` are encoded; `/` separates segments); leading and trailing `/` are dropped. A `.` or `..` segment raises `bad_path` without a request (URL normalisation would resolve it). |
-| C09 | `create_mount_ticket` sends `POST /api/v1/mount-sessions` with the API key and `filesystem_id`, `mode`, `idempotency_key` (random when not given) and `max_duration_seconds` only when given, and returns `id`, `ticket`, `expires_at` and the session's other fields. A replay's `ticket` is `None`. |
+| C09 | `create_mount_ticket` sends `POST /api/v1/mount-sessions` with the API key and `filesystem_id`, `mode`, `idempotency_key` (random when not given) and `max_duration_seconds` only when given, and returns `id`, `ticket`, `expires_at`, `ticket_expires_at`, `filesystem_id`, `mode` and `state`. A replay's `ticket` is `None`. |
 
 ## Conditional writes
 
@@ -75,4 +75,4 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | ID | Case |
 | --- | --- |
 | C30 | `api_key` defaults to `MOUNTABLE_API_KEY`, `base_url` to `MOUNTABLE_URL`, then `https://mountable.io`; arguments win. Without a key the constructor raises `unauthenticated`. |
-| C31 | Requests time out after 60 seconds; `changes` after 60 seconds plus `wait`. |
+| C31 | A request fails with `network_error` when the API is silent for 60 seconds (connecting, or waiting for the answer or more of its body); for `changes`, 60 seconds plus `wait`. TypeScript's `fetch` reports no upload progress, so there the time to send a body counts toward the first 60 seconds. |

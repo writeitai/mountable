@@ -506,14 +506,19 @@ test("C30 configuration defaults", async (t) => {
 });
 
 test("C31 timeouts", async (t) => {
-  const timeouts: number[] = [];
-  const original = AbortSignal.timeout;
-  AbortSignal.timeout = (ms: number) => {
-    timeouts.push(ms);
-    return original.call(AbortSignal, ms);
-  };
+  // The SDK arms a timer for each request and re-arms it as the answer
+  // arrives; record the delays in the range it uses.
+  const delays: number[] = [];
+  const original = globalThis.setTimeout;
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const ms = args[1];
+    if (ms !== undefined && ms >= 60_000 && ms <= 85_000 && delays.at(-1) !== ms) {
+      delays.push(ms);
+    }
+    return original(...args);
+  }) as typeof setTimeout;
   t.after(() => {
-    AbortSignal.timeout = original;
+    globalThis.setTimeout = original;
   });
   api.route("GET", CHANGES, reply(200, { events: [], cursor: "c" }));
   api.route("GET", `${LIST}/`, reply(200, { entries: [], next: null }));
@@ -521,7 +526,7 @@ test("C31 timeouts", async (t) => {
   await fs.list();
   await fs.changes({ cursor: "c", wait: 25 });
   await fs.changes({ cursor: "c", wait: 3 });
-  assert.deepEqual(timeouts, [60_000, 60_000, 85_000, 63_000]);
+  assert.deepEqual(delays, [60_000, 85_000, 63_000]);
 });
 
 // --- parity ----------------------------------------------------------------

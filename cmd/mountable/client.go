@@ -178,7 +178,8 @@ type sessionCreated struct {
 // carries the one-time ticket. key is the idempotency key; when empty, a
 // random one is generated and passed to announce before it is sent, so it
 // survives a lost response. maxDuration is the session's
-// max_duration_seconds; 0 leaves it to the API's default. A replay of key returns the existing session
+// max_duration_seconds; 0 leaves it to the API's default, and the API refuses
+// a negative one. A replay of key returns the existing session
 // without a ticket:
 //   - still requested: its ticket was never exchanged, so its response was
 //     lost. The session is revoked and replaced under a fresh key; the result
@@ -232,7 +233,7 @@ func (c *client) postSession(ctx context.Context, fsID, mode, key string, maxDur
 	var raw json.RawMessage
 	var created sessionCreated
 	body := map[string]any{"filesystem_id": fsID, "mode": mode, "idempotency_key": key}
-	if maxDuration > 0 {
+	if maxDuration != 0 {
 		body["max_duration_seconds"] = maxDuration
 	}
 	err := c.call(ctx, "POST", "/api/v1/mount-sessions", body, &raw)
