@@ -247,9 +247,9 @@ test("C14 first operation creates a token session", async () => {
 test("C15 the session is reused", async () => {
   api.route("GET", `${LIST}/`, reply(200, { entries: [], next: null }));
   const fs = client.filesystem(FS);
+  await Promise.all([fs.list(), fs.list()]); // concurrent first calls share one session
   await fs.list();
   await fs.list();
-  await Promise.all([fs.list(), fs.list()]);
   assert.equal(api.sessions().length, 1);
   assert.deepEqual(new Set(api.operations().map((r) => r.headers.authorization)), new Set(["Bearer mtblst_token1secret"]));
 });
@@ -276,12 +276,20 @@ test("C16 a 401 refreshes the session and retries once", async () => {
   );
 });
 
-test("C17 a second 401 raises", async () => {
+test("C17 one refresh per call", async () => {
   api.route("GET", `${FILES}/a.md`, error(401, "unauthenticated"));
-  const e = await rejects(client.filesystem(FS).read("a.md"));
+  let e = await rejects(client.filesystem(FS).read("a.md"));
   assert.deepEqual([e.status, e.code], [401, "unauthenticated"]);
   assert.equal(api.sessions().length, 2);
   assert.equal(api.operations().length, 2);
+
+  // A network retry does not grant another refresh: 401, drop, 401 fails.
+  const answers: Reply[] = [error(401, "unauthenticated"), { status: 0, fault: "drop" }, error(401, "unauthenticated"), READ_REPLY];
+  api.route("GET", `${FILES}/b.md`, () => answers.shift() as Reply);
+  e = await rejects(client.filesystem(FS).read("b.md"));
+  assert.deepEqual([e.status, e.code], [401, "unauthenticated"]);
+  assert.equal(api.sessions().length, 4);
+  assert.equal(api.operations().filter((r) => r.path === `${FILES}/b.md`).length, 3);
 });
 
 test("C18 a session near expiry is replaced", async () => {
@@ -372,6 +380,12 @@ test("C23 secrets never appear in errors", async () => {
       assert.ok(!shown.includes(API_KEY) && !shown.includes("token1secret"), shown);
     }
   }
+  api.route("POST", SESSIONS, (r) => api.issueSession(r));
+  const ticket = await client.createMountTicket(FS);
+  assert.ok(ticket.ticket?.startsWith("mtbltk_"));
+  for (const shown of [String(ticket), inspect(ticket), JSON.stringify(ticket), JSON.stringify({ ...ticket })]) {
+    assert.ok(!shown.includes("mtbltk_"), shown);
+  }
 });
 
 test("C24 errors without a code", async () => {
@@ -399,6 +413,11 @@ test("C25 reads are retried once after a network failure", async () => {
   assert.equal(text((await fs.read("a.md")).data), "abc");
   api.route("GET", `${FILES}/short.md`, failFirst(1, "short", READ_REPLY));
   assert.equal(text((await fs.read("short.md")).data), "abc");
+  // The fault is a body cut short after the headers arrived.
+  api.route("GET", "/short", { status: 200, body: "x".repeat(10), fault: "short" });
+  const raw = await fetch(`${api.url}/short`);
+  assert.equal(raw.status, 200);
+  await assert.rejects(raw.arrayBuffer());
   api.route("GET", `${LIST}/`, failFirst(1, "drop", reply(200, { entries: [], next: null })));
   assert.deepEqual((await fs.list()).entries, []);
   api.route("GET", CHANGES, failFirst(1, "drop", reply(200, { events: [], cursor: "c1" })));
@@ -478,24 +497,24 @@ test("C29 an expired cursor is recovered by relisting", async () => {
 // --- configuration ---------------------------------------------------------
 
 test("C30 configuration defaults", async (t) => {
-  const saved = { key: process.env.MOUNTABLE_API_KEY, url: process.env.MOUNTABLE_URL };
+  const saved = { key: process.env.MOUNTABLE_API_KEY, url: process.env.MOUNTABLE_API_URL };
   t.after(() => {
     for (const [name, value] of [
       ["MOUNTABLE_API_KEY", saved.key],
-      ["MOUNTABLE_URL", saved.url],
+      ["MOUNTABLE_API_URL", saved.url],
     ] as const) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
   });
   delete process.env.MOUNTABLE_API_KEY;
-  delete process.env.MOUNTABLE_URL;
+  delete process.env.MOUNTABLE_API_URL;
   const e = await rejects(() => new Mountable());
   assert.equal(e.code, "unauthenticated");
   assert.equal(e.status, null);
   process.env.MOUNTABLE_API_KEY = API_KEY;
   assert.equal(new Mountable().baseUrl, "https://mountable.io");
-  process.env.MOUNTABLE_URL = `${api.url}/`;
+  process.env.MOUNTABLE_API_URL = `${api.url}/`;
   const fromEnv = new Mountable();
   assert.equal(fromEnv.baseUrl, api.url);
   assert.equal(new Mountable({ baseUrl: "https://example.test" }).baseUrl, "https://example.test");
@@ -506,27 +525,49 @@ test("C30 configuration defaults", async (t) => {
 });
 
 test("C31 timeouts", async (t) => {
-  // The SDK arms a timer for each request and re-arms it as the answer
-  // arrives; record the delays in the range it uses.
-  const delays: number[] = [];
+  // Shortened: the SDK's 60 s becomes 100 ms, and 60 s + wait becomes
+  // 100 ms + wait.
   const original = globalThis.setTimeout;
   globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
     const ms = args[1];
-    if (ms !== undefined && ms >= 60_000 && ms <= 85_000 && delays.at(-1) !== ms) {
-      delays.push(ms);
+    if (ms !== undefined && ms >= 60_000 && ms <= 85_000) {
+      args[1] = ms - 59_900;
     }
     return original(...args);
   }) as typeof setTimeout;
   t.after(() => {
     globalThis.setTimeout = original;
   });
-  api.route("GET", CHANGES, reply(200, { events: [], cursor: "c" }));
-  api.route("GET", `${LIST}/`, reply(200, { entries: [], next: null }));
   const fs = client.filesystem(FS);
-  await fs.list();
-  await fs.changes({ cursor: "c", wait: 25 });
-  await fs.changes({ cursor: "c", wait: 3 });
-  assert.deepEqual(delays, [60_000, 85_000, 63_000]);
+  api.route("GET", `${LIST}/`, reply(200, { entries: [], next: null }));
+  await fs.list(); // creates the session before anything is slow
+  api.route("GET", `${FILES}/slow.md`, { ...reply(200, "abc"), delay: 500 });
+  api.route("PUT", `${FILES}/slow.md`, { ...reply(200, fileInfo("/slow.md")), delay: 500 });
+  api.route("GET", CHANGES, { ...reply(200, { events: [], cursor: "c" }), delay: 500 });
+  let e = await rejects(fs.read("slow.md"));
+  assert.deepEqual([e.status, e.code], [null, "network_error"]);
+  e = await rejects(fs.write("slow.md", "x"));
+  assert.deepEqual([e.status, e.code], [null, "network_error"]);
+  assert.equal((await fs.changes({ cursor: "c", wait: 1 })).cursor, "c");
+  e = await rejects(fs.changes({ cursor: "c", wait: 0 }));
+  assert.deepEqual([e.status, e.code], [null, "network_error"]);
+  const calls = api.operations().map((r) => `${r.method} ${r.path}`);
+  assert.equal(calls.filter((c) => c === `GET ${FILES}/slow.md`).length, 2); // a read is retried once
+  assert.equal(calls.filter((c) => c === `PUT ${FILES}/slow.md`).length, 1); // a write never
+  assert.equal(calls.filter((c) => c === `GET ${CHANGES}`).length, 3); // one wait=1, two wait=0
+});
+
+test("C32 a redirect is an error", async () => {
+  const moved = { Location: `${api.url}${FILES}/elsewhere.md` };
+  api.route("DELETE", `${FILES}/a.md`, reply(302, "", moved));
+  api.route("GET", `${FILES}/a.md`, reply(307, "", moved));
+  api.route("POST", SESSIONS, (r) => (r.json().credential ? api.issueSession(r) : reply(303, "", moved)));
+  const fs = client.filesystem(FS);
+  const e = await rejects(fs.delete("a.md"));
+  assert.deepEqual([e.status, e.code], [302, "api_error"]);
+  assert.equal((await rejects(fs.read("a.md"))).status, 307);
+  assert.equal((await rejects(client.createMountTicket(FS))).status, 303);
+  assert.ok(!api.requests.some((r) => r.path.includes("elsewhere")));
 });
 
 // --- parity ----------------------------------------------------------------

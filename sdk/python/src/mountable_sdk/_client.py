@@ -111,7 +111,8 @@ class MountTicket:
     filesystem_id: str
     mode: Mode
     state: str
-    ticket: str | None
+    # A credential: kept out of repr.
+    ticket: str | None = field(repr=False)
     ticket_expires_at: datetime | None
     expires_at: datetime
 
@@ -120,7 +121,7 @@ class Mountable:
     """A client authenticated with an API key.
 
     ``api_key`` defaults to ``MOUNTABLE_API_KEY``; ``base_url`` to
-    ``MOUNTABLE_URL``, then https://mountable.io.
+    ``MOUNTABLE_API_URL``, then https://mountable.io.
     """
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
@@ -130,9 +131,9 @@ class Mountable:
                 None, "unauthenticated", "pass api_key or set MOUNTABLE_API_KEY"
             )
         self._api_key = key
-        url = base_url or os.environ.get("MOUNTABLE_URL") or DEFAULT_BASE_URL
+        url = base_url or os.environ.get("MOUNTABLE_API_URL") or DEFAULT_BASE_URL
         self.base_url = url.rstrip("/")
-        self._http = httpx.Client(timeout=TIMEOUT)
+        self._http = httpx.Client()
 
     def __repr__(self) -> str:
         return f"Mountable(base_url={self.base_url!r})"
@@ -193,7 +194,7 @@ class Mountable:
         response = self._send(
             "POST", "/api/v1/mount-sessions", self._api_key, json=body
         )
-        if response.is_error:
+        if not response.is_success:
             raise _api_error(response)
         return _json(response)
 
@@ -219,7 +220,7 @@ class Mountable:
         bearer: str,
         *,
         headers: dict[str, str] | None = None,
-        timeout: float = TIMEOUT,
+        timeout: float | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
         try:
@@ -227,7 +228,7 @@ class Mountable:
                 method,
                 self.base_url + path,
                 headers={"Authorization": f"Bearer {bearer}", **(headers or {})},
-                timeout=timeout,
+                timeout=TIMEOUT if timeout is None else timeout,
                 **kwargs,
             )
         except httpx.TransportError as error:
@@ -372,24 +373,28 @@ class Filesystem:
     def _request(
         self, method: str, path: str, *, retry: bool, **kwargs: Any
     ) -> httpx.Response:
-        """Sends one call; a read is sent once more after a network error."""
-        try:
-            return self._authorized(method, path, **kwargs)
-        except MountableError as error:
-            if not retry or error.code != "network_error":
-                raise
-        return self._authorized(method, path, **kwargs)
-
-    def _authorized(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        session = self._token()
-        response = self._client._send(method, path, session.token, **kwargs)
-        if response.status_code == 401:
-            if self._session is session:
-                self._session = None
-            response = self._client._send(method, path, self._token().token, **kwargs)
-        if response.is_error:
-            raise _api_error(response)
-        return response
+        """Sends one call. A 401 creates a new session and sends the call once
+        more, once per call; a read is also sent once more after a network
+        error."""
+        refresh, network_retry = True, retry
+        while True:
+            session = None
+            try:
+                session = self._token()
+                response = self._client._send(method, path, session.token, **kwargs)
+            except MountableError as error:
+                if not network_retry or error.code != "network_error":
+                    raise
+                network_retry = False
+                continue
+            if response.status_code == 401 and refresh:
+                refresh = False
+                if self._session is session:
+                    self._session = None
+                continue
+            if not response.is_success:
+                raise _api_error(response)
+            return response
 
 
 def _now() -> datetime:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,8 @@ class Reply:
     # "drop": close the connection without an answer; "short": send the
     # headers and only part of the body.
     fault: str | None = None
+    # Seconds to wait before answering.
+    delay: float = 0
 
 
 Handler = Callable[[Request], Reply]
@@ -98,6 +101,8 @@ class MockAPI:
                 with api._lock:
                     api.requests.append(request)
                 reply = api.answer(request)
+                if reply.delay:
+                    time.sleep(reply.delay)
                 if reply.fault == "drop":
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)

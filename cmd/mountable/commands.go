@@ -235,8 +235,11 @@ func ticketCreate(o *output, args []string) error {
 	if err != nil {
 		return err
 	}
-	// A duration is sent in whole seconds; 0 leaves it to the API's default.
-	if *maxDuration < 0 || *maxDuration%time.Second != 0 {
+	// A duration is sent in whole seconds. Without the flag the API's default
+	// applies; a duration given must be positive.
+	given := false
+	f.Visit(func(fl *flag.Flag) { given = given || fl.Name == "max-duration" })
+	if given && (*maxDuration <= 0 || *maxDuration%time.Second != 0) {
 		return usageError(ticketUsage)
 	}
 	c, err := newClient("")

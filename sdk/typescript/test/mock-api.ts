@@ -1,6 +1,6 @@
 // A local HTTP server that plays the Mountable API for the contract tests.
 
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 export const API_KEY = "mtbl_testkeysecret";
@@ -27,6 +27,8 @@ export interface Reply {
   headers?: Record<string, string>;
   /** "drop": close the connection without an answer; "short": send the headers and only part of the body. */
   fault?: "drop" | "short";
+  /** Milliseconds to wait before answering. */
+  delay?: number;
 }
 
 export type Handler = (request: Request) => Reply;
@@ -85,33 +87,42 @@ export class MockAPI {
         };
         this.requests.push(request);
         const answer = this.answer(request);
-        if (answer.fault === "drop") {
-          req.socket.destroy();
-          return;
-        }
-        let data: Buffer;
-        const extra: Record<string, string> = { ...answer.headers };
-        if (Buffer.isBuffer(answer.body)) {
-          data = answer.body;
-        } else if (typeof answer.body === "string") {
-          data = Buffer.from(answer.body);
-        } else if (answer.body === undefined) {
-          data = Buffer.alloc(0);
+        if (answer.delay) {
+          setTimeout(() => this.#respond(req, res, answer), answer.delay);
         } else {
-          data = Buffer.from(JSON.stringify(answer.body));
-          extra["Content-Type"] ??= "application/json";
+          this.#respond(req, res, answer);
         }
-        extra["Content-Length"] ??= String(data.length);
-        extra.Connection = "close";
-        res.writeHead(answer.status, extra);
-        if (answer.fault === "short") {
-          res.write(data.subarray(0, Math.floor(data.length / 2)));
-          res.socket?.destroy();
-          return;
-        }
-        res.end(data);
       });
     });
+  }
+
+  #respond(req: IncomingMessage, res: ServerResponse, answer: Reply): void {
+    if (answer.fault === "drop") {
+      req.socket.destroy();
+      return;
+    }
+    let data: Buffer;
+    const extra: Record<string, string> = { ...answer.headers };
+    if (Buffer.isBuffer(answer.body)) {
+      data = answer.body;
+    } else if (typeof answer.body === "string") {
+      data = Buffer.from(answer.body);
+    } else if (answer.body === undefined) {
+      data = Buffer.alloc(0);
+    } else {
+      data = Buffer.from(JSON.stringify(answer.body));
+      extra["Content-Type"] ??= "application/json";
+    }
+    extra["Content-Length"] ??= String(data.length);
+    extra.Connection = "close";
+    res.writeHead(answer.status, extra);
+    if (answer.fault === "short") {
+      // The headers and half the body go out; then the connection ends.
+      res.flushHeaders();
+      res.write(data.subarray(0, Math.floor(data.length / 2)), () => res.socket?.end());
+      return;
+    }
+    res.end(data);
   }
 
   async start(): Promise<void> {

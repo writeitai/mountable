@@ -421,7 +421,7 @@ func TestTicketCreateMaxDuration(t *testing.T) {
 	if got := api.json[4]["max_duration_seconds"]; got != float64(12*3600) {
 		t.Fatalf("replacement max_duration_seconds = %v (%v)", got, api.called())
 	}
-	for _, d := range []string{"-1h", "1500ms", "soon"} {
+	for _, d := range []string{"-1h", "0s", "0", "1500ms", "soon"} {
 		r := runCLI(t, "ticket", "create", "fsone", "--max-duration", d)
 		if r.code != 2 || !strings.Contains(r.stderr, "--max-duration") {
 			t.Errorf("--max-duration %s = %d %q", d, r.code, r.stderr)

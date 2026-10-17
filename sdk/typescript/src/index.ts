@@ -41,20 +41,37 @@ export interface ChangeBatch {
   cursor: string;
 }
 
-export interface MountTicket {
-  id: string;
-  filesystemId: string;
-  mode: Mode;
-  state: string;
-  ticket: string | null;
-  ticketExpiresAt: Date | null;
-  expiresAt: Date;
+/** A mount session with its one-time ticket. The ticket is read from `.ticket` and is not shown when the object is printed. */
+export class MountTicket {
+  readonly id: string;
+  readonly filesystemId: string;
+  readonly mode: Mode;
+  readonly state: string;
+  readonly ticketExpiresAt: Date | null;
+  readonly expiresAt: Date;
+  readonly #ticket: string | null;
+
+  /** @internal */
+  constructor(session: any) {
+    this.id = session.id;
+    this.filesystemId = session.filesystem_id;
+    this.mode = session.mode;
+    this.state = session.state;
+    this.#ticket = session.ticket ?? null;
+    this.ticketExpiresAt = session.ticket_expires_at ? new Date(session.ticket_expires_at) : null;
+    this.expiresAt = new Date(session.expires_at);
+  }
+
+  /** The one-time ticket for `mountable mount --ticket-stdin`; null on an idempotent replay. */
+  get ticket(): string | null {
+    return this.#ticket;
+  }
 }
 
 export interface MountableOptions {
   /** Defaults to MOUNTABLE_API_KEY. */
   apiKey?: string;
-  /** Defaults to MOUNTABLE_URL, then https://mountable.io. */
+  /** Defaults to MOUNTABLE_API_URL, then https://mountable.io. */
   baseUrl?: string;
 }
 
@@ -177,7 +194,7 @@ export class Mountable {
       throw new MountableError(null, "unauthenticated", "pass apiKey or set MOUNTABLE_API_KEY");
     }
     this.#apiKey = apiKey;
-    this.baseUrl = (options.baseUrl || env("MOUNTABLE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = (options.baseUrl || env("MOUNTABLE_API_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
   }
 
   /** A handle on one filesystem. It sends nothing until it is used. */
@@ -200,16 +217,7 @@ export class Mountable {
     if (options.maxDurationSeconds !== undefined) {
       body.max_duration_seconds = options.maxDurationSeconds;
     }
-    const session = await this.#postSession(body);
-    return {
-      id: session.id,
-      filesystemId: session.filesystem_id,
-      mode: session.mode,
-      state: session.state,
-      ticket: session.ticket ?? null,
-      ticketExpiresAt: session.ticket_expires_at ? new Date(session.ticket_expires_at) : null,
-      expiresAt: new Date(session.expires_at),
-    };
+    return new MountTicket(await this.#postSession(body));
   }
 
   async #postSession(body: Record<string, unknown>): Promise<any> {
@@ -217,7 +225,7 @@ export class Mountable {
       body: JSON.stringify(body),
       headers: { "Content-Type": "application/json" },
     });
-    if (response.status >= 300) {
+    if (!isSuccess(response)) {
       throw apiError(response);
     }
     return json(response);
@@ -257,6 +265,8 @@ export class Mountable {
         method,
         headers: { Authorization: `Bearer ${bearer}`, ...options.headers },
         body: options.body,
+        // Only a 2xx answer is a success; a redirect is not followed.
+        redirect: "manual",
         signal: controller.signal,
       });
       // Read the whole body here, so a body cut short is a network failure.
@@ -397,32 +407,43 @@ class FilesystemHandle implements Filesystem {
     return this.#creating;
   }
 
-  /** Sends one call; a read is sent once more after a network error. */
+  /**
+   * Sends one call. A 401 creates a new session and sends the call once more,
+   * once per call; a read is also sent once more after a network error.
+   */
   async #request(method: string, path: string, retry: boolean, options?: SendOptions): Promise<Answer> {
-    try {
-      return await this.#authorized(method, path, options);
-    } catch (error) {
-      if (!retry || !(error instanceof MountableError) || error.code !== "network_error") {
-        throw error;
+    let refresh = true;
+    let networkRetry = retry;
+    for (;;) {
+      let session: Session;
+      let response: Answer;
+      try {
+        session = await this.#token();
+        response = await this.#send(method, path, session.token, options);
+      } catch (error) {
+        if (!networkRetry || !(error instanceof MountableError) || error.code !== "network_error") {
+          throw error;
+        }
+        networkRetry = false;
+        continue;
       }
+      if (response.status === 401 && refresh) {
+        refresh = false;
+        if (this.#session === session) {
+          this.#session = null;
+        }
+        continue;
+      }
+      if (!isSuccess(response)) {
+        throw apiError(response);
+      }
+      return response;
     }
-    return this.#authorized(method, path, options);
   }
+}
 
-  async #authorized(method: string, path: string, options?: SendOptions): Promise<Answer> {
-    const session = await this.#token();
-    let response = await this.#send(method, path, session.token, options);
-    if (response.status === 401) {
-      if (this.#session === session) {
-        this.#session = null;
-      }
-      response = await this.#send(method, path, (await this.#token()).token, options);
-    }
-    if (response.status >= 300) {
-      throw apiError(response);
-    }
-    return response;
-  }
+function isSuccess(response: Answer): boolean {
+  return response.status >= 200 && response.status < 300;
 }
 
 type RandomSource = { getRandomValues(bytes: Uint8Array): Uint8Array };

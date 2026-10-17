@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from mountable_sdk import File, FileInfo, Mountable, MountableError
+from mountable_sdk import File, FileInfo, Mountable, MountableError, _client
 from tests.mock_api import (
     API_KEY,
     CHANGES,
@@ -315,11 +315,22 @@ def test_c16_a_401_refreshes_the_session_and_retries_once(
     ]
 
 
-def test_c17_a_second_401_raises(api: MockAPI, client: Mountable):
+def test_c17_one_refresh_per_call(api: MockAPI, client: Mountable):
     api.route("GET", f"{FILES}/a.md", error(401, "unauthenticated"))
     e = raises(lambda: client.filesystem(FS).read("a.md"))
     assert (e.status, e.code) == (401, "unauthenticated")
     assert len(api.sessions()) == 2 and len(api.operations()) == 2
+
+    # A network retry does not grant another refresh: 401, drop, 401 fails.
+    answers = iter(
+        [error(401, "unauthenticated"), Reply(0, fault="drop")]
+        + [error(401, "unauthenticated"), READ_REPLY]
+    )
+    api.route("GET", f"{FILES}/b.md", lambda _: next(answers))
+    e = raises(lambda: client.filesystem(FS).read("b.md"))
+    assert (e.status, e.code) == (401, "unauthenticated")
+    assert len(api.sessions()) == 4
+    assert sum(r.path == f"{FILES}/b.md" for r in api.operations()) == 3
 
 
 def test_c18_a_session_near_expiry_is_replaced(api: MockAPI, client: Mountable):
@@ -429,6 +440,11 @@ def test_c23_secrets_never_appear_in_errors(api: MockAPI, client: Mountable):
             repr(client),
         ):
             assert API_KEY not in text and "token1secret" not in text
+    api.route("POST", SESSIONS, api.issue_session)
+    ticket = client.create_mount_ticket(FS)
+    assert ticket.ticket and ticket.ticket.startswith("mtbltk_")
+    for text in (str(ticket), repr(ticket)):
+        assert "mtbltk_" not in text
 
 
 def test_c24_errors_without_a_code(api: MockAPI, client: Mountable):
@@ -476,6 +492,12 @@ def test_c25_reads_are_retried_once_after_a_network_failure(
     assert fs.read("a.md").data == b"abc"
     api.route("GET", f"{FILES}/short.md", fail_first(1, "short", READ_REPLY))
     assert fs.read("short.md").data == b"abc"
+    # The fault is a body cut short after the headers arrived.
+    api.route("GET", "/short", Reply(200, b"x" * 10, fault="short"))
+    with httpx.stream("GET", api.url + "/short") as response:
+        assert response.status_code == 200
+        with pytest.raises(httpx.RemoteProtocolError):
+            response.read()
     api.route(
         "GET",
         f"{LIST}/",
@@ -571,12 +593,12 @@ def test_c29_an_expired_cursor_is_recovered_by_relisting(
 
 def test_c30_configuration_defaults(api: MockAPI, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("MOUNTABLE_API_KEY", raising=False)
-    monkeypatch.delenv("MOUNTABLE_URL", raising=False)
+    monkeypatch.delenv("MOUNTABLE_API_URL", raising=False)
     e = raises(lambda: Mountable())
     assert e.code == "unauthenticated" and e.status is None
     monkeypatch.setenv("MOUNTABLE_API_KEY", API_KEY)
     assert Mountable().base_url == "https://mountable.io"
-    monkeypatch.setenv("MOUNTABLE_URL", api.url + "/")
+    monkeypatch.setenv("MOUNTABLE_API_URL", api.url + "/")
     client = Mountable()
     assert client.base_url == api.url
     assert Mountable(base_url="https://example.test").base_url == "https://example.test"
@@ -587,21 +609,47 @@ def test_c30_configuration_defaults(api: MockAPI, monkeypatch: pytest.MonkeyPatc
 
 
 def test_c31_timeouts(api: MockAPI, client: Mountable, monkeypatch: pytest.MonkeyPatch):
-    timeouts: list[Any] = []
-    request = httpx.Client.request
-
-    def record(self: httpx.Client, *args: Any, **kwargs: Any) -> httpx.Response:
-        timeouts.append(kwargs.get("timeout"))
-        return request(self, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.Client, "request", record)
-    api.route("GET", CHANGES, Reply(200, {"events": [], "cursor": "c"}))
-    api.route("GET", f"{LIST}/", Reply(200, {"entries": [], "next": None}))
+    assert _client.TIMEOUT == 60
+    # Shortened: 0.1 s, and 1.1 s for changes with wait=1.
+    monkeypatch.setattr(_client, "TIMEOUT", 0.1)
     fs = client.filesystem(FS)
-    fs.list()
-    fs.changes(cursor="c", wait=25)
-    fs.changes(cursor="c", wait=3)
-    assert timeouts == [60, 60, 85, 63]
+    api.route("GET", f"{LIST}/", Reply(200, {"entries": [], "next": None}))
+    fs.list()  # creates the session before anything is slow
+    api.route("GET", f"{FILES}/slow.md", Reply(200, b"abc", delay=0.5))
+    api.route("PUT", f"{FILES}/slow.md", Reply(200, file_info("/slow.md"), delay=0.5))
+    api.route("GET", CHANGES, Reply(200, {"events": [], "cursor": "c"}, delay=0.5))
+    e = raises(lambda: fs.read("slow.md"))
+    assert (e.status, e.code) == (None, "network_error")
+    e = raises(lambda: fs.write("slow.md", b"x"))
+    assert (e.status, e.code) == (None, "network_error")
+    assert fs.changes(cursor="c", wait=1).cursor == "c"
+    e = raises(lambda: fs.changes(cursor="c", wait=0))
+    assert (e.status, e.code) == (None, "network_error")
+    calls = [f"{r.method} {r.path}" for r in api.operations()]
+    assert calls.count(f"GET {FILES}/slow.md") == 2  # a read is retried once
+    assert calls.count(f"PUT {FILES}/slow.md") == 1  # a write never
+    assert calls.count(f"GET {CHANGES}") == 3  # one wait=1, two wait=0
+
+
+def test_c32_a_redirect_is_an_error(api: MockAPI, client: Mountable):
+    moved = {"Location": f"{api.url}{FILES}/elsewhere.md"}
+    api.route("DELETE", f"{FILES}/a.md", Reply(302, b"", moved))
+    api.route("GET", f"{FILES}/a.md", Reply(307, b"", moved))
+    api.route(
+        "POST",
+        SESSIONS,
+        lambda r: (
+            api.issue_session(r)
+            if r.json().get("credential")
+            else Reply(303, b"", moved)
+        ),
+    )
+    fs = client.filesystem(FS)
+    e = raises(lambda: fs.delete("a.md"))
+    assert (e.status, e.code) == (302, "api_error")
+    assert raises(lambda: fs.read("a.md")).status == 307
+    assert raises(lambda: client.create_mount_ticket(FS)).status == 303
+    assert not any("elsewhere" in r.path for r in api.requests)
 
 
 # --- parity ----------------------------------------------------------------

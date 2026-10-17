@@ -39,9 +39,9 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | ID | Case |
 | --- | --- |
 | C14 | `filesystem(id, mode)` sends nothing. The first operation creates a token session: `POST /api/v1/mount-sessions` with `Authorization: Bearer <API key>` and `filesystem_id`, `mode`, `max_duration_seconds: 3600`, a random `idempotency_key` and `credential: "token"`; the operation sends `Authorization: Bearer <token>`. |
-| C15 | Later operations on the handle reuse the session. |
+| C15 | Later operations on the handle reuse the session. In TypeScript, concurrent first operations on a new handle share one new session. |
 | C16 | A `401` from an operation creates a new session and sends that operation once more with the new token — a read, and a write with its whole body. |
-| C17 | A `401` after the new session raises `unauthenticated`: one refresh per call, no loop. |
+| C17 | A `401` after the new session raises `unauthenticated`: one refresh per public call, no loop. A read's network retry does not grant another: `401`, connection dropped, `401` raises. |
 | C18 | A session within 60 seconds of its `expires_at` is replaced before the next operation. |
 | C19 | A failed session creation raises its error (for example `403 no_grant`) and sends no operation. |
 
@@ -52,14 +52,14 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | C20 | Every error code of the files API raises `MountableError` with that `status`, `code` and a `message`: `400 bad_path`, `401 unauthenticated`, `403 read_only`, `403 token_needs_key_or_cli`, `404 not_found`, `409 is_a_directory`, `409 not_a_regular_file`, `409 not_a_directory`, `409 directory_not_empty`, `409 conflict`, `409 quota_exceeded`, `410 cursor_expired`, `412 precondition_failed`, `413 too_large`, `429 rate_limited`, `429 download_quota`, `501 unsupported_file`, `503 changes_unavailable`. The code is read from `{"detail": {"code", "message"}}` or the same fields at the top level. |
 | C21 | `Retry-After` sets `retry_after` (seconds). |
 | C22 | A network failure raises `network_error` with `status` `None`. |
-| C23 | The API key and the session token never appear in an error's message or `repr`, even when the API echoes them. |
+| C23 | The API key and the session token never appear in an error's message or `repr`, even when the API echoes them; the client, the handle and a returned `MountTicket` do not show a secret when printed or inspected (the ticket is read from `.ticket`). |
 | C24 | An error answer without a code raises `api_error` with its status; `422` validation details raise `invalid_request`. |
 
 ## Retries
 
 | ID | Case |
 | --- | --- |
-| C25 | `read`, `list` and `changes` are sent once more after a network failure, including a read whose body ends short of `Content-Length`; a second failure raises `network_error`. |
+| C25 | `read`, `list` and `changes` are sent once more after a network failure, including a read whose body ends short of `Content-Length` after the headers arrived; a second failure raises `network_error`. |
 | C26 | `write` and `delete` are never sent again after a network failure. |
 | C27 | HTTP errors (for example `500`, `503`) are not retried. |
 
@@ -74,5 +74,11 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 
 | ID | Case |
 | --- | --- |
-| C30 | `api_key` defaults to `MOUNTABLE_API_KEY`, `base_url` to `MOUNTABLE_URL`, then `https://mountable.io`; arguments win. Without a key the constructor raises `unauthenticated`. |
-| C31 | A request fails with `network_error` when the API is silent for 60 seconds (connecting, or waiting for the answer or more of its body); for `changes`, 60 seconds plus `wait`. TypeScript's `fetch` reports no upload progress, so there the time to send a body counts toward the first 60 seconds. |
+| C30 | `api_key` defaults to `MOUNTABLE_API_KEY`, `base_url` to `MOUNTABLE_API_URL`, then `https://mountable.io`; arguments win. Without a key the constructor raises `unauthenticated`. |
+| C31 | A request fails with `network_error` (`status` `None`) when the API is silent for 60 seconds (connecting, or waiting for the answer or more of its body); for `changes`, 60 seconds plus `wait`. A read that times out is sent once more, a write is not. The tests shorten the timeout to observe it. TypeScript's `fetch` reports no upload progress, so there the time to send a body counts toward the first 60 seconds. |
+
+## Redirects
+
+| ID | Case |
+| --- | --- |
+| C32 | Only a `2xx` answer is a success. A `3xx` answer is not followed and raises `MountableError` with its status (`api_error` without a code), for file operations and session creation alike. |

@@ -15,7 +15,7 @@ Python 3.10+, synchronous, one dependency (`httpx`).
 ```python
 from mountable_sdk import Mountable, MountableError
 
-client = Mountable()  # MOUNTABLE_API_KEY; MOUNTABLE_URL or https://mountable.io
+client = Mountable()  # MOUNTABLE_API_KEY; MOUNTABLE_API_URL or https://mountable.io
 fs = client.filesystem("fs_…", mode="rw")  # sends nothing until first used
 
 info = fs.write("tickets/AB-42.md", "# AB-42\n")
@@ -67,11 +67,14 @@ while True:  # 3. then follow changes from the cursor
   `code`, `message`, `current_etag` (for `precondition_failed`) and
   `retry_after`. Network failures have `code == "network_error"`. API keys and
   tokens never appear in errors.
+- Only a `2xx` answer is a success; redirects are not followed.
 - Only reads (`read`, `list`, `changes`) are retried, once, after a network
   failure. `write` and `delete` are never retried: after a timeout the outcome
   is unknown, and a conditional write makes your own retry safe.
-- Requests time out after 60 seconds; `changes` after 60 seconds plus `wait`.
-- `create_mount_ticket` returns the ticket once. Reuse your
+- A request fails with `network_error` after 60 seconds without an answer;
+  `changes` waits 60 seconds plus `wait`.
+- `create_mount_ticket` returns the ticket once, in `.ticket`; it is left out
+  of the result's `repr`. Reuse your
   `idempotency_key` to retry after an unknown outcome; a replay returns the
   session with `ticket` `None`.
 

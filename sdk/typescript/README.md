@@ -17,7 +17,7 @@ it is not meant for browsers.
 ```ts
 import { Mountable, MountableError } from "mountable-sdk";
 
-const client = new Mountable(); // MOUNTABLE_API_KEY; MOUNTABLE_URL or https://mountable.io
+const client = new Mountable(); // MOUNTABLE_API_KEY; MOUNTABLE_API_URL or https://mountable.io
 const fs = client.filesystem("fs_…", "rw"); // sends nothing until first used
 
 const info = await fs.write("tickets/AB-42.md", "# AB-42\n");
@@ -76,11 +76,14 @@ for (;;) {
   stable `code`, `message`, `currentEtag` (for `precondition_failed`) and
   `retryAfter`. Network failures have `code === "network_error"`. API keys and
   tokens never appear in errors or in `console.log` of the client.
+- Only a `2xx` answer is a success; redirects are not followed.
 - Only reads (`read`, `list`, `changes`) are retried, once, after a network
   failure. `write` and `delete` are never retried: after a timeout the outcome
   is unknown, and a conditional write makes your own retry safe.
-- Requests time out after 60 seconds; `changes` after 60 seconds plus `wait`.
-- `createMountTicket` returns the ticket once. Reuse your `idempotencyKey` to
+- A request fails with `network_error` after 60 seconds without an answer;
+  `changes` waits 60 seconds plus `wait`.
+- `createMountTicket` returns the ticket once, in `.ticket`; printing,
+  inspecting or `JSON.stringify` of the result leaves it out. Reuse your `idempotencyKey` to
   retry after an unknown outcome; a replay returns the session with `ticket`
   `null`.
 
