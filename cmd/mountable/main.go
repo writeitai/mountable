@@ -20,7 +20,7 @@ const usage = `usage:
   mountable fs list [--org ORG_ID]
   mountable fs create NAME [--org ORG_ID]
   mountable fs usage FS_ID [--org ORG_ID]
-  mountable ticket create FS_ID [--ro] [--idempotency-key KEY]
+  mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration DURATION]
   mountable sessions list FS_ID [--org ORG_ID]
   mountable sessions revoke SESSION_ID
   mountable mount [--ro] FS_ID DIR         mount with your login
@@ -138,7 +138,7 @@ func dispatch(o *output, command string, args []string) error {
 		if name, rest := sub("create"); name != "" {
 			return ticketCreate(o, rest)
 		}
-		return usageError("ticket create FS_ID [--ro] [--idempotency-key KEY]")
+		return usageError(ticketUsage)
 	case "sessions":
 		switch name, rest := sub("list", "revoke"); name {
 		case "list":

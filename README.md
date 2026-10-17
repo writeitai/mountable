@@ -34,7 +34,7 @@ they fail with `org_required`.
 | `mountable fs list` | filesystems |
 | `mountable fs create NAME` | create a filesystem; prints its ID |
 | `mountable fs usage FS_ID` | stored bytes and files against quotas, 30-day traffic |
-| `mountable ticket create FS_ID [--ro] [--idempotency-key KEY]` | a one-time mount ticket for a sandbox |
+| `mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration D]` | a one-time mount ticket for a sandbox; the session lasts `D` (such as `12h` or `720h`; default 12 hours, at most the API key's or login's expiry) |
 | `mountable sessions list FS_ID` | live mount sessions |
 | `mountable sessions revoke SESSION_ID` | revoke a session; its mount stops |
 | `mountable mount [--ro] FS_ID DIR` | mount with your login |
@@ -122,7 +122,8 @@ It lives in [`skills/mountable/SKILL.md`](skills/mountable/SKILL.md).
 
 `mountable mcp` serves the tools `list_organizations`, `list_filesystems`,
 `create_filesystem`, `filesystem_usage`, `create_mount_ticket`,
-`list_mount_sessions` and `revoke_mount_session` over stdio. It
+`list_mount_sessions` and `revoke_mount_session` over stdio
+(`create_mount_ticket` takes an optional `max_duration_seconds`). It
 authenticates like the CLI. Results are the API's JSON; errors return the
 code and hint. Mounting stays a process in the sandbox:
 `create_mount_ticket` returns the ticket and the command that mounts with it.
@@ -162,6 +163,30 @@ from the environment Claude Code runs in, so the key stays out of the file):
 }
 ```
 
+## SDKs
+
+Backends that read and write files without mounting use the files API through
+the SDKs, which create and refresh their own short token sessions from an API
+key:
+
+```sh
+pip install mountable-sdk     # Python 3.10+, import mountable_sdk
+npm install mountable-sdk     # TypeScript, Node 18+, Bun, Deno
+```
+
+```python
+from mountable_sdk import Mountable
+
+fs = Mountable().filesystem("fs_…", mode="rw")   # MOUNTABLE_API_KEY
+info = fs.write("notes/a.md", "hello")
+fs.write("notes/a.md", "hello again", if_match=info.etag)
+print(fs.read("notes/a.md").data)
+```
+
+They live in [`sdk/python`](sdk/python) and [`sdk/typescript`](sdk/typescript),
+behave the same way (the shared cases are in [`sdk/contract.md`](sdk/contract.md)),
+and are released together on tags `sdk-vX.Y.Z`.
+
 ## LLM provider starters
 
 [`examples/llm-providers`](examples/llm-providers) has stdlib-only tools for
@@ -193,9 +218,14 @@ Documentation: <https://mountable.io/docs>.
 go test ./...
 go run ./tools/notices > THIRD_PARTY_NOTICES   # after changing dependencies
 packaging/build.sh 0.0.0    # binaries, release archives, npm tarball and wheel in dist/
+
+# SDKs
+(cd sdk/python && uv run ruff format --check . && uv run ruff check . && uv run pyright && uv run pytest)
+(cd sdk/typescript && npm ci && npm run typecheck && npm test && npm run build)
 ```
 
-Releases are cut by pushing a tag `vX.Y.Z`; see [`packaging/README.md`](packaging/README.md).
+Releases are cut by pushing a tag `vX.Y.Z` (CLI) or `sdk-vX.Y.Z` (SDKs); see
+[`packaging/README.md`](packaging/README.md).
 The Mountable service itself is operated by WriteIt.ai s.r.o.; this repository
 contains the open-source client only.
 
