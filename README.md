@@ -195,6 +195,14 @@ Code, Gemini ADK, and xAI Grok. The orchestrator holds `MOUNTABLE_API_KEY`
 and the sandbox receives the one-time ticket on stdin. The guide is
 <https://mountable.io/docs/integrations>.
 
+## Showcase demos
+
+[`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
+and a coder sandbox sharing one directory, then a read-only laptop mount;
+and a revocation kill switch. `python3 examples/showcase/relay.py --dry-run`
+prints the sequence without calling the API. The same illustrations play at
+<https://mountable.io/showcase> and do not create a filesystem.
+
 ## Licenses
 
 `mountable licenses` prints the licenses and notices of the third-party code
