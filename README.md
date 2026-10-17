@@ -167,11 +167,22 @@ from the environment Claude Code runs in, so the key stays out of the file):
 
 Backends that read and write files without mounting use the files API through
 the SDKs, which create and refresh their own short token sessions from an API
-key:
+key.
+
+The SDKs are not on PyPI or npm yet. Until the first `sdk-vX.Y.Z` release,
+install them from a checkout of this repository. For Python (3.10+), run
+from the repository root:
 
 ```sh
-pip install mountable-sdk     # Python 3.10+, import mountable_sdk
-npm install mountable-sdk     # TypeScript, Node 18+, Bun, Deno
+pip install ./sdk/python       # import mountable_sdk
+```
+
+For TypeScript, build the SDK in the checkout, then install it from the
+Node project that will import it (Node 18+, Bun, or Deno):
+
+```sh
+(cd sdk/typescript && npm ci && npm run build)  # in the checkout
+npm install /path/to/mountable/sdk/typescript   # in your project
 ```
 
 ```python
@@ -185,7 +196,7 @@ print(fs.read("notes/a.md").data)
 
 They live in [`sdk/python`](sdk/python) and [`sdk/typescript`](sdk/typescript),
 behave the same way (the shared cases are in [`sdk/contract.md`](sdk/contract.md)),
-and are released together on tags `sdk-vX.Y.Z`.
+and will be released together on tags `sdk-vX.Y.Z`.
 
 ## LLM provider starters
 
