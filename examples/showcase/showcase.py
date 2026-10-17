@@ -248,9 +248,9 @@ def illustrative_kill_switch() -> dict[str, object]:
                     _line(1400, "$ printf note > /mnt/work/note-1.txt"),
                     _line(2000, "$ printf note > /mnt/work/note-2.txt"),
                     _line(2600, "$ printf note > /mnt/work/note-3.txt"),
-                    _line(3200, "$ printf sweep > /mnt/work/sweep.txt"),
-                    _line(5200, "$ printf after > /mnt/work/note-after.txt"),
-                    _line(5600, "# write returned; a mutation admitted before revocation may finish"),
+                    _line(2900, "$ printf sweep > /mnt/work/sweep.txt"),
+                    _line(3100, "$ printf after > /mnt/work/note-after.txt"),
+                    _line(5200, "# write returned; a mutation admitted before revocation may finish"),
                     _line(7200, ABORT_LINE),
                     _line(7600, aborted),
                 ],
@@ -518,18 +518,24 @@ def run_kill_switch(
                 time.sleep(pause_s)
         _write(directory / "sweep.txt", "sweep\n")
         trace.say("agent", "$ printf sweep > /mnt/work/sweep.txt")
+        # Start this write before revocation. Only a write that began then
+        # may be described as already admitted.
+        trace.say("agent", "$ printf after > /mnt/work/note-after.txt")
+        try:
+            _write(directory / "note-after.txt", "after\n")
+        except OSError as exc:
+            admitted: OSError | None = exc
+        else:
+            admitted = None
         revoked_at = trace.clock.ms()
         trace.say("backend", f"$ mountable sessions revoke {session}")
         backend.revoke(session)
         trace.say("backend", f"revoked {session}")
         trace.say("backend", "# no new operation is admitted more than 15 seconds after this")
-        try:
-            _write(directory / "note-after.txt", "after\n")
-        except OSError as exc:
-            trace.say("agent", f"write: {exc.strerror}")
-        else:
-            trace.say("agent", "$ printf after > /mnt/work/note-after.txt")
+        if admitted is None:
             trace.say("agent", "# write returned; a mutation admitted before revocation may finish")
+        else:
+            trace.say("agent", f"write: {admitted.strerror}")
         done = mount.wait_done(30)
         trace.body["measured_abort_ms"] = trace.clock.ms() - revoked_at
         for line in mount.diagnostics().splitlines():

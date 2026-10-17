@@ -25,6 +25,20 @@ def _texts(trace: dict[str, object]) -> str:
     return json.dumps(trace)
 
 
+def _t_ms(trace: dict[str, object], prefix: str) -> int:
+    panes = trace["panes"]
+    assert isinstance(panes, list)
+    for pane in panes:
+        assert isinstance(pane, dict)
+        lines = pane["lines"]
+        assert isinstance(lines, list)
+        for line in lines:
+            assert isinstance(line, dict)
+            if str(line["text"]).startswith(prefix):
+                return int(line["t_ms"])
+    raise AssertionError(prefix)
+
+
 def _max_ms(trace: dict[str, object]) -> int:
     panes = trace["panes"]
     assert isinstance(panes, list)
@@ -68,6 +82,11 @@ class IllustrativeTests(unittest.TestCase):
         abort_at = 7200
         self.assertIn(f'"t_ms": {revoke_at}', encoded)
         self.assertEqual(abort_at - revoke_at, 4000)
+        self.assertLess(_t_ms(trace, "$ printf after"), _t_ms(trace, "$ mountable sessions revoke"))
+        self.assertGreater(
+            _t_ms(trace, "# write returned; a mutation admitted before revocation may finish"),
+            _t_ms(trace, "$ mountable sessions revoke"),
+        )
 
     def test_cli_dry_run_and_usage(self) -> None:
         stdout = io.StringIO()
@@ -133,6 +152,11 @@ class FakeRunTests(unittest.TestCase):
         self.assertIsInstance(trace["measured_abort_ms"], int)
         self.assertLess(trace["measured_abort_ms"], 20_000)
         self.assertEqual(backend.revoked, ["ses_1", "ses_1"])
+        self.assertLess(_t_ms(trace, "$ printf after"), _t_ms(trace, "$ mountable sessions revoke"))
+        self.assertGreater(
+            _t_ms(trace, "# write returned; a mutation admitted before revocation may finish"),
+            _t_ms(trace, "$ mountable sessions revoke"),
+        )
         self.assertEqual(len(backend.sandbox_envs), 1)
         self.assertNotIn(API_KEY, json.dumps(backend.sandbox_envs[0]))
 
