@@ -155,9 +155,10 @@ takes an optional `max_duration_seconds`.
 ## Files without mounting
 
 A backend that only reads and writes files can skip mounting and use the
-SDKs (`pip install mountable-sdk`, `npm install mountable-sdk`): conditional
-writes with ETags, listings, and a change feed (take a cursor first, then
-list, then follow changes).
+SDKs: conditional writes with ETags, listings, and a change feed (take a
+cursor first, then list, then follow changes). The SDKs are not on PyPI or
+npm yet; until the first `sdk-vX.Y.Z` release, install them from a checkout
+of this repository as documented in its README.
 
 ## Limitations
 
