@@ -207,16 +207,20 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 			return fail(st)
 		}
 	}
+	// The names were listed by the directory's path: answer, and issue
+	// handles for them, only if that is still this directory.
+	if st := s.still(o, dir); st != nfsOK {
+		s.drop(p.entries)
+		if st == nfsErrStale {
+			return s.failure(o.call, st)
+		}
+		return fail(st)
+	}
 	if len(p.entries) == 0 && !eof {
 		return fail(nfsErrTooSmall)
 	}
 	for i := range p.entries {
 		s.fill(o, dir, &p.entries[i], plus)
-	}
-	// The names were listed by the directory's path: answer only if that
-	// is still this directory.
-	if st := s.still(o, dir); st != nfsOK {
-		return fail(st)
 	}
 
 	e := &encoder{}
@@ -283,6 +287,8 @@ func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 		return // the listing's fileid
 	default:
 		obj = s.listedObject(entry.entry)
+		// As LOOKUP does: a later miss of the name then checks this object.
+		s.objects.named(name{dir: dir.inode, name: entry.name}, obj.inode)
 	}
 	if status != nfsOK {
 		entry.ino = dir.inode // a fileid of zero would hide the entry

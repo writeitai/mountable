@@ -45,24 +45,13 @@ func newReplyCache() *replyCache {
 	return &replyCache{entries: map[replyKey]*list.Element{}, order: list.New()}
 }
 
-// lookup finds k without making an entry: drcNew means there is none.
-func (c *replyCache) lookup(k replyKey) (*cachedReply, int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	el, ok := c.entries[k]
-	if !ok {
-		return nil, drcNew
-	}
-	if e := el.Value.(*cachedReply); e.finished {
-		return e, drcDone
-	}
-	return el.Value.(*cachedReply), drcInProgress
-}
-
-// begin looks k up. drcNew returns the entry the call now holds, and finish
-// must follow; drcDone and drcInProgress return the existing entry, whose
-// reply is final once done is closed; drcFull means no entry can be made.
-func (c *replyCache) begin(k replyKey, from *conn) (*cachedReply, int) {
+// begin decides, in one step, what becomes of a call with key k: a copy
+// of one the cache holds (drcDone or drcInProgress, returning its entry),
+// a new call admitted (drcNew: admit took its slot, the entry is made, and
+// finish must follow), or a new call turned away (drcFull: no slot, or no
+// room for an entry; nothing was taken). Deciding under one lock is what
+// keeps two simultaneous copies from both being taken for new.
+func (c *replyCache) begin(k replyKey, from *conn, admit func() bool) (*cachedReply, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.entries[k]; ok {
@@ -72,7 +61,7 @@ func (c *replyCache) begin(k replyKey, from *conn) (*cachedReply, int) {
 		}
 		return e, drcInProgress
 	}
-	if len(c.entries) >= drcSize && !c.evictFinished() {
+	if len(c.entries) >= drcSize && !c.evictFinished() || !admit() {
 		return nil, drcFull
 	}
 	e := &cachedReply{key: k, conn: from, done: make(chan struct{})}

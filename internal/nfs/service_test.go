@@ -598,6 +598,9 @@ func TestReplacementRaces(t *testing.T) {
 		if s, _ := c.readDirPlus(dir, 0, 0, 4096, 8192); s != uint32(nfsErrStale) {
 			t.Fatalf("status %d", s)
 		}
+		if n := f.refs("dir/successor"); n != 0 {
+			t.Fatalf("the successor's child kept %d references", n)
+		}
 	})
 }
 
@@ -638,5 +641,32 @@ func TestCloseQuiescesQueuedCalls(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.getAttrs != maxWorkers {
 		t.Fatalf("%d calls reached the engine, want only the %d running", f.getAttrs, maxWorkers)
+	}
+}
+
+// End abandons a call still preparing: it can no longer begin changing
+// things once it sees the cancellation.
+func TestEndAbandonsPreparation(t *testing.T) {
+	s := &service{workers: make(chan struct{}, 1), ops: map[*op]struct{}{}, endCh: make(chan struct{})}
+	c := callFor(1, procRemove, nil)
+	c.received = time.Now()
+	began := make(chan bool, 1)
+	entered := make(chan struct{})
+	result := make(chan reply, 1)
+	go func() {
+		result <- s.run(c, false, func(o *op) reply {
+			close(entered)
+			<-o.cancel
+			began <- o.beginMutation()
+			return reply{}
+		})
+	}()
+	<-entered
+	s.end()
+	if <-began {
+		t.Fatal("a mutation began after End")
+	}
+	if r := <-result; !bytes.HasPrefix(r.body, be32(uint32(nfsErrIO))) {
+		t.Fatalf("answered % x", r.body)
 	}
 }

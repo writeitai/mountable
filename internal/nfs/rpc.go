@@ -179,30 +179,24 @@ func (c *conn) dispatch(cl *call) {
 		})
 		return
 	}
-	// A copy of a call already running or answered is recognised before
-	// anything else: told to retry later, the client would resend it under
-	// a new XID and it would run twice.
-	key := cl.key()
-	if entry, state := c.s.drc.lookup(key); state != drcNew {
-		c.duplicate(cl, entry, state)
-		return
-	}
-	if !c.admitted() {
+	// A copy of a call already running or answered is recognised before a
+	// slot is needed, in the same decision that admits a new call: told to
+	// retry later, the client would resend a copy under a new XID and it
+	// would run twice.
+	entry, state := c.s.drc.begin(cl.key(), c, c.admitted)
+	switch state {
+	case drcNew:
+		c.s.spawn(func() {
+			defer c.release()
+			r := svc.handle(cl)
+			c.s.drc.finish(entry, r)
+			c.send(cl.xid, r)
+		})
+	case drcFull:
 		c.send(cl.xid, svc.retryLater(cl)) // a new call, changed nothing
-		return
+	default:
+		c.duplicate(cl, entry, state)
 	}
-	entry, state := c.s.drc.begin(key, c)
-	if state != drcNew {
-		c.release()
-		c.duplicate(cl, entry, state) // the first copy arrived meanwhile
-		return
-	}
-	c.s.spawn(func() {
-		defer c.release()
-		r := svc.handle(cl)
-		c.s.drc.finish(entry, r)
-		c.send(cl.xid, r)
-	})
 }
 
 // admitted takes a pending slot for a new call, if one is free.
@@ -227,8 +221,6 @@ func (c *conn) duplicate(cl *call, entry *cachedReply, state int) {
 	switch {
 	case state == drcDone:
 		c.send(cl.xid, entry.r)
-	case state == drcFull:
-		c.send(cl.xid, c.s.svc.retryLater(cl)) // no entry was made: a new call
 	case entry.conn == c:
 	default:
 		select {

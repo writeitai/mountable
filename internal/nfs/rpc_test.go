@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"io"
 	"slices"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -224,25 +225,28 @@ func TestDecoderBounds(t *testing.T) {
 	}
 }
 
+// admit always finds a slot.
+func admit() bool { return true }
+
 func TestReplyCache(t *testing.T) {
 	c := newReplyCache()
 	k := replyKey{xid: 1}
-	e, state := c.begin(k, nil)
+	e, state := c.begin(k, nil, admit)
 	if state != drcNew {
 		t.Fatal("a new call was found")
 	}
-	if _, state := c.begin(k, nil); state != drcInProgress {
+	if _, state := c.begin(k, nil, admit); state != drcInProgress {
 		t.Fatal("a call in progress was not recognised")
 	}
 	c.finish(e, reply{body: []byte{1}})
-	if again, state := c.begin(k, nil); state != drcDone || !bytes.Equal(again.r.body, []byte{1}) {
+	if again, state := c.begin(k, nil, admit); state != drcDone || !bytes.Equal(again.r.body, []byte{1}) {
 		t.Fatal("the reply was not kept")
 	}
 	// "Retry later" is never kept: the resent call runs again.
 	j := replyKey{xid: 2}
-	e, _ = c.begin(j, nil)
+	e, _ = c.begin(j, nil, admit)
 	c.finish(e, reply{retry: true})
-	if _, state := c.begin(j, nil); state != drcNew {
+	if _, state := c.begin(j, nil, admit); state != drcNew {
 		t.Fatal("a retry-later reply was cached")
 	}
 }
@@ -251,20 +255,20 @@ func TestReplyCache(t *testing.T) {
 // every entry unfinished a new call is turned away.
 func TestReplyCacheNeverEvictsUnfinished(t *testing.T) {
 	c := newReplyCache()
-	running, _ := c.begin(replyKey{xid: 1}, nil)
+	running, _ := c.begin(replyKey{xid: 1}, nil, admit)
 	for i := range drcSize - 1 {
-		e, _ := c.begin(replyKey{xid: uint32(100 + i)}, nil)
+		e, _ := c.begin(replyKey{xid: uint32(100 + i)}, nil, admit)
 		c.finish(e, reply{})
 	}
 	for i := range drcSize - 1 { // each evicts a finished entry
-		if _, state := c.begin(replyKey{xid: uint32(5000 + i)}, nil); state != drcNew {
+		if _, state := c.begin(replyKey{xid: uint32(5000 + i)}, nil, admit); state != drcNew {
 			t.Fatalf("call %d: state %d", i, state)
 		}
 	}
-	if _, state := c.begin(replyKey{xid: 1}, nil); state != drcInProgress {
+	if _, state := c.begin(replyKey{xid: 1}, nil, admit); state != drcInProgress {
 		t.Fatal("the unfinished entry was evicted")
 	}
-	if _, state := c.begin(replyKey{xid: 9999}, nil); state != drcFull {
+	if _, state := c.begin(replyKey{xid: 9999}, nil, admit); state != drcFull {
 		t.Fatalf("state %d with every entry unfinished", state)
 	}
 	c.finish(running, reply{})
@@ -308,7 +312,7 @@ func TestRetransmissionIsAnsweredFromTheCache(t *testing.T) {
 	if again := c.receive(); !bytes.Equal(first, again) {
 		t.Fatal("the resent call got another reply")
 	}
-	if _, state := srv.drc.begin(callFor(77, procRemove, args).key(), nil); state != drcDone {
+	if _, state := srv.drc.begin(callFor(77, procRemove, args).key(), nil, admit); state != drcDone {
 		t.Fatal("REMOVE's reply was not cached")
 	}
 	if nonIdempotent(procGetAttr) || nonIdempotent(procRead) || !nonIdempotent(procWrite) {
@@ -484,6 +488,70 @@ func TestDuplicatesUnderSaturation(t *testing.T) {
 	select {
 	case <-started:
 		t.Fatal("the duplicate ran again")
+	default:
+	}
+}
+
+// Simultaneous copies of one call, with a single slot free: one runs, the
+// others are taken for its copies, and none is told to retry later.
+func TestSimultaneousCopiesAtTheLastSlot(t *testing.T) {
+	c := newReplyCache()
+	slot := make(chan struct{}, 1)
+	take := func() bool {
+		select {
+		case slot <- struct{}{}:
+			return true
+		default:
+			return false
+		}
+	}
+	states := make(chan int, 50)
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, state := c.begin(replyKey{xid: 7}, nil, take)
+			states <- state
+		}()
+	}
+	wg.Wait()
+	close(states)
+	count := map[int]int{}
+	for s := range states {
+		count[s]++
+	}
+	if count[drcNew] != 1 || count[drcInProgress] != 49 {
+		t.Fatalf("states %v", count)
+	}
+}
+
+// The same over the wire: two copies on two connections at once, one slot
+// left, both answered by the one run.
+func TestSimultaneousCopiesOverTheWire(t *testing.T) {
+	started, release := slowRemove(t)
+	srv, c := startServer(t, newFakeEngine())
+	fh := c.root()
+	for range maxPending - 1 {
+		srv.pending <- struct{}{}
+	}
+	args := wire{}.opaque(fh).str("x")
+	other := dial(t, srv.listener.Addr().String())
+	msg := callMessage(90, programNFS, 3, procRemove, 501, args)
+	go c.send(msg)
+	go other.send(msg)
+	<-started
+	time.Sleep(50 * time.Millisecond) // both copies are in
+	close(release)
+	want := wire{}.u32(90).u32(1).u32(0).u32(0).u32(0).u32(0).u32(uint32(nfsErrROFS))
+	for _, client := range []*testClient{c, other} {
+		if got := client.receive(); !bytes.HasPrefix(got, want) {
+			t.Fatalf("% x", got)
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("the call ran twice")
 	default:
 	}
 }

@@ -37,7 +37,7 @@ func (c *testClient) readDirPlus(dir []byte, cookie, verf uint64, dirCount, maxC
 	r := c.call(procReadDirPlus, wire{}.opaque(dir).u64(cookie).u64(verf).u32(dirCount).u32(maxCount))
 	size := len(r.b)
 	status := r.u32()
-	if _, ok := r.postOpAttr(); !ok {
+	if _, ok := r.postOpAttr(); !ok && status != uint32(nfsErrStale) {
 		c.t.Fatal("no directory attributes")
 	}
 	if status != 0 {
@@ -393,5 +393,29 @@ func TestNoCookieForWhatDidNotFit(t *testing.T) {
 	_, p := c.readDirPlus(dir, 0, 0, 1024, pageOverhead+3*184)
 	if s, _ := c.readDirPlus(dir, p.last()+1, p.verf, 1024, 1024); s != uint32(nfsErrBadCook) {
 		t.Fatalf("a cookie never sent: %d", s)
+	}
+}
+
+// A handle issued only through READDIRPLUS is tracked like a LOOKUP's: once
+// a lookup misses its name, a recreate with the same stored inode does not
+// revive it.
+func TestReadDirPlusHandlesAreRetiredOnAMiss(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	_, p := c.readDirPlus(root, 0, 0, 4096, 1<<16)
+	var old []byte
+	for _, e := range p.entries {
+		if e.name == "a.txt" {
+			old = e.fh
+		}
+	}
+	f.remove("a.txt")
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("lookup after the delete: %d", s)
+	}
+	f.add("a.txt", 1001, syscall.S_IFREG|0o644, "same stored inode")
+	if s := c.status(procGetAttr, wire{}.opaque(old)); s != uint32(nfsErrStale) {
+		t.Fatalf("the listed handle: %d", s)
 	}
 }

@@ -135,6 +135,9 @@ func (s *service) end() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for o := range s.ops {
+		// A call still preparing is abandoned first, so it can no longer
+		// begin changing things once it sees the cancellation.
+		o.state.CompareAndSwap(opPreparing, opAbandoned)
 		o.stop()
 	}
 }

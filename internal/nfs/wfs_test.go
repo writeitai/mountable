@@ -328,3 +328,53 @@ func TestRealEngineHardLinkSurvivor(t *testing.T) {
 		t.Fatalf("read %q", data)
 	}
 }
+
+// Two links to one file; the first is replaced by a rename over it. The
+// shared handle and the survivor keep the file; the name that was
+// overwritten is another file now. Many GETATTRs at once agree.
+func TestRealEngineRenameOverAHardLink(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+	for _, name := range []string{"one", "two"} {
+		e := entry(name, 0o644, 4242, "shared")
+		e.HardLinkId, e.HardLinkCounter = []byte("link-4242"), 2
+		filer.put("/c/fs1/d", e)
+	}
+	filer.put("/c/fs1/d", entry("other", 0o644, 701, "")) // too many to cache
+	_, c := startServer(t, realEngine(t, filer, 2))
+	dir, _ := c.lookup(c.root(), "d")
+	shared, _ := c.lookup(dir, "one")
+	c.lookup(dir, "two")
+	filer.put("/c/fs1/d", entry("one", 0o644, 9999, "replacement"))
+
+	for range 40 { // pipelined: the server works on them at once
+		c.xid++
+		c.send(callMessage(c.xid, programNFS, 3, procGetAttr, 501, wire{}.opaque(shared)))
+	}
+	for range 40 {
+		r := &replyReader{t: t, b: c.receive()[24:]}
+		if s := r.u32(); s != 0 {
+			t.Fatalf("GETATTR of the shared handle: %d", s)
+		}
+	}
+	read := func(fh []byte) string {
+		r := c.call(procRead, wire{}.opaque(fh).u64(0).u32(100))
+		if s := r.u32(); s != 0 {
+			t.Fatalf("READ: %d", s)
+		}
+		r.postOpAttr()
+		r.u32()
+		r.u32()
+		return string(r.opaque())
+	}
+	if got := read(shared); got != "shared" {
+		t.Fatalf("the shared handle read %q", got)
+	}
+	if two, _ := c.lookup(dir, "two"); !bytes.Equal(two, shared) || read(two) != "shared" {
+		t.Fatal("the survivor lost its file")
+	}
+	one, a := c.lookup(dir, "one")
+	if bytes.Equal(one, shared) || a.size != 11 || read(one) != "replacement" {
+		t.Fatal("the overwritten name is not the replacement")
+	}
+}
