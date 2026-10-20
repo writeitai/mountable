@@ -580,3 +580,80 @@ func TestRealEngineLinkGroupsSharingAnInode(t *testing.T) {
 		}
 	}
 }
+
+// A standalone file replaced by a hard link of a group the engine never
+// saw (its other name never looked up), with the same stored inode: the
+// file's handle is stale, before any LOOKUP or READDIRPLUS, and the name
+// gets a handle of its own that reads the link.
+func TestRealEngineStandaloneReplacedByAnUnseenLink(t *testing.T) {
+	for _, first := range staleChecks {
+		t.Run(first, func(t *testing.T) {
+			filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+			filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+			for i, name := range []string{"f", "x", "y"} { // too many to cache
+				filer.put("/c/fs1/d", entry(name, 0o644, uint64(710+i), "original"))
+			}
+			engine := realEngine(t, filer, 2)
+			_, c := startServer(t, engine)
+			dir, _ := c.lookup(c.root(), "d")
+			old, _ := c.lookup(dir, "f")
+			for _, name := range []string{"f", "elsewhere"} {
+				e := entry(name, 0o644, 710, "the link")
+				e.HardLinkId, e.HardLinkCounter = []byte("unseen"), 2
+				filer.put("/c/fs1/d", e)
+			}
+			staleNow(t, c, old, first, "the replaced file's handle")
+			fresh, a := c.lookup(dir, "f")
+			if bytes.Equal(fresh, old) || a.size != 8 {
+				t.Fatalf("the link's handle or size: %+v", a)
+			}
+		})
+	}
+}
+
+// A regular file replaced by a symlink with the same stored inode while a
+// WFS handle holds the file open: the file's handle is stale, and LOOKUP
+// and READDIRPLUS give the symlink as a symlink, with its own handle.
+func TestRealEngineFileReplacedByASymlink(t *testing.T) {
+	for _, first := range staleChecks {
+		t.Run(first, func(t *testing.T) {
+			filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+			filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+			for i, name := range []string{"f", "x", "y"} { // too many to cache
+				filer.put("/c/fs1/d", entry(name, 0o644, uint64(710+i), "original"))
+			}
+			engine := realEngine(t, filer, 2)
+			_, c := startServer(t, engine)
+			dir, _ := c.lookup(c.root(), "d")
+			old, a := c.lookup(dir, "f")
+			var opened fuse.OpenOut
+			h := fuse.InHeader{NodeId: a.fileid}
+			if st := engine.Open(nil, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
+				t.Fatalf("open: %v", st)
+			}
+			defer engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+			symlink := entry("f", os.ModeSymlink|0o777, 710, "")
+			symlink.Attributes.SymlinkTarget = "elsewhere"
+			filer.put("/c/fs1/d", symlink)
+			staleNow(t, c, old, first, "the replaced file's handle")
+			fresh, b := c.lookup(dir, "f")
+			if bytes.Equal(fresh, old) || b.ftype != 5 {
+				t.Fatalf("the symlink's handle or type: %+v", b)
+			}
+			r := c.call(procReadlink, wire{}.opaque(fresh))
+			if s := r.u32(); s != 0 {
+				t.Fatalf("READLINK: %d", s)
+			}
+			r.postOpAttr()
+			if target := string(r.opaque()); target != "elsewhere" {
+				t.Fatalf("READLINK: %q", target)
+			}
+			_, p := c.readDirPlus(dir, 0, 0, 4096, 1<<16)
+			for _, e := range p.entries {
+				if e.name == "f" && (e.attr == nil || e.attr.ftype != 5 || bytes.Equal(e.fh, old)) {
+					t.Fatalf("listed %+v", e)
+				}
+			}
+		})
+	}
+}
