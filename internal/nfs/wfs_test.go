@@ -386,6 +386,12 @@ func TestRealEngineRenameOverAHardLink(t *testing.T) {
 // with the same stored inode. The open handle does not count as proof the
 // old object survived: the old NFS handle is STALE, never the newcomer.
 func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
+	for _, first := range staleChecks {
+		t.Run(first, func(t *testing.T) { realEngineOpenHandleIsNoProofOfLife(t, first) })
+	}
+}
+
+func realEngineOpenHandleIsNoProofOfLife(t *testing.T, first string) {
 	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
 	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
 	for i, name := range []string{"f", "x", "y"} { // too many to cache
@@ -401,6 +407,9 @@ func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
 		t.Fatalf("open: %v", st)
 	}
 	filer.remove("/c/fs1/d", "f")
+	// Stale at once, while the WFS handle still holds the file, before
+	// any LOOKUP or READDIRPLUS visits the name.
+	staleNow(t, c, old, first, "the deleted file's handle")
 	if s := c.status(procLookup, wire{}.opaque(dir).str("f")); s != uint32(nfsErrNoEnt) {
 		t.Fatalf("lookup of the deleted name: %d", s)
 	}
@@ -443,11 +452,38 @@ func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
 	check("after it was closed")
 }
 
+// staleChecks are the calls that resolve a handle, each of which must see
+// it stale on its own: whichever comes first retires the identity.
+var staleChecks = []string{"GETATTR", "ACCESS", "READ"}
+
+// staleNow checks that GETATTR, ACCESS and READ of fh are all STALE,
+// first the one named first.
+func staleNow(t *testing.T, c *testClient, fh []byte, first, what string) {
+	t.Helper()
+	calls := map[string]func() uint32{
+		"GETATTR": func() uint32 { return c.status(procGetAttr, wire{}.opaque(fh)) },
+		"ACCESS":  func() uint32 { return c.status(procAccess, wire{}.opaque(fh).u32(0x3f)) },
+		"READ":    func() uint32 { return c.status(procRead, wire{}.opaque(fh).u64(0).u32(100)) },
+	}
+	order := append([]string{first}, staleChecks...)
+	for _, name := range order {
+		if s := calls[name](); s != uint32(nfsErrStale) {
+			t.Fatalf("%s of %s: %d", name, what, s)
+		}
+	}
+}
+
 // A single-path file overwritten by another while a handle holds the old
 // one open: READDIRPLUS lists the newcomer with its own attributes and a
 // handle that works. And a file overwritten by a hard link shares one
 // handle with that link's other name.
 func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
+	for _, first := range staleChecks {
+		t.Run(first, func(t *testing.T) { realEngineOverwrittenFileIsListedAsItself(t, first) })
+	}
+}
+
+func realEngineOverwrittenFileIsListedAsItself(t *testing.T, first string) {
 	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
 	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
 	for i, name := range []string{"f", "g", "x"} { // too many to cache
@@ -464,6 +500,9 @@ func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
 	}
 	defer engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
 	filer.put("/c/fs1/d", entry("f", 0o644, 9999, "the newcomer"))
+	// The overwritten file's old handle is stale, though the WFS handle
+	// still holds it open, before any LOOKUP or READDIRPLUS visits the name.
+	staleNow(t, c, old, first, "the overwritten file's handle")
 	_, p := c.readDirPlus(dir, 0, 0, 4096, 1<<16)
 	var listed *pageEntry
 	for i := range p.entries {
@@ -477,17 +516,7 @@ func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
 	if s := c.status(procGetAttr, wire{}.opaque(listed.fh)); s != 0 {
 		t.Fatalf("the listed handle: %d", s)
 	}
-	// The overwritten file's old handle is stale, though the WFS handle still
-	// holds it open.
-	for name, call := range map[string]func() uint32{
-		"GETATTR": func() uint32 { return c.status(procGetAttr, wire{}.opaque(old)) },
-		"ACCESS":  func() uint32 { return c.status(procAccess, wire{}.opaque(old).u32(0x3f)) },
-		"READ":    func() uint32 { return c.status(procRead, wire{}.opaque(old).u64(0).u32(100)) },
-	} {
-		if s := call(); s != uint32(nfsErrStale) {
-			t.Fatalf("%s of the overwritten file's handle: %d", name, s)
-		}
-	}
+	staleNow(t, c, old, first, "the overwritten file's handle, after the listing")
 
 	link := func(name string) *filer_pb.Entry {
 		e := entry(name, 0o644, 4242, "linked")

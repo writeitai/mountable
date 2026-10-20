@@ -47,7 +47,9 @@ func (s *service) resolve(o *op, fh []byte) (object, nfsStatus) {
 // is still the identity issued: the same stored inode and type, and, for
 // anything but a directory, still in the namespace. A stateless NFS
 // handle has no open-unlink semantics: an object only an open WFS handle
-// still holds (nlink 0) is gone for it, and the identity is retired.
+// still holds is gone for it, and the identity is retired. GetAttr
+// answers from such a handle, so a non-directory is also checked in the
+// namespace itself.
 func (s *service) verified(o *op, inode, incarnation uint64) (fuse.Attr, nfsStatus) {
 	id, ok := s.objects.current(inode, incarnation)
 	if !ok {
@@ -55,6 +57,12 @@ func (s *service) verified(o *op, inode, incarnation uint64) (fuse.Attr, nfsStat
 	}
 	var out fuse.AttrOut
 	st := s.engine.GetAttr(o.cancel, &fuse.GetAttrIn{InHeader: header(inode, o.cred)}, &out)
+	if st == fuse.OK && id.kind != syscall.S_IFDIR {
+		var holds bool
+		if holds, st = s.namespaceHolds(inode, id); st == fuse.OK && !holds {
+			st = fuse.ENOENT
+		}
+	}
 	switch {
 	case st == fuse.ENOENT || st == fuse.OK && (out.Ino != id.ino || out.Mode&syscall.S_IFMT != id.kind ||
 		id.kind != syscall.S_IFDIR && out.Nlink == 0):
@@ -132,11 +140,11 @@ func (s *service) lookup(o *op) reply {
 	case name == "" || strings.ContainsAny(name, "/\x00") || !utf8.ValidString(name):
 		status = nfsErrNoEnt // no such name can be stored
 	default:
-		child, status = s.child(o, dir.inode, name)
+		child, status = s.child(o, dir, name)
 	}
-	if status == nfsOK {
-		// The lookup went by the directory's path: answer only if that
-		// is still this directory.
+	if status == nfsOK && name == ".." {
+		// The parent was found by the directory's path: answer only if
+		// that is still this directory.
 		status = s.still(o, dir)
 	}
 	if status == nfsErrStale {
@@ -153,15 +161,23 @@ func (s *service) lookup(o *op) reply {
 	return reply{body: e.buf}
 }
 
-// child looks a name up in the directory at inode. When the name is gone,
+// child looks a name up in the directory dir. When the name is gone,
 // the object it last named is checked in the namespace: still there under
 // another name (a rename, a surviving hard link), it keeps its handles;
 // gone, it is retired, so whatever takes the name next is a new object even
-// with the same stored inode.
-func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
-	key := name{dir: inode, name: n}
+// with the same stored inode. The lookup goes by the directory's path, so
+// what it found counts only if that is still dir, which is checked before
+// anything is recorded.
+func (s *service) child(o *op, dir object, n string) (object, nfsStatus) {
+	key := name{dir: dir.inode, name: n}
 	var out fuse.EntryOut
-	st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), n, &out)
+	st := s.engine.Lookup(o.cancel, ptr(header(dir.inode, o.cred)), n, &out)
+	if st == fuse.OK {
+		if status := s.still(o, dir); status != nfsOK {
+			s.engine.Forget(out.NodeId, 1)
+			return object{}, status
+		}
+	}
 	if st == fuse.ENOENT {
 		// The name is forgotten only once the check was conclusive (after
 		// an error, the next miss checks again), and only as it was bound
@@ -207,7 +223,7 @@ func (s *service) parent(o *op, dir object) (object, nfsStatus) {
 	names := strings.Split(rel, "/")
 	current := root
 	for _, name := range names[:len(names)-1] {
-		if current, status = s.child(o, current.inode, name); status != nfsOK {
+		if current, status = s.child(o, current, name); status != nfsOK {
 			return object{}, status
 		}
 	}
@@ -365,21 +381,34 @@ func (s *service) checkExists(inode uint64) (conclusive bool) {
 		return true // retired already
 	}
 	id, _ := s.objects.current(inode, incarnation)
-	entry, st := s.engine.NamespaceEntry(inode)
-	if st == fuse.OK {
-		stored := entry.GetAttributes().GetInode()
-		if stored == 0 {
-			stored = inode // as GetAttr reports an entry without one
-		}
-		if stored == id.ino && kindOf(entry) == id.kind {
-			return true
-		}
-	}
-	if st != fuse.OK && st != fuse.ENOENT {
+	holds, st := s.namespaceHolds(inode, id)
+	if st != fuse.OK {
 		return false
 	}
-	s.objects.retire(inode, incarnation)
+	if !holds {
+		s.objects.retire(inode, incarnation)
+	}
 	return true
+}
+
+// namespaceHolds reports whether the namespace still has the object with
+// identity id at inode, through its path or a surviving hard link, and
+// not only an open WFS handle. A status other than OK means it could not
+// tell.
+func (s *service) namespaceHolds(inode uint64, id identity) (bool, fuse.Status) {
+	entry, st := s.engine.NamespaceEntry(inode)
+	switch st {
+	case fuse.OK:
+	case fuse.ENOENT:
+		return false, fuse.OK
+	default:
+		return false, st
+	}
+	stored := entry.GetAttributes().GetInode()
+	if stored == 0 {
+		stored = inode // as GetAttr reports an entry without one
+	}
+	return stored == id.ino && kindOf(entry) == id.kind, fuse.OK
 }
 
 // still checks that the inode still holds obj's identity, as resolve

@@ -577,13 +577,24 @@ func TestReplacementRaces(t *testing.T) {
 		f := sampleEngine()
 		_, c := startServer(t, f)
 		dir, _ := c.lookup(c.root(), "dir")
+		var b uint64 // what the lookup found
 		f.afterLookup = func() {
 			f.afterLookup = nil
+			f.mu.Lock()
+			b = f.inodes[f.root+"/dir/b"]
+			f.mu.Unlock()
 			replaceDir(f, "dir", 2002)
 			f.add("dir/b", 2003, syscall.S_IFREG|0o600, "successor")
 		}
 		if s := c.status(procLookup, wire{}.opaque(dir).str("b")); s != uint32(nfsErrStale) {
 			t.Fatalf("status %d", s)
+		}
+		// Nothing was recorded for what the stale directory's lookup found.
+		f.mu.Lock()
+		n := f.nlookup[b]
+		f.mu.Unlock()
+		if b == 0 || n != 0 {
+			t.Fatalf("the old directory's child %d kept %d references", b, n)
 		}
 	})
 	t.Run("READDIRPLUS", func(t *testing.T) {
