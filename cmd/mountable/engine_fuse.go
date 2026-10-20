@@ -83,6 +83,9 @@ func (e *engine) flush() {
 	e.wfs.ClearCacheDir()
 }
 
+// close has nothing to release: serving ends with the FUSE server.
+func (e *engine) close() {}
+
 // abort ends the mount at once without flushing: every further operation in
 // it fails. Exiting the process afterwards also closes the FUSE device,
 // which ends the connection even where the abort itself could not be done.

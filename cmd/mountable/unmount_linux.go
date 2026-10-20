@@ -17,6 +17,13 @@ const fuseConnections = "/sys/fs/fuse/connections"
 // abortConnection aborts the FUSE connection behind dir: the kernel fails
 // every pending and further operation in it.
 func abortConnection(dir string) error {
+	if err := abortFUSE(dir); err != nil {
+		return fmt.Errorf("aborting the FUSE connection: %w", err)
+	}
+	return nil
+}
+
+func abortFUSE(dir string) error {
 	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package nfs
 import (
 	"hash/fnv"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,9 +35,11 @@ func NewServer(c Config) (*Server, error) {
 		uid:     c.UID,
 		handles: h,
 		objects: newObjects(c.Engine),
-		dirs:    newEnumerations(c.Engine),
+		dirs:    &directories{tables: map[object]*cookieTable{}},
 		fsid:    fsid.Sum64() | 1, // never zero
 		workers: make(chan struct{}, maxWorkers),
+		ops:     map[*op]struct{}{},
+		endCh:   make(chan struct{}),
 	}
 	return &Server{
 		svc:     s,
@@ -46,9 +49,11 @@ func NewServer(c Config) (*Server, error) {
 	}, nil
 }
 
-// End makes every further call fail at once, before the mount is forced
-// off: the session ended, and nothing may be served from it any more.
-func (s *Server) End() { s.svc.ended.Store(true) }
+// End makes every call fail at once, before the mount is forced off: the
+// session ended, and nothing may be served from it any more. Calls being
+// worked on are cancelled and answer NFS3ERR_IO, whatever the engine
+// returns.
+func (s *Server) End() { s.svc.end() }
 
 // maxWorkers bounds the calls the engine works on at once, so a gateway
 // that stops answering holds up a bounded number of them; the others are
@@ -73,34 +78,78 @@ type service struct {
 	uid     uint32
 	handles *handles
 	objects *objects
-	dirs    *enumerations
+	dirs    *directories
 	fsid    uint64
 	workers chan struct{}
 	ended   atomic.Bool
+	endCh   chan struct{} // closed by end
+	endOnce sync.Once
+
+	mu   sync.Mutex
+	ops  map[*op]struct{} // the calls being worked on
+	work sync.WaitGroup   // their work, including what outlives its answer
 }
 
-// handle answers one NFS or MOUNT v3 call.
+// immediate answers a call that never reaches the engine: MOUNT, NULL, an
+// unknown procedure. ok is false for any other call.
+func (s *service) immediate(c *call) (reply, bool) {
+	switch _, known := procedures[c.proc]; {
+	case c.prog == programMount:
+		return s.mount(c), true
+	case !known:
+		return reply{stat: acceptProcUnavail}, true
+	case c.proc == procNull && len(c.args) != 0:
+		return garbage(), true
+	case c.proc == procNull:
+		return reply{}, true
+	}
+	return reply{}, false
+}
+
+// admit refuses an NFS call that may not be served at all: without
+// AUTH_SYS, from another user, or after End. It runs before the call is
+// queued or looked up in the duplicate-request cache.
+func (s *service) admit(c *call) (reply, bool) {
+	switch {
+	case c.cred.flavor != authSys:
+		return reply{denied: true, stat: rejectAuthError, body: be32(authTooWeak)}, false
+	case c.cred.uid != s.uid && c.cred.uid != 0:
+		return s.failure(c, nfsErrAccess), false
+	case s.ended.Load():
+		return s.failure(c, nfsErrIO), false
+	}
+	return reply{}, true
+}
+
+// handle works on an admitted NFS call.
 func (s *service) handle(c *call) reply {
-	if c.prog == programMount {
-		return s.mount(c)
-	}
-	proc, known := procedures[c.proc]
-	if !known {
-		return reply{stat: acceptProcUnavail}
-	}
-	if c.proc == procNull {
-		return reply{}
-	}
-	if c.cred.flavor != authSys {
-		return reply{denied: true, stat: rejectAuthError, body: be32(authTooWeak)}
-	}
-	if c.cred.uid != s.uid && c.cred.uid != 0 {
-		return s.failure(c, nfsErrAccess)
-	}
-	if s.ended.Load() {
-		return s.failure(c, nfsErrIO)
-	}
+	proc := procedures[c.proc]
 	return s.run(c, proc.changesNothing, func(o *op) reply { return proc.fn(s, o) })
+}
+
+// end marks the export ended and cancels the calls being worked on.
+func (s *service) end() {
+	s.ended.Store(true)
+	s.endOnce.Do(func() { close(s.endCh) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for o := range s.ops {
+		o.stop()
+	}
+}
+
+// wait waits, at most d, for the work still running, as Close does once
+// the connections are gone.
+func (s *service) wait(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.work.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
 }
 
 // procedure is one NFSv3 procedure. One that changesNothing may answer
@@ -176,10 +225,13 @@ func garbage() reply { return reply{stat: acceptGarbageArgs} }
 type op struct {
 	*call
 	// cancel is closed once the call was answered without waiting for the
-	// work: the engine's cancellable waits give up.
+	// work, or the export ended: the engine's cancellable waits give up.
 	cancel chan struct{}
+	once   sync.Once
 	state  atomic.Int32
 }
+
+func (o *op) stop() { o.once.Do(func() { close(o.cancel) }) }
 
 const (
 	opPreparing int32 = iota
@@ -206,11 +258,28 @@ func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply 
 		wait.Stop()
 	case <-wait.C:
 		return s.retryLater(c)
+	case <-s.endCh:
+		return s.failure(c, nfsErrIO)
 	}
 	o := &op{call: c, cancel: make(chan struct{})}
+	s.mu.Lock()
+	if s.ended.Load() { // ended while the call waited for its worker
+		s.mu.Unlock()
+		<-s.workers
+		return s.failure(c, nfsErrIO)
+	}
+	s.ops[o] = struct{}{}
+	s.work.Add(1)
+	s.mu.Unlock()
 	result := make(chan reply, 1)
 	go func() {
-		defer func() { <-s.workers }()
+		defer func() {
+			s.mu.Lock()
+			delete(s.ops, o)
+			s.mu.Unlock()
+			<-s.workers
+			s.work.Done()
+		}()
 		result <- fn(o)
 	}()
 	limit := c.received.Add(prepareBudget)
@@ -221,21 +290,33 @@ func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply 
 	defer timer.Stop()
 	select {
 	case r := <-result:
-		return r
+		return s.unlessEnded(c, r)
+	case <-s.endCh:
+		return s.failure(c, nfsErrIO)
 	case <-timer.C:
 	}
 	if o.state.CompareAndSwap(opPreparing, opAbandoned) {
-		close(o.cancel)
+		o.stop()
 		return s.retryLater(c)
 	}
 	timer.Reset(time.Until(c.received.Add(rpcDeadline)))
 	select {
 	case r := <-result:
-		return r
+		return s.unlessEnded(c, r)
+	case <-s.endCh:
+		return s.failure(c, nfsErrIO)
 	case <-timer.C:
-		close(o.cancel)
+		o.stop()
 		return s.failure(c, nfsErrIO)
 	}
+}
+
+// unlessEnded drops a result the engine produced after the export ended.
+func (s *service) unlessEnded(c *call, r reply) reply {
+	if s.ended.Load() {
+		return s.failure(c, nfsErrIO)
+	}
+	return r
 }
 
 // header is the request header WFS operations take, acting for the caller.

@@ -7,6 +7,9 @@ package nfs
 func (s *service) mount(c *call) reply {
 	switch c.proc {
 	case mountProcNull:
+		if len(c.args) != 0 {
+			return garbage()
+		}
 		return reply{}
 	case mountProcMnt, mountProcDump, mountProcUmnt, mountProcUmntAll, mountProcExport:
 	default:
@@ -15,16 +18,19 @@ func (s *service) mount(c *call) reply {
 	if c.cred.flavor != authSys {
 		return reply{denied: true, stat: rejectAuthError, body: be32(authTooWeak)}
 	}
-	refused := c.cred.uid != s.uid && c.cred.uid != 0
+	d := &decoder{buf: c.args}
+	var path string
+	if c.proc == mountProcMnt || c.proc == mountProcUmnt {
+		path = d.string(mountPathLen)
+	}
+	if !d.done() {
+		return garbage()
+	}
 	e := &encoder{}
 	switch c.proc {
 	case mountProcMnt:
-		d := &decoder{buf: c.args}
-		path := d.string(mountPathLen)
 		switch {
-		case d.err != nil:
-			return garbage()
-		case refused:
+		case c.cred.uid != s.uid && c.cred.uid != 0:
 			e.uint32(mountErrAccess)
 		case s.ended.Load():
 			e.uint32(mountErrServFail)

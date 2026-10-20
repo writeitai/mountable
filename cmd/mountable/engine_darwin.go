@@ -203,8 +203,15 @@ func readRoot(dir string) error {
 
 // makeSocketDir creates a fresh directory only this user can enter, for
 // the socket: in the mount's private cache directory, or under
-// /tmp/mountable-<uid>/ when a socket path there would be too long.
+// /tmp/mountable-<uid>/ when a socket path there would be too long. Every
+// directory above the socket's that it reuses must be private too.
 func makeSocketDir(cacheDir string) (string, error) {
+	// The cache directory is fresh, but its parent may be reused.
+	for _, dir := range []string{filepath.Dir(cacheDir), cacheDir} {
+		if err := checkPrivate(dir); err != nil {
+			return "", err
+		}
+	}
 	if dir := filepath.Join(cacheDir, "nfs"); socketPathFits(filepath.Join(dir, socketName)) {
 		return dir, os.Mkdir(dir, 0o700)
 	}

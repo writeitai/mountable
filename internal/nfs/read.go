@@ -56,6 +56,10 @@ func (s *service) resolve(o *op, fh []byte) (object, nfsStatus) {
 func (s *service) found(o *op, inode uint64) (object, nfsStatus) {
 	var out fuse.AttrOut
 	if st := s.engine.GetAttr(o.cancel, &fuse.GetAttrIn{InHeader: header(inode, o.cred)}, &out); st != fuse.OK {
+		if st == fuse.ENOENT {
+			// Seen gone: whatever takes the name next is another object.
+			s.objects.retire(inode, 0)
+		}
 		s.engine.Forget(inode, 1)
 		return object{}, statusOf(st)
 	}
@@ -82,7 +86,7 @@ func (s *service) lookup(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	name := d.string(mountPathLen)
-	if d.err != nil {
+	if !d.done() {
 		return garbage()
 	}
 	dir, status := s.resolve(o, fh)
@@ -167,7 +171,7 @@ func (s *service) access(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	asked := d.uint32()
-	if d.err != nil {
+	if !d.done() {
 		return garbage()
 	}
 	obj, status := s.resolve(o, fh)
@@ -182,14 +186,9 @@ func (s *service) access(o *op) reply {
 }
 
 func (s *service) readlink(o *op) reply {
-	d := &decoder{buf: o.args}
-	fh := d.opaque(64)
-	if d.err != nil {
-		return garbage()
-	}
-	obj, status := s.resolve(o, fh)
-	if status != nfsOK {
-		return s.failure(o.call, status)
+	obj, fail, ok := s.resolveOnly(o)
+	if !ok {
+		return fail
 	}
 	var target []byte
 	st := fuse.EINVAL
@@ -209,7 +208,7 @@ func (s *service) read(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	offset, count := d.uint64(), d.uint32()
-	if d.err != nil {
+	if !d.done() {
 		return garbage()
 	}
 	obj, status := s.resolve(o, fh)
@@ -228,27 +227,40 @@ func (s *service) read(o *op) reply {
 	}
 	var data []byte
 	if status == nfsOK && offset < obj.attr.Size {
-		data, status = s.readData(o, obj.inode, offset, min(count, maxTransfer))
+		count = min(count, maxTransfer)
+		data, status = s.readData(o, obj, offset, count)
+	}
+	if status == nfsErrStale {
+		return s.failure(o.call, status)
 	}
 	e := &encoder{}
 	e.uint32(uint32(status))
 	putPostOpAttr(e, &obj.attr, s.fsid)
 	if status == nfsOK {
 		e.uint32(uint32(len(data)))
-		e.bool(offset+uint64(len(data)) >= obj.attr.Size)
+		// Nothing read where data was asked for is the end, whatever the
+		// size said a moment ago.
+		e.bool(offset+uint64(len(data)) >= obj.attr.Size || count > 0 && len(data) == 0)
 		e.opaque(data)
 	}
 	return reply{body: e.buf}
 }
 
-// readData reads through a WFS handle opened for this one READ.
-func (s *service) readData(o *op, inode, offset uint64, count uint32) ([]byte, nfsStatus) {
-	h := header(inode, o.cred)
+// readData reads through a WFS handle opened for this one READ. Open loads
+// the file by its path, which another object may have taken since the
+// handle was resolved, so the object is checked again through the opened
+// handle before reading and after: the bytes are returned only if they are
+// the handle's object's, and the read is STALE otherwise.
+func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]byte, nfsStatus) {
+	h := header(obj.inode, o.cred)
 	var opened fuse.OpenOut
 	if st := s.engine.Open(o.cancel, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
 		return nil, statusOf(st)
 	}
 	defer s.engine.Release(o.cancel, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+	if status := s.still(o, obj); status != nfsOK {
+		return nil, status
+	}
 	buf := make([]byte, count)
 	result, st := s.engine.Read(o.cancel, &fuse.ReadIn{InHeader: h, Fh: opened.Fh, Offset: offset, Size: count}, buf)
 	if st != fuse.OK {
@@ -259,8 +271,32 @@ func (s *service) readData(o *op, inode, offset uint64, count uint32) ([]byte, n
 	if st != fuse.OK {
 		return nil, statusOf(st)
 	}
+	if status := s.still(o, obj); status != nfsOK {
+		return nil, status
+	}
 	return data, nfsOK
 }
+
+// still checks that the inode still holds obj's identity, retiring it if
+// not. With a WFS handle open, GetAttr reports the handle's own entry.
+func (s *service) still(o *op, obj object) nfsStatus {
+	id, ok := s.objects.current(obj.inode, obj.incarnation)
+	if !ok {
+		return nfsErrStale
+	}
+	var out fuse.AttrOut
+	st := s.engine.GetAttr(o.cancel, &fuse.GetAttrIn{InHeader: header(obj.inode, o.cred)}, &out)
+	switch {
+	case st == fuse.ENOENT || st == fuse.OK && (out.Ino != id.ino || out.Mode&syscall.S_IFMT != id.kind):
+		s.objects.retire(obj.inode, obj.incarnation)
+		return nfsErrStale
+	case st != fuse.OK:
+		return statusOf(st)
+	}
+	return nfsOK
+}
+
+func ptr(h fuse.InHeader) *fuse.InHeader { return &h }
 
 func (s *service) fsStat(o *op) reply {
 	obj, fail, ok := s.resolveOnly(o)
@@ -330,7 +366,7 @@ func (s *service) pathConf(o *op) reply {
 func (s *service) resolveOnly(o *op) (object, reply, bool) {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
-	if d.err != nil {
+	if !d.done() {
 		return object{}, garbage(), false
 	}
 	obj, status := s.resolve(o, fh)
@@ -339,5 +375,3 @@ func (s *service) resolveOnly(o *op) (object, reply, bool) {
 	}
 	return obj, reply{}, true
 }
-
-func ptr(h fuse.InHeader) *fuse.InHeader { return &h }

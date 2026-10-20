@@ -378,7 +378,7 @@ func TestStalledCallsAnswerRetryLater(t *testing.T) {
 
 func TestBoundedSteps(t *testing.T) {
 	short(t, 300*time.Millisecond, 100*time.Millisecond)
-	s := &service{workers: make(chan struct{}, 1)}
+	s := &service{workers: make(chan struct{}, 1), ops: map[*op]struct{}{}, endCh: make(chan struct{})}
 	c := callFor(1, procRemove, nil)
 	release := make(chan struct{})
 	defer close(release)
@@ -422,4 +422,100 @@ func short(t *testing.T, deadline, prepare time.Duration) {
 	oldDeadline, oldPrepare := rpcDeadline, prepareBudget
 	rpcDeadline, prepareBudget = deadline, prepare
 	t.Cleanup(func() { rpcDeadline, prepareBudget = oldDeadline, oldPrepare })
+}
+
+// An old handle never reads the object that replaced its file, whether the
+// replacement lands before the read opens the file or while it reads.
+func TestReadNeverReturnsTheReplacement(t *testing.T) {
+	for name, hook := range map[string]func(f *fakeEngine, swap func()){
+		"before open": func(f *fakeEngine, swap func()) { f.beforeOpen = swap },
+		"before read": func(f *fakeEngine, swap func()) { f.beforeRead = swap },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := sampleEngine()
+			_, c := startServer(t, f)
+			old, _ := c.lookup(c.root(), "a.txt")
+			hook(f, func() {
+				f.remove("a.txt")
+				f.add("a.txt", 2001, syscall.S_IFREG|0o644, "successor")
+			})
+			r := c.call(procRead, wire{}.opaque(old).u64(0).u32(100))
+			if s := r.u32(); s != uint32(nfsErrStale) {
+				t.Fatalf("status %d, rest % x", s, r.b)
+			}
+			if bytes.Contains(r.b, []byte("successor")) {
+				t.Fatal("the successor's bytes went out")
+			}
+		})
+	}
+}
+
+// An object seen gone during a lookup is retired, so a successor with the
+// same stored inode (recreated within the same second) gets new handles
+// and the old ones stay stale.
+func TestLookupRetiresAVanishedObject(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	old, _ := c.lookup(root, "a.txt")
+	f.afterLookup = func() { f.remove("a.txt") }
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("lookup racing the delete: %d", s)
+	}
+	f.afterLookup = nil
+	f.add("a.txt", 1001, syscall.S_IFREG|0o644, "same inode, other object")
+	fresh, _ := c.lookup(root, "a.txt")
+	if bytes.Equal(fresh, old) {
+		t.Fatal("the successor got the old handle")
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(old)); s != uint32(nfsErrStale) {
+		t.Fatalf("old handle: %d", s)
+	}
+}
+
+// Nothing read where data was asked for is the end of the file, even when
+// the size said more a moment ago.
+func TestReadOfATruncatedFileEnds(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	fh, _ := c.lookup(c.root(), "a.txt")
+	f.beforeRead = func() { f.truncate("a.txt") }
+	r := c.call(procRead, wire{}.opaque(fh).u64(0).u32(5))
+	if s := r.u32(); s != 0 {
+		t.Fatalf("status %d", s)
+	}
+	r.postOpAttr()
+	if n, eof := r.u32(), r.u32(); n != 0 || eof != 1 {
+		t.Fatalf("count %d, eof %d", n, eof)
+	}
+}
+
+// End answers calls in progress at once, and Close waits for their work.
+func TestEndCancelsCallsInProgress(t *testing.T) {
+	short(t, 2*time.Second, time.Second)
+	f := sampleEngine()
+	srv, c := startServer(t, f)
+	root := c.root()
+	f.block = make(chan struct{})
+	c.xid++
+	c.send(callMessage(c.xid, programNFS, 3, procGetAttr, 501, wire{}.opaque(root)))
+	time.Sleep(50 * time.Millisecond) // the call is with the engine
+	srv.End()
+	start := time.Now()
+	if s := c.accepted(c.receive()).u32(); s != uint32(nfsErrIO) || time.Since(start) > time.Second {
+		t.Fatalf("status %d after %s", s, time.Since(start))
+	}
+	closed := make(chan struct{})
+	go func() { srv.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close did not wait for the work still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(f.block) // a closed block lets everything through
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the work ended")
+	}
 }

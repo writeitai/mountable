@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"hash/fnv"
 	"io"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -169,6 +170,42 @@ func TestCloseEndsConnections(t *testing.T) {
 	}
 }
 
+// An empty fragment that is not the last would never end the record: the
+// connection is closed.
+func TestEmptyFragmentsCloseTheConnection(t *testing.T) {
+	_, c := startServer(t, newFakeEngine())
+	if _, err := c.conn.Write(wire{}.u32(0).u32(0).u32(0)); err != nil {
+		t.Fatal(err)
+	}
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.conn.Read(make([]byte, 4)); err != io.EOF {
+		t.Fatalf("read %v, want the connection closed", err)
+	}
+}
+
+// Arguments with bytes left over are garbage, for every program.
+func TestTrailingBytesAreGarbage(t *testing.T) {
+	_, c := startServer(t, newFakeEngine())
+	fh := c.root()
+	garbage := func(prog, proc uint32, args wire) {
+		t.Helper()
+		got := c.raw(prog, 3, proc, 501, args)
+		if want := (wire{}.u32(c.xid).u32(1).u32(0).u32(0).u32(0).u32(4)); !bytes.Equal(got, want) {
+			t.Errorf("program %d procedure %d: % x", prog, proc, got)
+		}
+	}
+	garbage(programNFS, procNull, wire{}.u32(0))
+	garbage(programNFS, procGetAttr, wire{}.opaque(fh).u32(0))
+	garbage(programNFS, procLookup, wire{}.opaque(fh).str("a").u32(0))
+	garbage(programNFS, procRead, wire{}.opaque(fh).u64(0).u32(1).u32(0))
+	garbage(programNFS, procReadDirPlus, wire{}.opaque(fh).u64(0).u64(0).u32(1).u32(1).u32(0))
+	garbage(programMount, mountProcNull, wire{}.u32(0))
+	garbage(programMount, mountProcMnt, wire{}.str("/").u32(0))
+	garbage(programMount, mountProcUmnt, wire{}.str("/").u32(0))
+	garbage(programMount, mountProcUmnt, wire{})
+	garbage(programMount, mountProcDump, wire{}.u32(0))
+}
+
 func TestDecoderBounds(t *testing.T) {
 	// A length past the data, and one past the limit, never allocate.
 	for _, b := range [][]byte{wire{}.u32(1 << 30), wire{}.u32(65).opaque(make([]byte, 65))} {
@@ -190,44 +227,72 @@ func TestDecoderBounds(t *testing.T) {
 func TestReplyCache(t *testing.T) {
 	c := newReplyCache()
 	k := replyKey{xid: 1}
-	if _, state := c.begin(k); state != drcNew {
+	e, state := c.begin(k, nil)
+	if state != drcNew {
 		t.Fatal("a new call was found")
 	}
-	if _, state := c.begin(k); state != drcInProgress {
+	if _, state := c.begin(k, nil); state != drcInProgress {
 		t.Fatal("a call in progress was not recognised")
 	}
-	c.finish(k, reply{body: []byte{1}})
-	if r, state := c.begin(k); state != drcDone || !bytes.Equal(r.body, []byte{1}) {
+	c.finish(e, reply{body: []byte{1}})
+	if again, state := c.begin(k, nil); state != drcDone || !bytes.Equal(again.r.body, []byte{1}) {
 		t.Fatal("the reply was not kept")
 	}
 	// "Retry later" is never kept: the resent call runs again.
 	j := replyKey{xid: 2}
-	c.begin(j)
-	c.finish(j, reply{retry: true})
-	if _, state := c.begin(j); state != drcNew {
+	e, _ = c.begin(j, nil)
+	c.finish(e, reply{retry: true})
+	if _, state := c.begin(j, nil); state != drcNew {
 		t.Fatal("a retry-later reply was cached")
-	}
-	for i := range drcSize + 10 {
-		c.begin(replyKey{xid: uint32(1000 + i)})
-	}
-	if len(c.entries) > drcSize || len(c.order) > drcSize {
-		t.Fatalf("cache grew to %d", len(c.entries))
 	}
 }
 
-// The cache key covers the arguments, so a reused XID with other contents
-// is a new call.
-func TestReplyKeyCoversArguments(t *testing.T) {
-	a := &call{xid: 5, prog: programNFS, vers: 3, proc: procRemove, args: []byte("one")}
-	b := *a
-	b.args = []byte("two")
-	if a.key() == b.key() {
-		t.Fatal("different arguments, same key")
+// Finished entries make room; unfinished ones are never evicted, and with
+// every entry unfinished a new call is turned away.
+func TestReplyCacheNeverEvictsUnfinished(t *testing.T) {
+	c := newReplyCache()
+	running, _ := c.begin(replyKey{xid: 1}, nil)
+	for i := range drcSize - 1 {
+		e, _ := c.begin(replyKey{xid: uint32(100 + i)}, nil)
+		c.finish(e, reply{})
 	}
-	c := *a
-	c.cred.uid = 9
-	if a.key() == c.key() {
-		t.Fatal("different callers, same key")
+	for i := range drcSize - 1 { // each evicts a finished entry
+		if _, state := c.begin(replyKey{xid: uint32(5000 + i)}, nil); state != drcNew {
+			t.Fatalf("call %d: state %d", i, state)
+		}
+	}
+	if _, state := c.begin(replyKey{xid: 1}, nil); state != drcInProgress {
+		t.Fatal("the unfinished entry was evicted")
+	}
+	if _, state := c.begin(replyKey{xid: 9999}, nil); state != drcFull {
+		t.Fatalf("state %d with every entry unfinished", state)
+	}
+	c.finish(running, reply{})
+	if len(c.entries) > drcSize || c.order.Len() != len(c.entries) {
+		t.Fatalf("%d entries", len(c.entries))
+	}
+}
+
+// The cache key covers the arguments and the whole credential, so a reused
+// XID with other contents is a new call.
+func TestReplyKeyCoversArguments(t *testing.T) {
+	a := callFor(5, procRemove, []byte("one"))
+	other := func(change func(c *call)) *call {
+		c := *a
+		c.cred.gids = slices.Clone(a.cred.gids)
+		change(&c)
+		return &c
+	}
+	for name, c := range map[string]*call{
+		"arguments":      other(func(c *call) { c.args = []byte("two") }),
+		"user":           other(func(c *call) { c.cred.uid = 9 }),
+		"a group":        other(func(c *call) { c.cred.gids[0] = 21 }),
+		"one more group": other(func(c *call) { c.cred.gids = append(c.cred.gids, 80) }),
+		"no groups":      other(func(c *call) { c.cred.gids = nil }),
+	} {
+		if a.key() == c.key() {
+			t.Errorf("other %s, same key", name)
+		}
 	}
 }
 
@@ -243,11 +308,76 @@ func TestRetransmissionIsAnsweredFromTheCache(t *testing.T) {
 	if again := c.receive(); !bytes.Equal(first, again) {
 		t.Fatal("the resent call got another reply")
 	}
-	if _, state := srv.drc.begin(callFor(77, procRemove, args).key()); state != drcDone {
+	if _, state := srv.drc.begin(callFor(77, procRemove, args).key(), nil); state != drcDone {
 		t.Fatal("REMOVE's reply was not cached")
 	}
 	if nonIdempotent(procGetAttr) || nonIdempotent(procRead) || !nonIdempotent(procWrite) {
 		t.Fatal("wrong procedures are cached")
+	}
+}
+
+// slowRemove makes REMOVE wait for release, standing in for slice 2's
+// mutations.
+func slowRemove(t *testing.T) (started, release chan struct{}) {
+	started, release = make(chan struct{}, 4), make(chan struct{})
+	saved := procedures[procRemove]
+	procedures[procRemove] = procedure{fn: func(s *service, o *op) reply {
+		started <- struct{}{}
+		<-release
+		return s.failure(o.call, nfsErrROFS)
+	}}
+	t.Cleanup(func() { procedures[procRemove] = saved })
+	return started, release
+}
+
+// A client that reconnects while its call is still running resends it on
+// the new connection, and gets the answer there, without a second run.
+func TestRetransmissionAfterReconnect(t *testing.T) {
+	started, release := slowRemove(t)
+	srv, c := startServer(t, newFakeEngine())
+	fh := c.root()
+	args := wire{}.opaque(fh).str("x")
+	c.send(callMessage(88, programNFS, 3, procRemove, 501, args))
+	<-started
+	again := dial(t, srv.listener.Addr().String())
+	again.send(callMessage(88, programNFS, 3, procRemove, 501, args))
+	close(release)
+	got := again.receive()
+	want := wire{}.u32(88).u32(1).u32(0).u32(0).u32(0).u32(0).u32(uint32(nfsErrROFS)).u32(0).u32(0)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("% x, want % x", got, want)
+	}
+	select {
+	case <-started:
+		t.Fatal("the resent call ran again")
+	default:
+	}
+}
+
+// With every pending slot taken, calls are still refused for what they
+// are, and turning one away leaves the cache alone.
+func TestAdmissionComesFirst(t *testing.T) {
+	srv, c := startServer(t, newFakeEngine())
+	fh := c.root()
+	for range maxPending {
+		srv.pending <- struct{}{}
+	}
+	if s := c.callAs(502, procGetAttr, wire{}.opaque(fh)).u32(); s != uint32(nfsErrAccess) {
+		t.Fatalf("another user: %d", s)
+	}
+	c.send(append(wire{}.u32(11).u32(0).u32(2).u32(programNFS).u32(3).u32(procRemove).u32(0).u32(0).u32(0).u32(0), wire{}.opaque(fh)...))
+	if got, want := c.receive(), (wire{}.u32(11).u32(1).u32(1).u32(1).u32(5)); !bytes.Equal(got, want) {
+		t.Fatalf("AUTH_NONE: % x", got)
+	}
+	if s := c.status(procRemove, wire{}.opaque(fh).str("x")); s != uint32(nfsErrJukebox) {
+		t.Fatalf("a call without a slot: %d", s)
+	}
+	if len(srv.drc.entries) != 0 {
+		t.Fatal("a call turned away entered the cache")
+	}
+	srv.End()
+	if s := c.status(procGetAttr, wire{}.opaque(fh)); s != uint32(nfsErrIO) {
+		t.Fatalf("after End: %d", s)
 	}
 }
 

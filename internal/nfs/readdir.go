@@ -1,191 +1,108 @@
 package nfs
 
 import (
-	"container/list"
-	"crypto/rand"
+	"context"
 	"encoding/binary"
+	"errors"
 	"sync"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 )
 
-// maxEnumerations bounds the directories with a listing in progress. Each
-// holds a WFS directory handle, which keeps the batch it last read.
-const maxEnumerations = 64
+// Directory cookies continue by name, not by position (design §4,
+// "Directories"). A cookie stands for the last name a page returned, and
+// the next page lists the names after it in the filer's sorted order, so a
+// deletion never skips another name and a name inserted after the position
+// simply appears. "." and ".." are not names in that order: their cookies
+// are reserved continuation states.
+const (
+	cookieAfterDot    = 1 // ".." comes next
+	cookieAfterDotDot = 2 // the names start from the beginning
+	firstNameCookie   = 3
+)
 
-// enumeration is the listing state of one directory: a WFS directory handle,
-// which pages through the directory by name, and the verifier its cookies
-// carry. A cookie is WFS's offset after the entry.
-//
-// There is one per directory, not one per listing, because the macOS client
-// keeps one verifier per directory and sends the latest with every cookie.
-// It treats NFS3ERR_BAD_COOKIE as the end of the directory (nfs_vnops.c,
-// rdar://102465951), so a listing is never invalidated because the
-// directory changed: WFS resumes by name, as readdir(3) on a changing
-// directory allows. BAD_COOKIE answers only a verifier this process does
-// not hold, such as one whose enumeration was evicted.
-type enumeration struct {
-	mu    sync.Mutex // one page at a time
-	dir   uint64
-	verf  uint64
-	fh    uint64 // the WFS directory handle
-	entry *list.Element
-	// users counts the pages reading through it; an evicted enumeration's
-	// handle is released once the last of them is done.
-	users   int
-	evicted bool
-}
+// listBatch is how many names one filer listing call asks for.
+const listBatch = 512
 
-type enumerations struct {
-	engine Engine
+// cookieTable maps one directory's issued cookies to the names they stand
+// for. Tables are kept for the life of the export and never evicted: a
+// cookie the export forgot would have to be answered NFS3ERR_BAD_COOKIE,
+// which the macOS client takes for the end of the directory. They grow with
+// the names listed, like the retained lookup references.
+type cookieTable struct {
 	mu     sync.Mutex
-	byDir  map[uint64]*enumeration
-	byVerf map[uint64]*enumeration
-	lru    *list.List // of *enumeration, most recently used first
-	prefix uint64     // random high half of every verifier
-	last   uint32
+	names  []string // by cookie - firstNameCookie
+	byName map[string]uint64
 }
 
-func newEnumerations(engine Engine) *enumerations {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return &enumerations{
-		engine: engine,
-		byDir:  map[uint64]*enumeration{},
-		byVerf: map[uint64]*enumeration{},
-		lru:    list.New(),
-		prefix: binary.BigEndian.Uint64(b[:]) &^ 0xffffffff,
-	}
-}
-
-// open returns dir's enumeration for a listing from the start, creating it
-// if needed. done must follow.
-func (t *enumerations) open(cancel <-chan struct{}, dir uint64, h fuse.InHeader) (*enumeration, fuse.Status) {
-	t.mu.Lock()
-	if e := t.byDir[dir]; e != nil {
-		t.use(e)
-		t.mu.Unlock()
-		return e, fuse.OK
-	}
-	t.mu.Unlock()
-	var out fuse.OpenOut
-	h.NodeId = dir
-	if st := t.engine.OpenDir(cancel, &fuse.OpenIn{InHeader: h}, &out); st != fuse.OK {
-		return nil, st
-	}
+func (t *cookieTable) cookie(name string) uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if e := t.byDir[dir]; e != nil { // opened concurrently
-		t.engine.ReleaseDir(&fuse.ReleaseIn{Fh: out.Fh})
-		t.use(e)
-		return e, fuse.OK
+	if c, ok := t.byName[name]; ok {
+		return c
 	}
-	t.last++
-	e := &enumeration{dir: dir, verf: t.prefix | uint64(t.last), fh: out.Fh}
-	e.entry = t.lru.PushFront(e)
-	t.byDir[dir], t.byVerf[e.verf] = e, e
-	t.use(e)
-	for t.lru.Len() > maxEnumerations {
-		old := t.lru.Remove(t.lru.Back()).(*enumeration)
-		delete(t.byDir, old.dir)
-		delete(t.byVerf, old.verf)
-		old.evicted = true
-		if old.users == 0 {
-			t.engine.ReleaseDir(&fuse.ReleaseIn{Fh: old.fh})
-		}
-	}
-	return e, fuse.OK
+	c := firstNameCookie + uint64(len(t.names))
+	t.names = append(t.names, name)
+	t.byName[name] = c
+	return c
 }
 
-// resume returns the enumeration a cookie's verifier names, if it is dir's.
-// done must follow.
-func (t *enumerations) resume(dir, verf uint64) (*enumeration, bool) {
+func (t *cookieTable) name(cookie uint64) (string, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	e := t.byVerf[verf]
-	if e == nil || e.dir != dir {
-		return nil, false
+	if cookie < firstNameCookie || cookie-firstNameCookie >= uint64(len(t.names)) {
+		return "", false
 	}
-	t.use(e)
-	return e, true
+	return t.names[cookie-firstNameCookie], true
 }
 
-func (t *enumerations) use(e *enumeration) {
-	e.users++
-	t.lru.MoveToFront(e.entry)
+// directories holds the cookie tables, by directory identity.
+type directories struct {
+	mu     sync.Mutex
+	tables map[object]*cookieTable
 }
 
-// done ends a page's use of an enumeration.
-func (t *enumerations) done(e *enumeration) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if e.users--; e.users == 0 && e.evicted {
-		t.engine.ReleaseDir(&fuse.ReleaseIn{Fh: e.fh})
+func (d *directories) table(dir object) *cookieTable {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key := object{inode: dir.inode, incarnation: dir.incarnation}
+	t := d.tables[key]
+	if t == nil {
+		t = &cookieTable{byName: map[string]uint64{}}
+		d.tables[key] = t
 	}
+	return t
+}
+
+// verifier is a directory's cookie verifier: constant for the life of the
+// export (RFC 1813 §3.3.16 allows that while cookies stay valid), a keyed
+// MAC of the directory's identity, never zero, so a new export never
+// accepts an old one.
+func (s *service) verifier(dir object) uint64 {
+	b := binary.BigEndian.AppendUint64([]byte("cookieverf"), dir.inode)
+	b = binary.BigEndian.AppendUint64(b, dir.incarnation)
+	v := binary.BigEndian.Uint64(s.handles.mac(b))
+	if v == 0 {
+		v = 1
+	}
+	return v
 }
 
 // listed is one entry a page carries.
 type listed struct {
-	name     string
-	ino, off uint64
-	plus     bool // WFS took a lookup reference for it
-	obj      *object
+	name   string
+	cookie uint64
+	ino    uint64 // the fileid, if no handle is issued for it
+	obj    *object
 }
-
-// dirSink collects one page from WFS within the reply's two budgets:
-// bytes, the space left for entries in the whole reply (maxcount), and
-// dirBytes, what READDIRPLUS's dircount allows for names, fileids and
-// cookies alone.
-type dirSink struct {
-	plus            bool
-	bytes, dirBytes int
-	entries         []listed
-	full            bool
-}
-
-// entrySize is an entry's encoded size in the reply, and its share of
-// dircount.
-func entrySize(name string, plus bool) (size, dirSize int) {
-	dirSize = 8 + 4 + len(name) + pad(len(name)) + 8 // fileid, name, cookie
-	size = 4 + dirSize                               // value_follows
-	if plus {
-		size += 4 + fattrSize + 4 + 4 + handleSize // post_op_attr, post_op_fh3
-	}
-	return size, dirSize
-}
-
-func (s *dirSink) take(entry fuse.DirEntry, plus bool) bool {
-	size, dirSize := entrySize(entry.Name, s.plus)
-	if size > s.bytes || s.plus && dirSize > s.dirBytes {
-		s.full = true
-		return false
-	}
-	s.bytes -= size
-	s.dirBytes -= dirSize
-	dot := entry.Name == "." || entry.Name == ".."
-	s.entries = append(s.entries, listed{name: entry.Name, ino: entry.Ino, off: entry.Off, plus: plus && !dot})
-	return true
-}
-
-func (s *dirSink) AddEntry(entry fuse.DirEntry) bool { return s.take(entry, false) }
-
-func (s *dirSink) AddEntryPlus(entry fuse.DirEntry) *fuse.EntryOut {
-	if !s.take(entry, true) {
-		return nil
-	}
-	return &fuse.EntryOut{} // the page reads attributes through GetAttr
-}
-
-// TakesLookupRef: every entry of a READDIRPLUS page carries a handle, and a
-// handle holds its inode.
-func (s *dirSink) TakesLookupRef() bool { return true }
 
 func (s *service) readDir(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	cookie, verf := d.uint64(), d.uint64()
 	count := d.uint32()
-	if d.err != nil {
+	if !d.done() {
 		return garbage()
 	}
 	return s.list(o, fh, cookie, verf, int(count), int(count), false)
@@ -196,7 +113,7 @@ func (s *service) readDirPlus(o *op) reply {
 	fh := d.opaque(64)
 	cookie, verf := d.uint64(), d.uint64()
 	dirCount, maxCount := d.uint32(), d.uint32()
-	if d.err != nil {
+	if !d.done() {
 		return garbage()
 	}
 	return s.list(o, fh, cookie, verf, int(dirCount), int(maxCount), true)
@@ -206,8 +123,42 @@ func (s *service) readDirPlus(o *op) reply {
 // post_op_attr, the verifier, the end of the list and eof.
 const pageOverhead = 4 + 4 + fattrSize + 8 + 4 + 4
 
+// entrySize is an entry's encoded size in the reply, and its share of
+// READDIRPLUS's dircount (fileid, name and cookie).
+func entrySize(name string, plus bool) (size, dirSize int) {
+	dirSize = 8 + 4 + len(name) + pad(len(name)) + 8
+	size = 4 + dirSize // value_follows
+	if plus {
+		size += 4 + fattrSize + 4 + 4 + handleSize // post_op_attr, post_op_fh3
+	}
+	return size, dirSize
+}
+
+// page collects one page within the reply's two budgets: bytes, the space
+// left for entries in the whole reply (maxcount), and dirBytes, what
+// READDIRPLUS's dircount allows for names, fileids and cookies alone.
+type page struct {
+	plus            bool
+	bytes, dirBytes int
+	entries         []listed
+	full            bool
+}
+
+// add takes an entry if it fits.
+func (p *page) add(entry listed) bool {
+	size, dirSize := entrySize(entry.name, p.plus)
+	if p.full || size > p.bytes || p.plus && dirSize > p.dirBytes {
+		p.full = true
+		return false
+	}
+	p.bytes -= size
+	p.dirBytes -= dirSize
+	p.entries = append(p.entries, entry)
+	return true
+}
+
 // list answers READDIR and READDIRPLUS: one page from cookie, within both
-// budgets, read through the directory's enumeration.
+// budgets.
 func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount int, plus bool) reply {
 	dir, status := s.resolve(o, fh)
 	if status != nfsOK {
@@ -224,51 +175,55 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 		return fail(nfsErrNotDir)
 	case !allowed(o.cred, &dir.attr, permRead):
 		return fail(nfsErrAccess)
+	case maxCount < pageOverhead:
+		return fail(nfsErrTooSmall) // not even an empty page fits
 	}
-	// The first page must hold "." and "..": WFS adds them whether or not
-	// they fit.
-	sink := &dirSink{plus: plus, bytes: min(maxCount, maxTransfer) - pageOverhead, dirBytes: dirCount}
-	if cookie < 2 {
-		dot, dotDir := entrySize(".", plus)
-		dotdot, dotdotDir := entrySize("..", plus)
-		if sink.bytes < dot+dotdot || plus && sink.dirBytes < dotDir+dotdotDir {
-			return fail(nfsErrTooSmall)
-		}
-	}
-	h := header(dir.inode, o.cred)
-	var en *enumeration
-	if cookie == 0 {
-		var st fuse.Status
-		if en, st = s.dirs.open(o.cancel, dir.inode, h); st != fuse.OK {
-			return fail(statusOf(st))
-		}
-	} else if en, _ = s.dirs.resume(dir.inode, verf); en == nil {
+	table := s.dirs.table(dir)
+	var after string // list the names after this one
+	dots := []string{".", ".."}
+	switch {
+	case cookie == 0:
+	case verf != s.verifier(dir):
 		return fail(nfsErrBadCook)
+	case cookie == cookieAfterDot:
+		dots = dots[1:]
+	case cookie == cookieAfterDotDot:
+		dots = nil
+	default:
+		name, ok := table.name(cookie)
+		if !ok {
+			return fail(nfsErrBadCook)
+		}
+		after, dots = name, nil
 	}
-	en.mu.Lock()
-	eof, st := s.page(en, h, cookie, sink, plus)
-	en.mu.Unlock()
-	s.dirs.done(en)
-	if st != fuse.OK {
-		s.drop(sink.entries)
-		return fail(statusOf(st))
+
+	p := &page{plus: plus, bytes: min(maxCount, maxTransfer) - pageOverhead, dirBytes: dirCount}
+	for i, dot := range dots {
+		p.add(listed{name: dot, cookie: firstNameCookie - uint64(len(dots)) + uint64(i)})
 	}
-	if len(sink.entries) == 0 && !eof {
+	eof := false
+	if !p.full {
+		var st nfsStatus
+		if eof, st = s.names(o, dir, after, p, table); st != nfsOK {
+			return fail(st)
+		}
+	}
+	if len(p.entries) == 0 && !eof {
 		return fail(nfsErrTooSmall)
 	}
-	for i := range sink.entries {
-		s.fill(o, dir, &sink.entries[i], plus)
+	for i := range p.entries {
+		s.fill(o, dir, &p.entries[i])
 	}
 
 	e := &encoder{}
 	e.uint32(uint32(nfsOK))
 	putPostOpAttr(e, &dir.attr, s.fsid)
-	e.uint64(en.verf)
-	for _, entry := range sink.entries {
+	e.uint64(s.verifier(dir))
+	for _, entry := range p.entries {
 		e.bool(true)
 		e.uint64(entry.ino)
 		e.string(entry.name)
-		e.uint64(entry.off)
+		e.uint64(entry.cookie)
 		if plus {
 			if entry.obj == nil {
 				e.bool(false)
@@ -285,40 +240,82 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 	return reply{body: e.buf}
 }
 
-// page reads entries from cookie into sink until it is full or the
-// directory ends.
-func (s *service) page(en *enumeration, h fuse.InHeader, cookie uint64, sink *dirSink, plus bool) (eof bool, st fuse.Status) {
-	offset := cookie
+// names adds the directory's names after the given one, in the filer's
+// order, until the page is full or the directory ends.
+func (s *service) names(o *op, dir object, after string, p *page, table *cookieTable) (eof bool, status nfsStatus) {
+	path, ok := s.engine.PathForInode(dir.inode)
+	if !ok {
+		return false, nfsErrStale
+	}
+	s.warm(o, dir.inode)
+	ctx, cancel := context.WithCancel(filer_pb.WithChunksOmitted(context.Background()))
+	defer cancel()
+	go func() {
+		select {
+		case <-o.cancel:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for {
-		before := len(sink.entries)
-		if st := s.engine.ReadDirectoryInto(&fuse.ReadIn{InHeader: h, Fh: en.fh, Offset: offset}, sink, plus); st != fuse.OK {
-			return false, st
-		}
+		got := 0
+		err := s.engine.WithFilerClient(false, func(client filer_pb.SeaweedFilerClient) error {
+			got = 0
+			return filer_pb.SeaweedList(ctx, client, string(path), "", func(entry *filer_pb.Entry, _ bool) error {
+				got++
+				if !p.add(listed{name: entry.Name, cookie: table.cookie(entry.Name), ino: entry.GetAttributes().GetInode()}) {
+					return errPageFull
+				}
+				after = entry.Name
+				return nil
+			}, after, false, listBatch)
+		})
 		switch {
-		case sink.full:
-			return false, fuse.OK
-		case len(sink.entries) == before:
-			return true, fuse.OK
+		case errors.Is(err, errPageFull):
+			return false, nfsOK
+		case err != nil:
+			return false, nfsErrIO
+		case got < listBatch:
+			return true, nfsOK
 		}
-		offset = sink.entries[len(sink.entries)-1].off
 	}
 }
 
-// fill gives an entry its fileid and, on a READDIRPLUS page, its handle and
-// attributes. A child WFS just referenced gets a handle that keeps the
-// reference; "." is the directory and ".." its parent.
-func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
+var errPageFull = errors.New("page full")
+
+// warm makes WFS cache the directory's entries, through its own listing,
+// so the lookups that give a page its handles do not each ask the filer.
+func (s *service) warm(o *op, inode uint64) {
+	h := header(inode, o.cred)
+	var out fuse.OpenOut
+	if s.engine.OpenDir(o.cancel, &fuse.OpenIn{InHeader: h}, &out) != fuse.OK {
+		return
+	}
+	defer s.engine.ReleaseDir(&fuse.ReleaseIn{InHeader: h, Fh: out.Fh})
+	s.engine.ReadDirectoryInto(&fuse.ReadIn{InHeader: h, Fh: out.Fh}, refuse{}, false)
+}
+
+// refuse is a directory sink that takes nothing: a listing into it only
+// loads the directory into WFS's cache.
+type refuse struct{}
+
+func (refuse) AddEntry(fuse.DirEntry) bool               { return false }
+func (refuse) AddEntryPlus(fuse.DirEntry) *fuse.EntryOut { return nil }
+func (refuse) TakesLookupRef() bool                      { return false }
+
+// fill gives an entry its fileid and handle: "." is the directory, ".."
+// its parent, and a name the object a lookup finds. An entry whose lookup
+// fails, because it vanished meanwhile, goes without a handle.
+func (s *service) fill(o *op, dir object, entry *listed) {
 	var obj object
 	status := nfsOK
-	switch {
-	case entry.name == ".":
+	switch entry.name {
+	case ".":
 		obj = dir
-	case entry.name == "..":
+	case "..":
 		obj, status = s.parent(o, dir)
-	case entry.plus:
-		obj, status = s.found(o, entry.ino)
 	default:
-		return // READDIR: WFS's fileid as listed
+		obj, status = s.child(o, dir.inode, entry.name)
 	}
 	if status != nfsOK {
 		if entry.ino == 0 {
@@ -326,17 +323,5 @@ func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 		}
 		return
 	}
-	entry.ino = obj.inode
-	if plus {
-		entry.obj = &obj
-	}
-}
-
-// drop gives back the lookup references a page that is not sent took.
-func (s *service) drop(entries []listed) {
-	for _, entry := range entries {
-		if entry.plus {
-			s.engine.Forget(entry.ino, 1)
-		}
-	}
+	entry.ino, entry.obj = obj.inode, &obj
 }

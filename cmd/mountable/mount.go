@@ -151,6 +151,7 @@ func mount(o *output, ticket, dir string) error {
 		}
 		return err
 	}
+	defer e.close() // however the mount ends, also when its shutdown was cut short
 	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
@@ -282,13 +283,16 @@ func isDirectory(dir string) error {
 	return nil
 }
 
-// mountCacheDir creates a private cache directory for one mount.
+// mountCacheDir creates a private cache directory for one mount. Without a
+// user cache directory it goes under the temporary directory, in a
+// directory of this user's own.
 func mountCacheDir() (string, error) {
 	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
+	if err == nil {
+		base = filepath.Join(base, "mountable")
+	} else {
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("mountable-%d", os.Getuid()))
 	}
-	base = filepath.Join(base, "mountable")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return "", err
 	}

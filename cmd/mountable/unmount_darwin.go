@@ -23,7 +23,10 @@ func abortConnection(dir string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), helperTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "diskutil", "unmount", "force", dir).Run()
+	if err := exec.CommandContext(ctx, "diskutil", "unmount", "force", dir).Run(); err != nil {
+		return fmt.Errorf("forcing the unmount: %w", err)
+	}
+	return nil
 }
 
 // detach has nothing left to do on macOS: the forced unmount detached dir.

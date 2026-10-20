@@ -74,6 +74,9 @@ func (d *decoder) opaque(max int) []byte {
 
 func (d *decoder) string(max int) string { return string(d.opaque(max)) }
 
+// done reports whether the arguments decoded with nothing left over.
+func (d *decoder) done() bool { return d.err == nil && len(d.buf) == 0 }
+
 // pad is the number of zero bytes that bring n up to a multiple of four.
 func pad(n int) int { return (4 - n%4) % 4 }
 

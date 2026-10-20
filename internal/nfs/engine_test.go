@@ -1,14 +1,20 @@
 package nfs
 
 import (
+	"context"
+	"io"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // fakeEngine stands in for WFS the way the server sees it: a store of
@@ -16,16 +22,23 @@ import (
 // inode table, which hands out an inode per path, counts lookup references,
 // and keeps a path's inode when the object there is replaced.
 type fakeEngine struct {
-	mu      sync.Mutex
-	root    string
-	objects map[string]*fakeObject // by path
-	paths   map[uint64]string      // the inode table
-	inodes  map[string]uint64
-	nlookup map[uint64]uint64
-	dirs    map[uint64]bool // open directory handles
-	nextFh  uint64
+	mu       sync.Mutex
+	root     string
+	objects  map[string]*fakeObject // by path
+	paths    map[uint64]string      // the inode table
+	inodes   map[string]uint64
+	nlookup  map[uint64]uint64
+	dirs     map[uint64]bool // open directory handles
+	nextFh   uint64
+	listings int // filer listing calls
 	// block, when set, holds GetAttr until it is closed.
 	block chan struct{}
+	// beforeOpen and beforeRead, when set, run just before Open and Read
+	// do their work, unlocked: they stand for another mount changing
+	// things at that moment.
+	beforeOpen, beforeRead func()
+	// afterLookup, when set, runs once a Lookup has succeeded.
+	afterLookup func()
 }
 
 type fakeObject struct {
@@ -56,6 +69,13 @@ func (f *fakeEngine) add(rel string, ino uint64, mode uint32, data string) *fake
 	}
 	f.objects[f.root+"/"+rel] = o
 	return o
+}
+
+// truncate empties the object at rel in place.
+func (f *fakeEngine) truncate(rel string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[f.root+"/"+rel].data = nil
 }
 
 // remove deletes the object at rel, as another mount would: WFS's table
@@ -134,9 +154,17 @@ func (f *fakeEngine) GetAttr(_ <-chan struct{}, in *fuse.GetAttrIn, out *fuse.At
 }
 
 func (f *fakeEngine) Lookup(_ <-chan struct{}, h *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
+	st := f.lookup(h.NodeId, name, out)
+	if st == fuse.OK && f.afterLookup != nil {
+		f.afterLookup()
+	}
+	return st
+}
+
+func (f *fakeEngine) lookup(parent uint64, name string, out *fuse.EntryOut) fuse.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	dir, ok := f.paths[h.NodeId]
+	dir, ok := f.paths[parent]
 	if !ok {
 		return fuse.ENOENT
 	}
@@ -167,6 +195,9 @@ func (f *fakeEngine) Forget(inode, n uint64) {
 }
 
 func (f *fakeEngine) Open(_ <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
+	if f.beforeOpen != nil {
+		f.beforeOpen()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextFh++
@@ -175,6 +206,9 @@ func (f *fakeEngine) Open(_ <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut)
 }
 
 func (f *fakeEngine) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
+	if f.beforeRead != nil {
+		f.beforeRead()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	o := f.objects[f.paths[in.NodeId]]
@@ -271,3 +305,58 @@ func (f *fakeEngine) PathForInode(inode uint64) (util.FullPath, bool) {
 }
 
 func (f *fakeEngine) MountRoot() util.FullPath { return util.FullPath(f.root) }
+
+// WithFilerClient hands out a filer that lists the fake's objects.
+func (f *fakeEngine) WithFilerClient(_ bool, fn func(filer_pb.SeaweedFilerClient) error) error {
+	return fn(fakeFiler{f: f})
+}
+
+type fakeFiler struct {
+	filer_pb.SeaweedFilerClient
+	f *fakeEngine
+}
+
+// ListEntries lists a directory in name order from StartFromFileName, as
+// the filer does.
+func (c fakeFiler) ListEntries(_ context.Context, in *filer_pb.ListEntriesRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[filer_pb.ListEntriesResponse], error) {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	c.f.listings++
+	var names []string
+	for p := range c.f.objects {
+		if path.Dir(p) == in.Directory && strings.HasPrefix(path.Base(p), in.Prefix) {
+			names = append(names, path.Base(p))
+		}
+	}
+	sort.Strings(names)
+	stream := &fakeStream{}
+	for _, name := range names {
+		if name < in.StartFromFileName || name == in.StartFromFileName && !in.InclusiveStartFrom {
+			continue
+		}
+		if in.Limit > 0 && len(stream.entries) == int(in.Limit) {
+			break
+		}
+		o := c.f.objects[in.Directory+"/"+name]
+		stream.entries = append(stream.entries, &filer_pb.ListEntriesResponse{Entry: &filer_pb.Entry{
+			Name: name, Attributes: &filer_pb.FuseAttributes{Inode: o.ino},
+		}})
+	}
+	return stream, nil
+}
+
+type fakeStream struct {
+	grpc.ClientStream
+	entries []*filer_pb.ListEntriesResponse
+}
+
+func (s *fakeStream) Recv() (*filer_pb.ListEntriesResponse, error) {
+	if len(s.entries) == 0 {
+		return nil, io.EOF
+	}
+	e := s.entries[0]
+	s.entries = s.entries[1:]
+	return e, nil
+}
+
+func (s *fakeStream) Trailer() metadata.MD { return nil }

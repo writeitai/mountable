@@ -6,6 +6,7 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
@@ -25,6 +26,9 @@ type Engine interface {
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath
+	// WithFilerClient reaches the gateway's filer service on the session's
+	// connection, for the listing helper.
+	WithFilerClient(streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error
 }
 
 var _ Engine = (*weedmount.WFS)(nil)
@@ -101,11 +105,12 @@ func (o *objects) current(inode, incarnation uint64) (identity, bool) {
 }
 
 // retire marks an identity as gone for good: its object no longer exists,
-// or something else now occupies its inode.
+// or something else now occupies its inode. incarnation 0 retires whatever
+// identity the inode has.
 func (o *objects) retire(inode, incarnation uint64) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if id, ok := o.byInode[inode]; ok && id.incarnation == incarnation && inode != rootInode {
+	if id, ok := o.byInode[inode]; ok && (incarnation == 0 || id.incarnation == incarnation) && inode != rootInode {
 		id.gone = true
 	}
 }

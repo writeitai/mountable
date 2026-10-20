@@ -31,6 +31,8 @@ const (
 	maxPending = 256
 	// maxRecord bounds one request record: a 1 MiB WRITE and its header.
 	maxRecord = 1<<20 + 4096
+	// maxFragments bounds the fragments of one record; the kernel sends one.
+	maxFragments = 64
 )
 
 // Server serves one export's NFS and MOUNT programs on stream connections.
@@ -86,8 +88,10 @@ func (s *Server) Serve(l net.Listener) error {
 	}
 }
 
-// Close stops accepting, closes every connection and waits for their
-// readers to stop. Calls still running answer into closed connections.
+// Close stops accepting, closes every connection, waits for their readers
+// to stop, then for the work still running, at most rpcDeadline: every call
+// is answered within it, and only work the engine does not cancel runs
+// longer. Calls still running answer into closed connections.
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
@@ -99,6 +103,7 @@ func (s *Server) Close() {
 	}
 	s.mu.Unlock()
 	s.readers.Wait()
+	s.svc.wait(rpcDeadline)
 }
 
 type conn struct {
@@ -136,44 +141,66 @@ func (c *conn) serve() {
 
 // dispatch answers a call without holding up the reading of the next one.
 func (c *conn) dispatch(cl *call) {
+	svc := c.s.svc
 	if r, ok := checkProgram(cl); !ok {
 		c.send(cl.xid, r)
 		return
 	}
-	// MOUNT and NULL calls never reach the engine: answered at once.
-	if _, known := procedures[cl.proc]; cl.prog == programMount || cl.proc == procNull || !known {
-		c.send(cl.xid, c.s.svc.handle(cl))
+	if r, ok := svc.immediate(cl); ok {
+		c.send(cl.xid, r)
 		return
 	}
-	key, cached := replyKey{}, nonIdempotent(cl.proc)
-	if cached {
-		key = cl.key()
-		switch r, state := c.s.drc.begin(key); state {
-		case drcDone:
-			c.send(cl.xid, r)
-			return
-		case drcInProgress:
-			return // the first copy answers
-		}
+	if r, ok := svc.admit(cl); !ok {
+		c.send(cl.xid, r)
+		return
 	}
 	select {
 	case c.s.pending <- struct{}{}:
 	default:
-		r := c.s.svc.retryLater(cl)
-		if cached {
-			c.s.drc.finish(key, r)
-		}
-		c.send(cl.xid, r)
+		c.send(cl.xid, svc.retryLater(cl)) // changed nothing, so not cached
 		return
 	}
-	go func() {
-		defer func() { <-c.s.pending }()
-		r := c.s.svc.handle(cl)
-		if cached {
-			c.s.drc.finish(key, r)
+	release := func() { <-c.s.pending }
+	if !nonIdempotent(cl.proc) {
+		go func() {
+			defer release()
+			c.send(cl.xid, svc.handle(cl))
+		}()
+		return
+	}
+	entry, state := c.s.drc.begin(cl.key(), c)
+	switch state {
+	case drcDone:
+		release()
+		c.send(cl.xid, entry.r)
+	case drcFull:
+		release()
+		c.send(cl.xid, svc.retryLater(cl))
+	case drcInProgress:
+		if entry.conn == c {
+			release() // the first copy answers on this connection
+			return
 		}
-		c.send(cl.xid, r)
-	}()
+		// The client reconnected while the first copy runs: its answer
+		// goes to this connection too.
+		go func() {
+			defer release()
+			wait := time.NewTimer(time.Until(cl.received.Add(rpcDeadline)))
+			defer wait.Stop()
+			select {
+			case <-entry.done:
+				c.send(cl.xid, entry.r)
+			case <-wait.C:
+			}
+		}()
+	default:
+		go func() {
+			defer release()
+			r := svc.handle(cl)
+			c.s.drc.finish(entry, r)
+			c.send(cl.xid, r)
+		}()
+	}
 }
 
 // send writes one reply record. A failed write closes the connection; the
@@ -190,17 +217,19 @@ func (c *conn) send(xid uint32, r reply) {
 }
 
 // readRecord reads one RPC record (RFC 5531 §11): fragments up to the one
-// marked last, at most maxRecord bytes in all.
+// marked last, at most maxFragments of them and maxRecord bytes in all. An
+// empty fragment that is not the last is refused: it would never end.
 func readRecord(r io.Reader) ([]byte, error) {
 	var record []byte
-	for {
+	for fragments := 1; ; fragments++ {
 		var mark [4]byte
 		if _, err := io.ReadFull(r, mark[:]); err != nil {
 			return nil, err
 		}
 		header := binary.BigEndian.Uint32(mark[:])
+		last := header&(1<<31) != 0
 		n := int(header &^ (1 << 31))
-		if len(record)+n > maxRecord {
+		if len(record)+n > maxRecord || n == 0 && !last || fragments > maxFragments {
 			return nil, errGarbage
 		}
 		start := len(record)
@@ -208,7 +237,7 @@ func readRecord(r io.Reader) ([]byte, error) {
 		if _, err := io.ReadFull(r, record[start:]); err != nil {
 			return nil, err
 		}
-		if header&(1<<31) != 0 {
+		if last {
 			return record, nil
 		}
 	}
@@ -231,18 +260,18 @@ type credential struct {
 }
 
 // key identifies a call for the duplicate-request cache: its XID and a
-// digest of everything else it says, so a reused XID with other contents
-// is a new call.
+// digest of everything else it says, credential and groups included, so a
+// reused XID with other contents is a new call.
 func (c *call) key() replyKey {
+	e := &encoder{}
+	for _, v := range []uint32{c.prog, c.vers, c.proc, c.cred.flavor, c.cred.uid, c.cred.gid, uint32(len(c.cred.gids))} {
+		e.uint32(v)
+	}
+	for _, g := range c.cred.gids {
+		e.uint32(g)
+	}
 	h := sha256.New()
-	var head [24]byte
-	binary.BigEndian.PutUint32(head[0:], c.prog)
-	binary.BigEndian.PutUint32(head[4:], c.vers)
-	binary.BigEndian.PutUint32(head[8:], c.proc)
-	binary.BigEndian.PutUint32(head[12:], c.cred.flavor)
-	binary.BigEndian.PutUint32(head[16:], c.cred.uid)
-	binary.BigEndian.PutUint32(head[20:], c.cred.gid)
-	h.Write(head[:])
+	h.Write(e.buf)
 	h.Write(c.args)
 	k := replyKey{xid: c.xid}
 	h.Sum(k.digest[:0])

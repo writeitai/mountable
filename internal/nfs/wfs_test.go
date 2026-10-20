@@ -28,6 +28,12 @@ type memFiler struct {
 	entries map[string]*filer_pb.Entry // by directory + "/" + name
 }
 
+func (f *memFiler) remove(dir, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.entries, dir+"/"+name)
+}
+
 func (f *memFiler) put(dir string, e *filer_pb.Entry) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -193,5 +199,28 @@ func TestRealEngineReadPath(t *testing.T) {
 	r.postOpAttr()
 	if tbytes := r.u64(); tbytes != 1<<30 {
 		t.Fatalf("FSSTAT total %d", tbytes)
+	}
+}
+
+// The real engine, codex's reproduction: listing A reads "a", "a" is
+// deleted, listing B starts over, and A resumes without skipping "b".
+func TestRealEngineRestartKeepsCookies(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 800, ""))
+	for i, name := range []string{"a", "b", "c"} {
+		filer.put("/c/fs1/d", entry(name, 0o644, uint64(801+i), name))
+	}
+	_, c := startServer(t, realEngine(t, filer))
+	dir, _ := c.lookup(c.root(), "d")
+	_, a := c.readDirPlus(dir, 0, 0, 1024, pageOverhead+3*184)
+	if names := strings.Join(a.names(), " "); names != ". .. a" {
+		t.Fatalf("first page %s", names)
+	}
+	filer.remove("/c/fs1/d", "a")
+	if names := strings.Join(c.readAll(dir, 0, 0, 4096), " "); names != ". .. b c" {
+		t.Fatalf("the restarted listing: %s", names)
+	}
+	if names := strings.Join(c.readAll(dir, a.last(), a.verf, 4096), " "); names != "b c" {
+		t.Fatalf("the paused listing resumed with %s", names)
 	}
 }

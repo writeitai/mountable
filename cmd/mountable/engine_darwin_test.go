@@ -147,7 +147,13 @@ func TestLongSocketPathsMoveToTmp(t *testing.T) {
 	if _, err := os.Lstat(base); os.IsNotExist(err) {
 		defer os.Remove(base) // created by this test
 	}
-	cache := filepath.Join(t.TempDir(), strings.Repeat("x", 100))
+	parent := filepath.Join(t.TempDir(), "mountable")
+	cache := filepath.Join(parent, strings.Repeat("x", 100))
+	for _, dir := range []string{parent, cache} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	dir, err := makeSocketDir(cache)
 	if err != nil {
 		t.Fatal(err)
@@ -186,5 +192,21 @@ func TestCheckPrivate(t *testing.T) {
 	}
 	if err := checkPrivate(private); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A reused cache directory open to others is refused before the socket goes
+// into it.
+func TestSocketDirNeedsPrivateParents(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "mountable")
+	if err := os.Mkdir(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.MkdirTemp(base, "mount-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := makeSocketDir(cache); err == nil {
+		t.Fatal("a socket went under a 0755 directory")
 	}
 }
