@@ -388,11 +388,15 @@ func TestReadDirTakesNoReferences(t *testing.T) {
 
 // The entry that did not fit gets no cookie.
 func TestNoCookieForWhatDidNotFit(t *testing.T) {
-	_, c := startServer(t, wideEngine(10))
+	f := wideEngine(10)
+	_, c := startServer(t, f)
 	dir, _ := c.lookup(c.root(), "wide")
 	_, p := c.readDirPlus(dir, 0, 0, 1024, pageOverhead+3*184)
 	if s, _ := c.readDirPlus(dir, p.last()+1, p.verf, 1024, 1024); s != uint32(nfsErrBadCook) {
 		t.Fatalf("a cookie never sent: %d", s)
+	}
+	if n := f.refs("wide/file-0001"); n != 0 {
+		t.Fatalf("the entry that did not fit holds %d references", n)
 	}
 }
 

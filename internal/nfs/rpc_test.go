@@ -555,3 +555,25 @@ func TestSimultaneousCopiesOverTheWire(t *testing.T) {
 	default:
 	}
 }
+
+// A full cache turning a call away (no slot) costs no other call's reply.
+func TestTurnedAwayCallsEvictNothing(t *testing.T) {
+	c := newReplyCache()
+	for i := range drcSize {
+		e, _ := c.begin(replyKey{xid: uint32(i)}, nil, admit)
+		c.finish(e, reply{body: []byte{byte(i)}})
+	}
+	if _, state := c.begin(replyKey{xid: 99999}, nil, func() bool { return false }); state != drcFull {
+		t.Fatalf("state %d", state)
+	}
+	if _, state := c.begin(replyKey{xid: 0}, nil, admit); state != drcDone || len(c.entries) != drcSize {
+		t.Fatalf("the oldest reply was evicted: state %d, %d entries", state, len(c.entries))
+	}
+	// Admitted, the new call does take the oldest finished entry's place.
+	if _, state := c.begin(replyKey{xid: 99999}, nil, admit); state != drcNew || len(c.entries) != drcSize {
+		t.Fatalf("state %d, %d entries", state, len(c.entries))
+	}
+	if _, state := c.begin(replyKey{xid: 0}, nil, func() bool { return false }); state == drcDone {
+		t.Fatal("the oldest finished entry was kept past capacity")
+	}
+}

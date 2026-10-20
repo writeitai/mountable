@@ -140,14 +140,23 @@ type page struct {
 	full            bool
 }
 
+// fits reports whether an entry of that name still fits; once one does
+// not, the page is full.
+func (p *page) fits(name string) bool {
+	size, dirSize := entrySize(name, p.plus)
+	if p.full || size > p.bytes || p.plus && dirSize > p.dirBytes {
+		p.full = true
+	}
+	return !p.full
+}
+
 // add takes an entry if it fits; its cookie is made only then, so no
 // cookie is issued for an entry the page does not carry.
 func (p *page) add(entry listed, cookie func() uint64) bool {
-	size, dirSize := entrySize(entry.name, p.plus)
-	if p.full || size > p.bytes || p.plus && dirSize > p.dirBytes {
-		p.full = true
+	if !p.fits(entry.name) {
 		return false
 	}
+	size, dirSize := entrySize(entry.name, p.plus)
 	p.bytes -= size
 	p.dirBytes -= dirSize
 	entry.cookie = cookie()
@@ -253,7 +262,7 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 // engine's own listing, the source its lookups use, by name; on a
 // READDIRPLUS page with their attributes, each holding a lookup reference.
 func (s *service) names(dir object, after string, p *page, table *cookieTable) (eof bool, status nfsStatus) {
-	eof, st := s.engine.ReadDirectoryAfter(dir.inode, after, p.plus, func(e *weedmount.ListedEntry) bool {
+	eof, st := s.engine.ReadDirectoryAfter(dir.inode, after, p.plus, p.fits, func(e *weedmount.ListedEntry) bool {
 		return p.add(listed{name: e.Name, ino: e.Inode, entry: e}, func() uint64 { return table.cookie(e.Name) })
 	})
 	if st != fuse.OK {

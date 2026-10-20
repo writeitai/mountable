@@ -8,6 +8,7 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
@@ -234,7 +235,7 @@ func (f *fakeEngine) Readlink(_ <-chan struct{}, h *fuse.InHeader) ([]byte, fuse
 // ReadDirectoryAfter lists the way the patched WFS does: the children
 // after a name, in name order; a plus entry the caller accepts is entered
 // and takes a lookup reference.
-func (f *fakeEngine) ReadDirectoryAfter(dir uint64, after string, plus bool, add func(*weedmount.ListedEntry) bool) (bool, fuse.Status) {
+func (f *fakeEngine) ReadDirectoryAfter(dir uint64, after string, plus bool, fits func(string) bool, add func(*weedmount.ListedEntry) bool) (bool, fuse.Status) {
 	if f.beforeList != nil {
 		f.beforeList()
 	}
@@ -258,6 +259,9 @@ func (f *fakeEngine) ReadDirectoryAfter(dir uint64, after string, plus bool, add
 		inode := o.ino
 		if known, ok := f.inodes[p]; ok {
 			inode = known
+		}
+		if fits != nil && !fits(name) {
+			return false, fuse.OK
 		}
 		e := &weedmount.ListedEntry{Name: name, Inode: inode, StoredInode: o.ino}
 		if plus {
@@ -288,3 +292,19 @@ func (f *fakeEngine) PathForInode(inode uint64) (util.FullPath, bool) {
 }
 
 func (f *fakeEngine) MountRoot() util.FullPath { return util.FullPath(f.root) }
+
+// NamespaceEntry answers from the objects by path, as the patched WFS does
+// (the fake has no open handles to prefer).
+func (f *fakeEngine) NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.paths[inode]
+	if !ok {
+		return nil, fuse.ENOENT
+	}
+	o := f.objects[p]
+	if o == nil {
+		return nil, fuse.ENOENT
+	}
+	return &filer_pb.Entry{IsDirectory: o.mode&syscall.S_IFMT == syscall.S_IFDIR, Attributes: &filer_pb.FuseAttributes{Inode: o.ino}}, fuse.OK
+}

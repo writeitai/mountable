@@ -61,24 +61,34 @@ func (c *replyCache) begin(k replyKey, from *conn, admit func() bool) (*cachedRe
 		}
 		return e, drcInProgress
 	}
-	if len(c.entries) >= drcSize && !c.evictFinished() || !admit() {
+	// Room is found before the slot is taken, and made only after: a call
+	// turned away must not cost another call's reply its protection.
+	var evict *list.Element
+	if len(c.entries) >= drcSize {
+		if evict = c.oldestFinished(); evict == nil {
+			return nil, drcFull
+		}
+	}
+	if !admit() {
 		return nil, drcFull
+	}
+	if evict != nil {
+		c.order.Remove(evict)
+		delete(c.entries, evict.Value.(*cachedReply).key)
 	}
 	e := &cachedReply{key: k, conn: from, done: make(chan struct{})}
 	c.entries[k] = c.order.PushBack(e)
 	return e, drcNew
 }
 
-// evictFinished drops the oldest finished entry.
-func (c *replyCache) evictFinished() bool {
+// oldestFinished is the entry to evict for room: the oldest finished one.
+func (c *replyCache) oldestFinished() *list.Element {
 	for el := c.order.Front(); el != nil; el = el.Next() {
-		if e := el.Value.(*cachedReply); e.finished {
-			c.order.Remove(el)
-			delete(c.entries, e.key)
-			return true
+		if el.Value.(*cachedReply).finished {
+			return el
 		}
 	}
-	return false
+	return nil
 }
 
 // finish records the reply to a call begin admitted, and hands it to any

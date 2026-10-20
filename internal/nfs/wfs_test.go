@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 	"github.com/seaweedfs/seaweedfs/weed/mount/meta_cache"
 	"github.com/seaweedfs/seaweedfs/weed/pb"
@@ -376,5 +378,36 @@ func TestRealEngineRenameOverAHardLink(t *testing.T) {
 	one, a := c.lookup(dir, "one")
 	if bytes.Equal(one, shared) || a.size != 11 || read(one) != "replacement" {
 		t.Fatal("the overwritten name is not the replacement")
+	}
+}
+
+// Codex's reproduction on the real engine: a handle holds the file open
+// while it is deleted; LOOKUP sees the name gone; the file is recreated
+// with the same stored inode. The open handle does not count as proof the
+// old object survived: the old NFS handle is STALE, never the newcomer.
+func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+	for i, name := range []string{"f", "x", "y"} { // too many to cache
+		filer.put("/c/fs1/d", entry(name, 0o644, uint64(710+i), "original"))
+	}
+	engine := realEngine(t, filer, 2)
+	_, c := startServer(t, engine)
+	dir, _ := c.lookup(c.root(), "d")
+	old, a := c.lookup(dir, "f")
+	var opened fuse.OpenOut
+	h := fuse.InHeader{NodeId: a.fileid}
+	if st := engine.Open(nil, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
+		t.Fatalf("open: %v", st)
+	}
+	filer.remove("/c/fs1/d", "f")
+	if s := c.status(procLookup, wire{}.opaque(dir).str("f")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("lookup of the deleted name: %d", s)
+	}
+	filer.put("/c/fs1/d", entry("f", 0o644, 710, "successor"))
+	engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+	r := c.call(procRead, wire{}.opaque(old).u64(0).u32(100))
+	if s := r.u32(); s != uint32(nfsErrStale) || bytes.Contains(r.b, []byte("successor")) {
+		t.Fatalf("READ through the old handle: status %d", s)
 	}
 }

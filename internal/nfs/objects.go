@@ -6,6 +6,7 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
@@ -19,9 +20,11 @@ type Engine interface {
 	Read(cancel <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status)
 	Release(cancel <-chan struct{}, in *fuse.ReleaseIn)
 	Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status)
-	// ReadDirectoryAfter is the engine patch set's name-resuming listing
-	// (writeitai/seaweedfs, branch mountable).
-	ReadDirectoryAfter(dir uint64, after string, plus bool, add func(*weedmount.ListedEntry) bool) (eof bool, code fuse.Status)
+	// ReadDirectoryAfter and NamespaceEntry come from the engine patch set
+	// (writeitai/seaweedfs, branch mountable): a name-resuming listing, and
+	// an inode's entry as the namespace has it, whatever handle is open.
+	ReadDirectoryAfter(dir uint64, after string, plus bool, fits func(name string) bool, add func(*weedmount.ListedEntry) bool) (eof bool, code fuse.Status)
+	NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status)
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath

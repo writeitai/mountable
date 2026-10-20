@@ -138,18 +138,17 @@ func (s *service) lookup(o *op) reply {
 }
 
 // child looks a name up in the directory at inode. When the name is gone,
-// the object it last named is checked: still there under another name (a
-// rename), it keeps its handles; gone, it is retired, so whatever takes the
-// name next is a new object even with the same stored inode.
+// the object it last named is checked in the namespace: still there under
+// another name (a rename, a surviving hard link), it keeps its handles;
+// gone, it is retired, so whatever takes the name next is a new object even
+// with the same stored inode.
 func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
 	key := name{dir: inode, name: n}
 	var out fuse.EntryOut
 	st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), n, &out)
 	if st == fuse.ENOENT {
 		if last, ok := s.objects.unnamed(key); ok {
-			if incarnation, ok := s.objects.at(last); ok {
-				s.still(o, object{inode: last, incarnation: incarnation})
-			}
+			s.checkExists(last)
 		}
 	}
 	if st != fuse.OK {
@@ -312,6 +311,31 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 		return nil, status
 	}
 	return data, nfsOK
+}
+
+// checkExists retires the identity an inode holds if the namespace no
+// longer has its object. It asks the namespace itself, not GetAttr, which
+// answers from a handle that holds the file open, even after the file was
+// deleted. An error proves nothing, and retires nothing.
+func (s *service) checkExists(inode uint64) {
+	incarnation, ok := s.objects.at(inode)
+	if !ok {
+		return
+	}
+	id, _ := s.objects.current(inode, incarnation)
+	entry, st := s.engine.NamespaceEntry(inode)
+	if st == fuse.OK {
+		stored := entry.GetAttributes().GetInode()
+		if stored == 0 {
+			stored = inode // as GetAttr reports an entry without one
+		}
+		if stored == id.ino && entry.GetIsDirectory() == (id.kind == syscall.S_IFDIR) {
+			return
+		}
+	}
+	if st == fuse.OK || st == fuse.ENOENT {
+		s.objects.retire(inode, incarnation)
+	}
 }
 
 // still checks that the inode still holds obj's identity, retiring it if
