@@ -1,8 +1,10 @@
 package main
 
-// The mount engine runs in this process: SeaweedFS's mount filesystem served
-// over FUSE, wired the way upstream `weed mount` (weed/command/mount_std.go)
-// does, keeping only the options Mountable uses.
+// The mount engine runs in this process: SeaweedFS's mount filesystem, wired
+// the way upstream `weed mount` (weed/command/mount_std.go) does, keeping
+// only the options Mountable uses. It is served over FUSE on Linux
+// (engine_fuse.go) and to the Mac's own NFS client on macOS
+// (engine_darwin.go).
 
 import (
 	"bufio"
@@ -14,13 +16,11 @@ import (
 	"log"
 	"os"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 	"github.com/seaweedfs/seaweedfs/weed/mount/meta_cache"
 	"github.com/seaweedfs/seaweedfs/weed/operation"
@@ -56,16 +56,8 @@ type mountConfig struct {
 	cacheDir string
 }
 
-// engine is one mount served by this process.
-type engine struct {
-	dir    string
-	wfs    *weedmount.WFS
-	server *fuse.Server
-	done   chan struct{} // closed when the FUSE server stops serving
-}
-
-// startEngine mounts. Every step that talks to the gateway runs before
-// FUSE is attached and ends with ctx or startupTimeout, even where the
+// startEngine mounts. Every step that talks to the gateway runs before the
+// mount is attached and ends with ctx or startupTimeout, even where the
 // engine's own calls ignore their context; once attached, a failure or
 // cancellation aborts the mount before returning.
 func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
@@ -146,31 +138,14 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		return nil, fmt.Errorf("creating the filesystem root: %w", err)
 	}
 	// Reads the cell's configuration (without a deadline of its own) and
-	// starts the metadata subscription; nothing here needs FUSE.
+	// starts the metadata subscription; nothing here needs the mount.
 	if err := unlessCancelled(ctx, wfs.StartBackgroundTasks); err != nil {
 		return nil, fmt.Errorf("starting the mount engine: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	server, err := fuse.NewServer(wfs, dir, fuseOptions(dir, c.readOnly))
-	if err != nil {
-		return nil, fmt.Errorf("mounting %s: %w", dir, err)
-	}
-	e := &engine{dir: dir, wfs: wfs, server: server, done: make(chan struct{})}
-	go func() {
-		server.Serve()
-		close(e.done)
-	}()
-	if err := unlessCancelled(ctx, server.WaitMount); err != nil {
-		// Attached but not serving: never leave it behind.
-		if abortErr := e.abort(); abortErr != nil {
-			err = fmt.Errorf("%w; cleaning up the mount: %v", err, abortErr)
-		}
-		return nil, fmt.Errorf("mounting %s: %w", dir, err)
-	}
-	return e, nil
+	return attach(ctx, wfs, c)
 }
 
 // unlessCancelled runs fn and returns its error, or ctx's error as soon as
@@ -263,37 +238,6 @@ func flushEngineLog() {
 	}
 }
 
-func fuseOptions(dir string, readOnly bool) *fuse.MountOptions {
-	options := &fuse.MountOptions{
-		AllowOther:    false,
-		MaxBackground: 128,
-		MaxWrite:      2 * 1024 * 1024,
-		MaxReadAhead:  2 * 1024 * 1024,
-		FsName:        "mountable",
-		Name:          "mountable",
-		EnableLocks:   true,
-		DirectMount:   true,
-		EnableAcl:     true,
-		Options:       []string{"default_permissions", "nosuid", "nodev"},
-	}
-	if readOnly {
-		if runtime.GOOS == "darwin" {
-			options.Options = append(options.Options, "rdonly")
-		} else {
-			options.Options = append(options.Options, "ro")
-		}
-	}
-	if runtime.GOOS == "darwin" {
-		options.Options = append(options.Options, "daemon_timeout=600")
-		if runtime.GOARCH == "amd64" {
-			options.Options = append(options.Options, "noapplexattr")
-		}
-		options.Options = append(options.Options, "slow_statfs",
-			"volname="+filepath.Base(dir), fmt.Sprintf("iosize=%d", chunkSizeMB*1024*1024))
-	}
-	return options
-}
-
 func grpcDialOption(config *tls.Config) grpc.DialOption {
 	return grpc.WithTransportCredentials(grpccredentials.NewTLS(config))
 }
@@ -348,29 +292,3 @@ func filerCipher(ctx context.Context, filers []pb.ServerAddress, dialOption grpc
 	}
 	return false, err
 }
-
-func (e *engine) mountPoint() string { return e.dir }
-
-func (e *engine) served() <-chan struct{} { return e.done }
-
-// unmount ends the mount cleanly and waits for serving to stop. It fails
-// while the mount is busy.
-func (e *engine) unmount() error {
-	if err := e.server.Unmount(); err != nil {
-		return err
-	}
-	<-e.done
-	return nil
-}
-
-// flush runs once serving has stopped: it waits for pending writes, then
-// drops the local caches.
-func (e *engine) flush() {
-	e.wfs.WaitForAsyncFlush()
-	e.wfs.ClearCacheDir()
-}
-
-// abort ends the mount at once without flushing: every further operation in
-// it fails. Exiting the process afterwards also closes the FUSE device,
-// which ends the connection even where the abort itself could not be done.
-func (e *engine) abort() error { return abortMount(e.dir) }

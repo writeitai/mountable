@@ -56,7 +56,8 @@ func endingFor(e event) ending {
 // mountEngine is what the lifecycle needs from a running mount.
 type mountEngine interface {
 	mountPoint() string
-	// served is closed once the FUSE server stops serving.
+	// served is closed once the mount has ended: the FUSE server stopped
+	// serving, or the mount left the OS mount table (macOS).
 	served() <-chan struct{}
 	// unmount unmounts cleanly and waits for serving to stop.
 	unmount() error
@@ -165,7 +166,7 @@ func (l *lifecycle) abort(why string) error {
 	}
 	diagnose("%s; aborting the mount", why)
 	if err := l.e.abort(); err != nil {
-		return fmt.Errorf("%s, and the mount could not be fully aborted (%s): it ends when this process exits; writes not yet committed may be lost", why, oneLine(err))
+		return fmt.Errorf("%s, and the mount could not be fully aborted (%s): %s; writes not yet committed may be lost", why, oneLine(err), abortFallback)
 	}
 	return fmt.Errorf("%s; the mount was aborted and writes not yet committed may be lost", why)
 }

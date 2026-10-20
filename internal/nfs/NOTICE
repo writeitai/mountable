@@ -1,0 +1,6 @@
+The ONC RPC record framing, reply encoding and the NFSv3 and MOUNT v3
+protocol constants in this directory (rpc.go, protocol.go) are derived from
+go-nfs, https://github.com/willscott/go-nfs, at commit
+6274d051a57fe87e8cb9cda60e38824db1ab08a7, licensed under the Apache License,
+Version 2.0 (LICENSE in this directory). Each derived file says what was
+changed. The rest of this directory is Mountable's own.

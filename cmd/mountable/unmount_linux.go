@@ -77,3 +77,14 @@ func fusermount(dir, flags string) error {
 	}
 	return err
 }
+
+// isMountPoint is for macOS, where canonicalDir must not touch a mount
+// point; on Linux reading the link of one is harmless.
+func isMountPoint(string) bool { return false }
+
+// prepareMountPoint has nothing to do on Linux.
+func prepareMountPoint(string) error { return nil }
+
+// clearStaleMount is for macOS's NFS mounts, which outlive their process;
+// a dead FUSE mount is unmounted the ordinary way.
+func clearStaleMount(string) (bool, error) { return false, nil }

@@ -101,6 +101,9 @@ func mount(o *output, ticket, dir string) error {
 	}
 	// Check the directory before the ticket is exchanged, so a missing
 	// directory does not use up the ticket. Bounded: dir may be a stale mount.
+	if err := prepareMountPoint(dir); err != nil {
+		return err
+	}
 	if err := withTimeout(helperTimeout, func() error { return isDirectory(dir) }); err != nil {
 		return &cliError{Code: "mount_failed", Message: fmt.Sprintf("mount directory %s: %v", dir, err), Hint: "create it first: mkdir -p " + dir}
 	}
@@ -151,7 +154,7 @@ func mount(o *output, ticket, dir string) error {
 	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
-		if session.readOnly {
+		if e.readOnly {
 			mode = "ro"
 		}
 		if err := o.emit(map[string]string{
@@ -298,6 +301,9 @@ func mountCacheDir() (string, error) {
 func unmount(dir string) error {
 	dir, err := canonicalDir(dir)
 	if err != nil {
+		return err
+	}
+	if cleared, err := clearStaleMount(dir); cleared || err != nil {
 		return err
 	}
 	err = cleanUnmount(dir)
