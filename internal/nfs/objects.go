@@ -6,12 +6,11 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
-	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
-// Engine is the part of the SeaweedFS mount engine (weed/mount.WFS) the
-// server uses; WFS implements it as it is.
+// Engine is the part of the SeaweedFS mount engine (weed/mount.WFS, with
+// Mountable's engine patch set) the server uses; WFS implements it.
 type Engine interface {
 	GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) fuse.Status
 	Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status
@@ -20,15 +19,12 @@ type Engine interface {
 	Read(cancel <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status)
 	Release(cancel <-chan struct{}, in *fuse.ReleaseIn)
 	Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status)
-	OpenDir(cancel <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status
-	ReadDirectoryInto(in *fuse.ReadIn, sink weedmount.DirEntrySink, plus bool) fuse.Status
-	ReleaseDir(in *fuse.ReleaseIn)
+	// ReadDirectoryAfter is the engine patch set's name-resuming listing
+	// (writeitai/seaweedfs, branch mountable).
+	ReadDirectoryAfter(dir uint64, after string, plus bool, add func(*weedmount.ListedEntry) bool) (eof bool, code fuse.Status)
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath
-	// WithFilerClient reaches the gateway's filer service on the session's
-	// connection, for the listing helper.
-	WithFilerClient(streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error
 }
 
 var _ Engine = (*weedmount.WFS)(nil)

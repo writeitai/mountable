@@ -1,20 +1,14 @@
 package nfs
 
 import (
-	"context"
-	"io"
 	"path"
 	"sort"
-	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
-	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 	"github.com/seaweedfs/seaweedfs/weed/util"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 // fakeEngine stands in for WFS the way the server sees it: a store of
@@ -28,7 +22,6 @@ type fakeEngine struct {
 	paths    map[uint64]string      // the inode table
 	inodes   map[string]uint64
 	nlookup  map[uint64]uint64
-	dirs     map[uint64]bool // open directory handles
 	nextFh   uint64
 	listings int // filer listing calls
 	// block, when set, holds GetAttr until it is closed.
@@ -38,7 +31,7 @@ type fakeEngine struct {
 	// things at that moment.
 	beforeOpen, beforeRead func()
 	// afterLookup, when set, runs once a Lookup has succeeded;
-	// beforeReadlink and beforeList before Readlink and a filer listing.
+	// beforeReadlink and beforeList before Readlink and a listing.
 	afterLookup, beforeReadlink, beforeList func()
 	getAttrs                                int // GetAttr calls begun
 }
@@ -57,7 +50,6 @@ func newFakeEngine() *fakeEngine {
 		paths:   map[uint64]string{rootInode: "/c/fs1"},
 		inodes:  map[string]uint64{"/c/fs1": rootInode},
 		nlookup: map[uint64]uint64{rootInode: 1},
-		dirs:    map[uint64]bool{},
 	}
 }
 
@@ -239,68 +231,47 @@ func (f *fakeEngine) Readlink(_ <-chan struct{}, h *fuse.InHeader) ([]byte, fuse
 	return []byte(o.target), fuse.OK
 }
 
-func (f *fakeEngine) OpenDir(_ <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.nextFh++
-	out.Fh = f.nextFh
-	f.dirs[out.Fh] = true
-	return fuse.OK
-}
-
-func (f *fakeEngine) ReleaseDir(in *fuse.ReleaseIn) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.dirs, in.Fh)
-}
-
-// ReadDirectoryInto lists the way WFS does: "." and ".." at offsets 1 and
-// 2, then the children by name, each at its index plus 3; a READDIRPLUS
-// entry takes a lookup reference once the sink accepts it.
-func (f *fakeEngine) ReadDirectoryInto(in *fuse.ReadIn, sink weedmount.DirEntrySink, plus bool) fuse.Status {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.dirs[in.Fh] {
-		panic("readdir on a directory handle that is not open")
+// ReadDirectoryAfter lists the way the patched WFS does: the children
+// after a name, in name order; a plus entry the caller accepts is entered
+// and takes a lookup reference.
+func (f *fakeEngine) ReadDirectoryAfter(dir uint64, after string, plus bool, add func(*weedmount.ListedEntry) bool) (bool, fuse.Status) {
+	if f.beforeList != nil {
+		f.beforeList()
 	}
-	dir := f.paths[in.NodeId]
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listings++
+	dirPath, ok := f.paths[dir]
+	if !ok {
+		return false, fuse.ENOENT
+	}
 	var names []string
 	for p := range f.objects {
-		if path.Dir(p) == dir {
+		if path.Dir(p) == dirPath && path.Base(p) > after {
 			names = append(names, path.Base(p))
 		}
 	}
 	sort.Strings(names)
-	add := func(e fuse.DirEntry) bool {
-		if plus {
-			return sink.AddEntryPlus(e) != nil
-		}
-		return sink.AddEntry(e)
-	}
-	offset := in.Offset
-	if offset < 2 {
-		if offset == 0 {
-			add(fuse.DirEntry{Name: ".", Mode: syscall.S_IFDIR, Off: 1})
-		}
-		add(fuse.DirEntry{Name: "..", Mode: syscall.S_IFDIR, Off: 2})
-		offset = 2
-	}
-	for i := int(offset - 2); i < len(names); i++ {
-		p := dir + "/" + names[i]
+	for _, name := range names {
+		p := dirPath + "/" + name
 		o := f.objects[p]
 		inode := o.ino
 		if known, ok := f.inodes[p]; ok {
 			inode = known
 		}
-		if !add(fuse.DirEntry{Name: names[i], Mode: o.mode, Ino: inode, Off: uint64(i) + 3}) {
-			return fuse.OK
+		e := &weedmount.ListedEntry{Name: name, Inode: inode, StoredInode: o.ino}
+		if plus {
+			e.Out = &fuse.EntryOut{NodeId: inode}
+			f.attr(inode, o, &e.Out.Attr)
+		}
+		if !add(e) {
+			return false, fuse.OK
 		}
 		if plus {
-			inode = f.register(p, o)
-			f.nlookup[inode]++
+			f.nlookup[f.register(p, o)]++
 		}
 	}
-	return fuse.OK
+	return true, fuse.OK
 }
 
 func (f *fakeEngine) StatFs(_ <-chan struct{}, _ *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
@@ -317,61 +288,3 @@ func (f *fakeEngine) PathForInode(inode uint64) (util.FullPath, bool) {
 }
 
 func (f *fakeEngine) MountRoot() util.FullPath { return util.FullPath(f.root) }
-
-// WithFilerClient hands out a filer that lists the fake's objects.
-func (f *fakeEngine) WithFilerClient(_ bool, fn func(filer_pb.SeaweedFilerClient) error) error {
-	return fn(fakeFiler{f: f})
-}
-
-type fakeFiler struct {
-	filer_pb.SeaweedFilerClient
-	f *fakeEngine
-}
-
-// ListEntries lists a directory in name order from StartFromFileName, as
-// the filer does.
-func (c fakeFiler) ListEntries(_ context.Context, in *filer_pb.ListEntriesRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[filer_pb.ListEntriesResponse], error) {
-	if c.f.beforeList != nil {
-		c.f.beforeList()
-	}
-	c.f.mu.Lock()
-	defer c.f.mu.Unlock()
-	c.f.listings++
-	var names []string
-	for p := range c.f.objects {
-		if path.Dir(p) == in.Directory && strings.HasPrefix(path.Base(p), in.Prefix) {
-			names = append(names, path.Base(p))
-		}
-	}
-	sort.Strings(names)
-	stream := &fakeStream{}
-	for _, name := range names {
-		if name < in.StartFromFileName || name == in.StartFromFileName && !in.InclusiveStartFrom {
-			continue
-		}
-		if in.Limit > 0 && len(stream.entries) == int(in.Limit) {
-			break
-		}
-		o := c.f.objects[in.Directory+"/"+name]
-		stream.entries = append(stream.entries, &filer_pb.ListEntriesResponse{Entry: &filer_pb.Entry{
-			Name: name, Attributes: &filer_pb.FuseAttributes{Inode: o.ino},
-		}})
-	}
-	return stream, nil
-}
-
-type fakeStream struct {
-	grpc.ClientStream
-	entries []*filer_pb.ListEntriesResponse
-}
-
-func (s *fakeStream) Recv() (*filer_pb.ListEntriesResponse, error) {
-	if len(s.entries) == 0 {
-		return nil, io.EOF
-	}
-	e := s.entries[0]
-	s.entries = s.entries[1:]
-	return e, nil
-}
-
-func (s *fakeStream) Trailer() metadata.MD { return nil }

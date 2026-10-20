@@ -1,9 +1,12 @@
 package nfs
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +29,13 @@ type memFiler struct {
 	filer_pb.UnimplementedSeaweedFilerServer
 	mu      sync.Mutex
 	entries map[string]*filer_pb.Entry // by directory + "/" + name
+	calls   int                        // lookups and listings served
+}
+
+func (f *memFiler) served() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func (f *memFiler) remove(dir, name string) {
@@ -43,6 +53,7 @@ func (f *memFiler) put(dir string, e *filer_pb.Entry) {
 func (f *memFiler) LookupDirectoryEntry(_ context.Context, r *filer_pb.LookupDirectoryEntryRequest) (*filer_pb.LookupDirectoryEntryResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if e, ok := f.entries[strings.TrimSuffix(r.Directory, "/")+"/"+r.Name]; ok {
 		return &filer_pb.LookupDirectoryEntryResponse{Entry: e}, nil
 	}
@@ -51,6 +62,7 @@ func (f *memFiler) LookupDirectoryEntry(_ context.Context, r *filer_pb.LookupDir
 
 func (f *memFiler) ListEntries(r *filer_pb.ListEntriesRequest, stream grpc.ServerStreamingServer[filer_pb.ListEntriesResponse]) error {
 	f.mu.Lock()
+	f.calls++
 	var names []string
 	byName := map[string]*filer_pb.Entry{}
 	for key, e := range f.entries {
@@ -99,8 +111,10 @@ func entry(name string, mode os.FileMode, inode uint64, content string) *filer_p
 }
 
 // realEngine is the SeaweedFS mount engine itself, configured as the CLI
-// configures it, against an in-memory filer.
-func realEngine(t *testing.T, filer *memFiler) *weedmount.WFS {
+// configures it, against an in-memory filer. Directories of more than
+// maxCached entries are not cached but read through to the filer, which
+// sends no change events: there, the engine sees changes at once.
+func realEngine(t *testing.T, filer *memFiler, maxCached int) *weedmount.WFS {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -126,7 +140,7 @@ func realEngine(t *testing.T, filer *memFiler) *weedmount.WFS {
 		CacheDirForRead:    cache,
 		CacheDirForWrite:   cache,
 		CacheMetaTTlSec:    60,
-		CacheDirMaxEntries: 100000,
+		CacheDirMaxEntries: maxCached,
 		MountUid:           501,
 		MountGid:           20,
 		MountMode:          os.ModeDir | 0o755,
@@ -146,7 +160,7 @@ func TestRealEngineReadPath(t *testing.T) {
 	filer.put("/c/fs1", entry("hello.txt", 0o644, 777, "hello from the engine"))
 	filer.put("/c/fs1", entry("sub", os.ModeDir|0o755, 778, ""))
 	filer.put("/c/fs1/sub", entry("deep.txt", 0o600, 779, "deep"))
-	_, c := startServer(t, realEngine(t, filer))
+	_, c := startServer(t, realEngine(t, filer, 100000))
 	root := c.root()
 
 	fh, a := c.lookup(root, "hello.txt")
@@ -210,7 +224,7 @@ func TestRealEngineRestartKeepsCookies(t *testing.T) {
 	for i, name := range []string{"a", "b", "c"} {
 		filer.put("/c/fs1/d", entry(name, 0o644, uint64(801+i), name))
 	}
-	_, c := startServer(t, realEngine(t, filer))
+	_, c := startServer(t, realEngine(t, filer, 2))
 	dir, _ := c.lookup(c.root(), "d")
 	_, a := c.readDirPlus(dir, 0, 0, 1024, pageOverhead+3*184)
 	if names := strings.Join(a.names(), " "); names != ". .. a" {
@@ -222,5 +236,95 @@ func TestRealEngineRestartKeepsCookies(t *testing.T) {
 	}
 	if names := strings.Join(c.readAll(dir, a.last(), a.verf, 4096), " "); names != "b c" {
 		t.Fatalf("the paused listing resumed with %s", names)
+	}
+}
+
+// A directory too large for the engine's cache is listed in batches: a
+// READDIRPLUS of all of it, with attributes and handles, costs a few filer
+// calls, not one per child; and names added or removed between pages show
+// at once, with handles that work.
+func TestRealEngineReadThroughDirectory(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("big", os.ModeDir|0o755, 900, ""))
+	const n = 1500
+	for i := range n {
+		filer.put("/c/fs1/big", entry(fmt.Sprintf("f%04d", i), 0o644, uint64(10000+i), "x"))
+	}
+	_, c := startServer(t, realEngine(t, filer, 100))
+	dir, _ := c.lookup(c.root(), "big")
+	before := filer.served()
+	var got []string
+	cookie, verf := uint64(0), uint64(0)
+	pages := 0
+	for ; ; pages++ {
+		_, p := c.readDirPlus(dir, cookie, verf, 8192, 1<<20)
+		for _, e := range p.entries {
+			if e.attr == nil || len(e.fh) != handleSize {
+				t.Fatalf("%s without attributes or handle", e.name)
+			}
+			got = append(got, e.name)
+		}
+		if p.eof {
+			break
+		}
+		cookie, verf = p.last(), p.verf
+		if pages == 0 {
+			filer.remove("/c/fs1/big", "f1400")
+			filer.put("/c/fs1/big", entry("f1499a", 0o644, 20000, "new"))
+		}
+	}
+	calls := filer.served() - before
+	t.Logf("%d entries in %d pages, %d filer calls", n, pages+1, calls)
+	if calls > 20 || pages < 2 {
+		t.Fatalf("%d filer calls for %d entries in %d pages", calls, n, pages+1)
+	}
+	if slices.Contains(got, "f1400") || !slices.Contains(got, "f1499a") || len(got) != n+2 {
+		t.Fatalf("listed %d names", len(got))
+	}
+	fh, a := c.lookup(dir, "f1499a")
+	if a.size != 3 {
+		t.Fatalf("the added name: %+v", a)
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(fh)); s != 0 {
+		t.Fatalf("its handle: %d", s)
+	}
+}
+
+// Two links to one file; the first is removed elsewhere. LOOKUP of the
+// survivor, and the shared handle, still work through it.
+func TestRealEngineHardLinkSurvivor(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+	for _, name := range []string{"one", "two"} {
+		e := entry(name, 0o644, 4242, "shared")
+		e.HardLinkId, e.HardLinkCounter = []byte("link-4242"), 2
+		filer.put("/c/fs1/d", e)
+	}
+	filer.put("/c/fs1/d", entry("other", 0o644, 701, "")) // too many to cache
+	_, c := startServer(t, realEngine(t, filer, 2))
+	dir, _ := c.lookup(c.root(), "d")
+	one, a := c.lookup(dir, "one")
+	if two, b := c.lookup(dir, "two"); !bytes.Equal(one, two) || a.fileid != b.fileid {
+		t.Fatal("the links got different handles")
+	}
+	filer.remove("/c/fs1/d", "one")
+	if s := c.status(procLookup, wire{}.opaque(dir).str("one")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("the removed link: %d", s)
+	}
+	if two, _ := c.lookup(dir, "two"); !bytes.Equal(two, one) {
+		t.Fatal("the survivor got another handle")
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(one)); s != 0 {
+		t.Fatalf("the shared handle: %d", s)
+	}
+	r := c.call(procRead, wire{}.opaque(one).u64(0).u32(100))
+	if s := r.u32(); s != 0 {
+		t.Fatalf("READ through the survivor: %d", s)
+	}
+	r.postOpAttr()
+	r.u32()
+	r.u32()
+	if data := r.opaque(); string(data) != "shared" {
+		t.Fatalf("read %q", data)
 	}
 }

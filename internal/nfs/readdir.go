@@ -1,13 +1,11 @@
 package nfs
 
 import (
-	"context"
 	"encoding/binary"
-	"errors"
 	"sync"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
-	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
 // Directory cookies continue by name, not by position (design §4,
@@ -21,9 +19,6 @@ const (
 	cookieAfterDotDot = 2 // the names start from the beginning
 	firstNameCookie   = 3
 )
-
-// listBatch is how many names one filer listing call asks for.
-const listBatch = 512
 
 // cookieTable maps one directory's issued cookies to the names they stand
 // for. Tables are kept for the life of the export and never evicted: a
@@ -95,6 +90,7 @@ type listed struct {
 	cookie uint64
 	ino    uint64 // the fileid, if no handle is issued for it
 	obj    *object
+	entry  *weedmount.ListedEntry // as the engine listed it; nil for "." and ".."
 }
 
 func (s *service) readDir(o *op) reply {
@@ -207,7 +203,7 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 	eof := false
 	if !p.full {
 		var st nfsStatus
-		if eof, st = s.names(o, dir, after, p, table); st != nfsOK {
+		if eof, st = s.names(dir, after, p, table); st != nfsOK {
 			return fail(st)
 		}
 	}
@@ -248,78 +244,33 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 	return reply{body: e.buf}
 }
 
-// names adds the directory's names after the given one, in the filer's
-// order, until the page is full or the directory ends.
-func (s *service) names(o *op, dir object, after string, p *page, table *cookieTable) (eof bool, status nfsStatus) {
-	path, ok := s.engine.PathForInode(dir.inode)
-	if !ok {
-		return false, nfsErrStale
+// names adds the directory's names after the given one, in the store's
+// order, until the page is full or the directory ends. They come from the
+// engine's own listing, the source its lookups use, by name; on a
+// READDIRPLUS page with their attributes, each holding a lookup reference.
+func (s *service) names(dir object, after string, p *page, table *cookieTable) (eof bool, status nfsStatus) {
+	eof, st := s.engine.ReadDirectoryAfter(dir.inode, after, p.plus, func(e *weedmount.ListedEntry) bool {
+		return p.add(listed{name: e.Name, ino: e.Inode, entry: e}, func() uint64 { return table.cookie(e.Name) })
+	})
+	if st != fuse.OK {
+		s.drop(p.entries)
+		return false, statusOf(st)
 	}
-	s.warm(o, dir.inode)
-	ctx, cancel := context.WithCancel(filer_pb.WithChunksOmitted(context.Background()))
-	defer cancel()
-	go func() {
-		select {
-		case <-o.cancel:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	for {
-		got := 0
-		err := s.engine.WithFilerClient(false, func(client filer_pb.SeaweedFilerClient) error {
-			got = 0
-			return filer_pb.SeaweedList(ctx, client, string(path), "", func(entry *filer_pb.Entry, _ bool) error {
-				got++
-				ino := entry.GetAttributes().GetInode()
-				if ino == 0 { // an entry from before the filer stored inodes
-					ino = path.Child(entry.Name).AsInode(entry.GetAttributes().GetCrtime())
-				}
-				if !p.add(listed{name: entry.Name, ino: ino}, func() uint64 { return table.cookie(entry.Name) }) {
-					return errPageFull
-				}
-				after = entry.Name
-				return nil
-			}, after, false, listBatch)
-		})
-		switch {
-		case errors.Is(err, errPageFull):
-			return false, nfsOK
-		case err != nil:
-			return false, nfsErrIO
-		case got < listBatch:
-			return true, nfsOK
+	return eof, nfsOK
+}
+
+// drop gives back the lookup references a page not sent took.
+func (s *service) drop(entries []listed) {
+	for _, entry := range entries {
+		if entry.entry != nil && entry.entry.Out != nil {
+			s.engine.Forget(entry.entry.Inode, 1)
 		}
 	}
 }
-
-var errPageFull = errors.New("page full")
-
-// warm makes WFS cache the directory's entries, through its own listing,
-// so the lookups that give a page its handles do not each ask the filer.
-func (s *service) warm(o *op, inode uint64) {
-	h := header(inode, o.cred)
-	var out fuse.OpenOut
-	if s.engine.OpenDir(o.cancel, &fuse.OpenIn{InHeader: h}, &out) != fuse.OK {
-		return
-	}
-	defer s.engine.ReleaseDir(&fuse.ReleaseIn{InHeader: h, Fh: out.Fh})
-	s.engine.ReadDirectoryInto(&fuse.ReadIn{InHeader: h, Fh: out.Fh}, refuse{}, false)
-}
-
-// refuse is a directory sink that takes nothing: a listing into it only
-// loads the directory into WFS's cache.
-type refuse struct{}
-
-func (refuse) AddEntry(fuse.DirEntry) bool               { return false }
-func (refuse) AddEntryPlus(fuse.DirEntry) *fuse.EntryOut { return nil }
-func (refuse) TakesLookupRef() bool                      { return false }
 
 // fill gives an entry its fileid and, on a READDIRPLUS page, its handle:
-// "." is the directory, ".." its parent, and a name the object a lookup
-// finds. READDIR keeps the stored inode the listing gave and looks nothing
-// up. An entry whose lookup fails, because it vanished meanwhile, goes
-// without a handle.
+// "." is the directory, ".." its parent, and a listed name the object the
+// listing referenced, whose attributes it carries.
 func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 	var obj object
 	status := nfsOK
@@ -329,15 +280,27 @@ func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 	case entry.name == "..":
 		obj, status = s.parent(o, dir)
 	case !plus:
-		return
+		return // the listing's fileid
 	default:
-		obj, status = s.child(o, dir.inode, entry.name)
+		obj = s.listedObject(entry.entry)
 	}
 	if status != nfsOK {
-		if entry.ino == 0 {
-			entry.ino = dir.inode // a fileid of zero would hide the entry
-		}
+		entry.ino = dir.inode // a fileid of zero would hide the entry
 		return
 	}
 	entry.ino, entry.obj = obj.inode, &obj
+}
+
+// listedObject issues the handle for an entry a READDIRPLUS listing
+// referenced, as found does for a lookup, from the attributes the listing
+// carries: the store's inode is the identity.
+func (s *service) listedObject(e *weedmount.ListedEntry) object {
+	attr := e.Out.Attr
+	attr.Ino = e.StoredInode
+	if attr.Ino == 0 { // as GetAttr reports an entry without one
+		attr.Ino = e.Inode
+	}
+	incarnation := s.objects.issue(e.Inode, &attr)
+	attr.Ino = e.Inode
+	return object{inode: e.Inode, incarnation: incarnation, attr: attr}
 }
