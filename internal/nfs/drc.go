@@ -45,6 +45,20 @@ func newReplyCache() *replyCache {
 	return &replyCache{entries: map[replyKey]*list.Element{}, order: list.New()}
 }
 
+// lookup finds k without making an entry: drcNew means there is none.
+func (c *replyCache) lookup(k replyKey) (*cachedReply, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.entries[k]
+	if !ok {
+		return nil, drcNew
+	}
+	if e := el.Value.(*cachedReply); e.finished {
+		return e, drcDone
+	}
+	return el.Value.(*cachedReply), drcInProgress
+}
+
 // begin looks k up. drcNew returns the entry the call now holds, and finish
 // must follow; drcDone and drcInProgress return the existing entry, whose
 // reply is final once done is closed; drcFull means no entry can be made.

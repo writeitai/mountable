@@ -37,8 +37,10 @@ type fakeEngine struct {
 	// do their work, unlocked: they stand for another mount changing
 	// things at that moment.
 	beforeOpen, beforeRead func()
-	// afterLookup, when set, runs once a Lookup has succeeded.
-	afterLookup func()
+	// afterLookup, when set, runs once a Lookup has succeeded;
+	// beforeReadlink and beforeList before Readlink and a filer listing.
+	afterLookup, beforeReadlink, beforeList func()
+	getAttrs                                int // GetAttr calls begun
 }
 
 type fakeObject struct {
@@ -131,6 +133,9 @@ func (f *fakeEngine) register(p string, o *fakeObject) uint64 {
 }
 
 func (f *fakeEngine) GetAttr(_ <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) fuse.Status {
+	f.mu.Lock()
+	f.getAttrs++
+	f.mu.Unlock()
 	if f.block != nil {
 		<-f.block
 	}
@@ -222,9 +227,16 @@ func (f *fakeEngine) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.
 func (f *fakeEngine) Release(<-chan struct{}, *fuse.ReleaseIn) {}
 
 func (f *fakeEngine) Readlink(_ <-chan struct{}, h *fuse.InHeader) ([]byte, fuse.Status) {
+	if f.beforeReadlink != nil {
+		f.beforeReadlink()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return []byte(f.objects[f.paths[h.NodeId]].target), fuse.OK
+	o := f.objects[f.paths[h.NodeId]]
+	if o == nil {
+		return nil, fuse.ENOENT
+	}
+	return []byte(o.target), fuse.OK
 }
 
 func (f *fakeEngine) OpenDir(_ <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
@@ -319,6 +331,9 @@ type fakeFiler struct {
 // ListEntries lists a directory in name order from StartFromFileName, as
 // the filer does.
 func (c fakeFiler) ListEntries(_ context.Context, in *filer_pb.ListEntriesRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[filer_pb.ListEntriesResponse], error) {
+	if c.f.beforeList != nil {
+		c.f.beforeList()
+	}
 	c.f.mu.Lock()
 	defer c.f.mu.Unlock()
 	c.f.listings++

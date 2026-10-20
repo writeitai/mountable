@@ -285,7 +285,8 @@ func isDirectory(dir string) error {
 
 // mountCacheDir creates a private cache directory for one mount. Without a
 // user cache directory it goes under the temporary directory, in a
-// directory of this user's own.
+// directory of this user's own. The directory it goes in must be this
+// user's, mode 0700 and not a symlink.
 func mountCacheDir() (string, error) {
 	base, err := os.UserCacheDir()
 	if err == nil {
@@ -294,6 +295,10 @@ func mountCacheDir() (string, error) {
 		base = filepath.Join(os.TempDir(), fmt.Sprintf("mountable-%d", os.Getuid()))
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	// base may be reused, even made by someone else in a shared /tmp.
+	if err := checkPrivate(base); err != nil {
 		return "", err
 	}
 	return os.MkdirTemp(base, "mount-")

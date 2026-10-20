@@ -453,3 +453,37 @@ func TestStatusMapping(t *testing.T) {
 		}
 	}
 }
+
+// With every pending slot taken, a copy of a finished call still gets its
+// reply, and a copy of a running call resent on a new connection still
+// gets the first copy's answer: told to retry later instead, the client
+// would resend it under a new XID and it would run twice.
+func TestDuplicatesUnderSaturation(t *testing.T) {
+	started, release := slowRemove(t)
+	srv, c := startServer(t, newFakeEngine())
+	fh := c.root()
+	args := wire{}.opaque(fh).str("x")
+	c.send(callMessage(60, programNFS, 3, procCreate, 501, args))
+	finished := c.receive()
+	c.send(callMessage(61, programNFS, 3, procRemove, 501, args))
+	<-started
+	for range maxPending - 1 {
+		srv.pending <- struct{}{}
+	}
+	c.send(callMessage(60, programNFS, 3, procCreate, 501, args))
+	if got := c.receive(); !bytes.Equal(got, finished) {
+		t.Fatalf("finished duplicate: % x", got)
+	}
+	again := dial(t, srv.listener.Addr().String())
+	again.send(callMessage(61, programNFS, 3, procRemove, 501, args))
+	close(release)
+	got := again.receive()
+	if want := (wire{}.u32(61).u32(1).u32(0).u32(0).u32(0).u32(0).u32(uint32(nfsErrROFS))); !bytes.HasPrefix(got, want) {
+		t.Fatalf("running duplicate: % x", got)
+	}
+	select {
+	case <-started:
+		t.Fatal("the duplicate ran again")
+	default:
+	}
+}

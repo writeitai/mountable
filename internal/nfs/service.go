@@ -44,6 +44,7 @@ func NewServer(c Config) (*Server, error) {
 	return &Server{
 		svc:     s,
 		pending: make(chan struct{}, maxPending),
+		waiting: make(chan struct{}, maxPending),
 		drc:     newReplyCache(),
 		conns:   map[net.Conn]struct{}{},
 	}, nil

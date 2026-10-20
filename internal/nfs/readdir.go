@@ -144,8 +144,9 @@ type page struct {
 	full            bool
 }
 
-// add takes an entry if it fits.
-func (p *page) add(entry listed) bool {
+// add takes an entry if it fits; its cookie is made only then, so no
+// cookie is issued for an entry the page does not carry.
+func (p *page) add(entry listed, cookie func() uint64) bool {
 	size, dirSize := entrySize(entry.name, p.plus)
 	if p.full || size > p.bytes || p.plus && dirSize > p.dirBytes {
 		p.full = true
@@ -153,6 +154,7 @@ func (p *page) add(entry listed) bool {
 	}
 	p.bytes -= size
 	p.dirBytes -= dirSize
+	entry.cookie = cookie()
 	p.entries = append(p.entries, entry)
 	return true
 }
@@ -199,7 +201,8 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 
 	p := &page{plus: plus, bytes: min(maxCount, maxTransfer) - pageOverhead, dirBytes: dirCount}
 	for i, dot := range dots {
-		p.add(listed{name: dot, cookie: firstNameCookie - uint64(len(dots)) + uint64(i)})
+		cookie := firstNameCookie - uint64(len(dots)) + uint64(i)
+		p.add(listed{name: dot}, func() uint64 { return cookie })
 	}
 	eof := false
 	if !p.full {
@@ -212,7 +215,12 @@ func (s *service) list(o *op, fh []byte, cookie, verf uint64, dirCount, maxCount
 		return fail(nfsErrTooSmall)
 	}
 	for i := range p.entries {
-		s.fill(o, dir, &p.entries[i])
+		s.fill(o, dir, &p.entries[i], plus)
+	}
+	// The names were listed by the directory's path: answer only if that
+	// is still this directory.
+	if st := s.still(o, dir); st != nfsOK {
+		return fail(st)
 	}
 
 	e := &encoder{}
@@ -263,7 +271,11 @@ func (s *service) names(o *op, dir object, after string, p *page, table *cookieT
 			got = 0
 			return filer_pb.SeaweedList(ctx, client, string(path), "", func(entry *filer_pb.Entry, _ bool) error {
 				got++
-				if !p.add(listed{name: entry.Name, cookie: table.cookie(entry.Name), ino: entry.GetAttributes().GetInode()}) {
+				ino := entry.GetAttributes().GetInode()
+				if ino == 0 { // an entry from before the filer stored inodes
+					ino = path.Child(entry.Name).AsInode(entry.GetAttributes().GetCrtime())
+				}
+				if !p.add(listed{name: entry.Name, ino: ino}, func() uint64 { return table.cookie(entry.Name) }) {
 					return errPageFull
 				}
 				after = entry.Name
@@ -303,17 +315,21 @@ func (refuse) AddEntry(fuse.DirEntry) bool               { return false }
 func (refuse) AddEntryPlus(fuse.DirEntry) *fuse.EntryOut { return nil }
 func (refuse) TakesLookupRef() bool                      { return false }
 
-// fill gives an entry its fileid and handle: "." is the directory, ".."
-// its parent, and a name the object a lookup finds. An entry whose lookup
-// fails, because it vanished meanwhile, goes without a handle.
-func (s *service) fill(o *op, dir object, entry *listed) {
+// fill gives an entry its fileid and, on a READDIRPLUS page, its handle:
+// "." is the directory, ".." its parent, and a name the object a lookup
+// finds. READDIR keeps the stored inode the listing gave and looks nothing
+// up. An entry whose lookup fails, because it vanished meanwhile, goes
+// without a handle.
+func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 	var obj object
 	status := nfsOK
-	switch entry.name {
-	case ".":
+	switch {
+	case entry.name == ".":
 		obj = dir
-	case "..":
+	case entry.name == "..":
 		obj, status = s.parent(o, dir)
+	case !plus:
+		return
 	default:
 		obj, status = s.child(o, dir.inode, entry.name)
 	}

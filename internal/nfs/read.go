@@ -118,6 +118,14 @@ func (s *service) lookup(o *op) reply {
 	default:
 		child, status = s.child(o, dir.inode, name)
 	}
+	if status == nfsOK {
+		// The lookup went by the directory's path: answer only if that
+		// is still this directory.
+		status = s.still(o, dir)
+	}
+	if status == nfsErrStale {
+		return s.failure(o.call, status)
+	}
 	if status != nfsOK {
 		return fail(status)
 	}
@@ -129,13 +137,29 @@ func (s *service) lookup(o *op) reply {
 	return reply{body: e.buf}
 }
 
-// child looks name up in the directory at inode.
-func (s *service) child(o *op, inode uint64, name string) (object, nfsStatus) {
+// child looks a name up in the directory at inode. When the name is gone,
+// the object it last named is checked: still there under another name (a
+// rename), it keeps its handles; gone, it is retired, so whatever takes the
+// name next is a new object even with the same stored inode.
+func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
+	key := name{dir: inode, name: n}
 	var out fuse.EntryOut
-	if st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), name, &out); st != fuse.OK {
+	st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), n, &out)
+	if st == fuse.ENOENT {
+		if last, ok := s.objects.unnamed(key); ok {
+			if incarnation, ok := s.objects.at(last); ok {
+				s.still(o, object{inode: last, incarnation: incarnation})
+			}
+		}
+	}
+	if st != fuse.OK {
 		return object{}, statusOf(st)
 	}
-	return s.found(o, out.NodeId)
+	obj, status := s.found(o, out.NodeId)
+	if status == nfsOK {
+		s.objects.named(key, obj.inode)
+	}
+	return obj, status
 }
 
 // parent finds a directory's parent by walking its current path from the
@@ -191,14 +215,23 @@ func (s *service) readlink(o *op) reply {
 		return fail
 	}
 	var target []byte
-	st := fuse.EINVAL
+	status := nfsErrInval
 	if obj.attr.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+		var st fuse.Status
 		target, st = s.engine.Readlink(o.cancel, ptr(header(obj.inode, o.cred)))
+		if status = statusOf(st); status == nfsOK {
+			// Readlink reads by path: the target is this link's only if
+			// the link is still there.
+			status = s.still(o, obj)
+		}
+	}
+	if status == nfsErrStale {
+		return s.failure(o.call, status)
 	}
 	e := &encoder{}
-	e.uint32(uint32(statusOf(st)))
+	e.uint32(uint32(status))
 	putPostOpAttr(e, &obj.attr, s.fsid)
-	if st == fuse.OK {
+	if status == nfsOK {
 		e.opaque(target)
 	}
 	return reply{body: e.buf}
@@ -255,6 +288,10 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 	h := header(obj.inode, o.cred)
 	var opened fuse.OpenOut
 	if st := s.engine.Open(o.cancel, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
+		if st == fuse.ENOENT {
+			s.objects.retire(obj.inode, obj.incarnation) // gone since resolve
+			return nil, nfsErrStale
+		}
 		return nil, statusOf(st)
 	}
 	defer s.engine.Release(o.cancel, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})

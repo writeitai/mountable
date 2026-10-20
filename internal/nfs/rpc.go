@@ -39,6 +39,7 @@ const (
 type Server struct {
 	svc     *service
 	pending chan struct{}
+	waiting chan struct{} // copies waiting for their first copy's reply
 	drc     *replyCache
 
 	mu       sync.Mutex
@@ -88,22 +89,35 @@ func (s *Server) Serve(l net.Listener) error {
 	}
 }
 
-// Close stops accepting, closes every connection, waits for their readers
-// to stop, then for the work still running, at most rpcDeadline: every call
-// is answered within it, and only work the engine does not cancel runs
-// longer. Calls still running answer into closed connections.
+// Close stops accepting, ends the export (calls waiting for a worker are
+// answered at once and those running are cancelled), closes every
+// connection and waits for their readers, then waits for the work still
+// running, at most rpcDeadline: every call is answered within it, and only
+// engine work that ignores cancellation runs longer.
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
 	if s.listener != nil {
 		s.listener.Close()
 	}
+	s.mu.Unlock()
+	s.svc.end()
+	s.mu.Lock()
 	for nc := range s.conns {
 		nc.Close()
 	}
 	s.mu.Unlock()
 	s.readers.Wait()
 	s.svc.wait(rpcDeadline)
+}
+
+// spawn runs fn on its own goroutine, counted as work Close waits for.
+func (s *Server) spawn(fn func()) {
+	s.svc.work.Add(1)
+	go func() {
+		defer s.svc.work.Done()
+		fn()
+	}()
 }
 
 type conn struct {
@@ -154,37 +168,76 @@ func (c *conn) dispatch(cl *call) {
 		c.send(cl.xid, r)
 		return
 	}
-	select {
-	case c.s.pending <- struct{}{}:
-	default:
-		c.send(cl.xid, svc.retryLater(cl)) // changed nothing, so not cached
-		return
-	}
-	release := func() { <-c.s.pending }
 	if !nonIdempotent(cl.proc) {
-		go func() {
-			defer release()
-			c.send(cl.xid, svc.handle(cl))
-		}()
-		return
-	}
-	entry, state := c.s.drc.begin(cl.key(), c)
-	switch state {
-	case drcDone:
-		release()
-		c.send(cl.xid, entry.r)
-	case drcFull:
-		release()
-		c.send(cl.xid, svc.retryLater(cl))
-	case drcInProgress:
-		if entry.conn == c {
-			release() // the first copy answers on this connection
+		if !c.admitted() {
+			c.send(cl.xid, svc.retryLater(cl)) // changed nothing
 			return
 		}
-		// The client reconnected while the first copy runs: its answer
-		// goes to this connection too.
-		go func() {
-			defer release()
+		c.s.spawn(func() {
+			defer c.release()
+			c.send(cl.xid, svc.handle(cl))
+		})
+		return
+	}
+	// A copy of a call already running or answered is recognised before
+	// anything else: told to retry later, the client would resend it under
+	// a new XID and it would run twice.
+	key := cl.key()
+	if entry, state := c.s.drc.lookup(key); state != drcNew {
+		c.duplicate(cl, entry, state)
+		return
+	}
+	if !c.admitted() {
+		c.send(cl.xid, svc.retryLater(cl)) // a new call, changed nothing
+		return
+	}
+	entry, state := c.s.drc.begin(key, c)
+	if state != drcNew {
+		c.release()
+		c.duplicate(cl, entry, state) // the first copy arrived meanwhile
+		return
+	}
+	c.s.spawn(func() {
+		defer c.release()
+		r := svc.handle(cl)
+		c.s.drc.finish(entry, r)
+		c.send(cl.xid, r)
+	})
+}
+
+// admitted takes a pending slot for a new call, if one is free.
+func (c *conn) admitted() bool {
+	select {
+	case c.s.pending <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *conn) release() { <-c.s.pending }
+
+// duplicate answers a copy of a call the cache already holds: with its
+// reply if it is finished; with nothing if the first copy is still running
+// on this connection, which it answers; and with the first copy's reply
+// once it is done if the client has reconnected meanwhile. Copies waiting
+// are bounded apart from new calls, and past the bound one is dropped,
+// never told to retry later.
+func (c *conn) duplicate(cl *call, entry *cachedReply, state int) {
+	switch {
+	case state == drcDone:
+		c.send(cl.xid, entry.r)
+	case state == drcFull:
+		c.send(cl.xid, c.s.svc.retryLater(cl)) // no entry was made: a new call
+	case entry.conn == c:
+	default:
+		select {
+		case c.s.waiting <- struct{}{}:
+		default:
+			return
+		}
+		c.s.spawn(func() {
+			defer func() { <-c.s.waiting }()
 			wait := time.NewTimer(time.Until(cl.received.Add(rpcDeadline)))
 			defer wait.Stop()
 			select {
@@ -192,14 +245,7 @@ func (c *conn) dispatch(cl *call) {
 				c.send(cl.xid, entry.r)
 			case <-wait.C:
 			}
-		}()
-	default:
-		go func() {
-			defer release()
-			r := svc.handle(cl)
-			c.s.drc.finish(entry, r)
-			c.send(cl.xid, r)
-		}()
+		})
 	}
 }
 

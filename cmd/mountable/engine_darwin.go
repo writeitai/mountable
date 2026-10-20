@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
@@ -249,19 +248,6 @@ func listenSocket(path string) (net.Listener, error) {
 // the source's brackets.
 func socketPathFits(path string) bool {
 	return len(path) <= maxSocketPath && !strings.ContainsAny(path, ",<>")
-}
-
-// checkPrivate checks that a reused directory is this user's alone.
-func checkPrivate(dir string) error {
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !info.IsDir() || !ok || st.Uid != uint32(os.Getuid()) || info.Mode().Perm() != 0o700 {
-		return fmt.Errorf("%s must be a directory of yours with mode 0700; remove it and mount again", dir)
-	}
-	return nil
 }
 
 // watch notices the mount leaving the mount table, however it was

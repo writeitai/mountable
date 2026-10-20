@@ -60,13 +60,21 @@ type objects struct {
 	engine  Engine
 	mu      sync.Mutex
 	byInode map[uint64]*identity
-	last    uint64 // the last incarnation handed out
+	byName  map[name]uint64 // the inode a name was last looked up to
+	last    uint64          // the last incarnation handed out
+}
+
+// name is a name in a directory, by the directory's inode.
+type name struct {
+	dir  uint64
+	name string
 }
 
 func newObjects(engine Engine) *objects {
 	return &objects{
 		engine:  engine,
 		byInode: map[uint64]*identity{rootInode: {incarnation: rootIncarnation, ino: rootInode, kind: syscall.S_IFDIR}},
+		byName:  map[name]uint64{},
 		last:    rootIncarnation,
 	}
 }
@@ -113,4 +121,32 @@ func (o *objects) retire(inode, incarnation uint64) {
 	if id, ok := o.byInode[inode]; ok && (incarnation == 0 || id.incarnation == incarnation) && inode != rootInode {
 		id.gone = true
 	}
+}
+
+// named records that a lookup of n found inode.
+func (o *objects) named(n name, inode uint64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.byName[n] = inode
+}
+
+// unnamed forgets n, which a lookup no longer finds, returning the inode
+// it was last found at.
+func (o *objects) unnamed(n name) (uint64, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	inode, ok := o.byName[n]
+	delete(o.byName, n)
+	return inode, ok
+}
+
+// at returns the identity an inode holds now.
+func (o *objects) at(inode uint64) (uint64, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	id, ok := o.byInode[inode]
+	if !ok || id.gone {
+		return 0, false
+	}
+	return id.incarnation, true
 }

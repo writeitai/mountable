@@ -374,3 +374,24 @@ func TestReadDirChecksPermission(t *testing.T) {
 		t.Fatalf("status %d", s)
 	}
 }
+
+// READDIR looks nothing up: it takes no lookup references.
+func TestReadDirTakesNoReferences(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	c.call(procReadDir, wire{}.opaque(root).u64(0).u64(0).u32(4096))
+	if n := f.refs("a.txt"); n != 0 {
+		t.Fatalf("%d references", n)
+	}
+}
+
+// The entry that did not fit gets no cookie.
+func TestNoCookieForWhatDidNotFit(t *testing.T) {
+	_, c := startServer(t, wideEngine(10))
+	dir, _ := c.lookup(c.root(), "wide")
+	_, p := c.readDirPlus(dir, 0, 0, 1024, pageOverhead+3*184)
+	if s, _ := c.readDirPlus(dir, p.last()+1, p.verf, 1024, 1024); s != uint32(nfsErrBadCook) {
+		t.Fatalf("a cookie never sent: %d", s)
+	}
+}

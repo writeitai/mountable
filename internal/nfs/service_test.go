@@ -519,3 +519,124 @@ func TestEndCancelsCallsInProgress(t *testing.T) {
 		t.Fatal("Close did not return once the work ended")
 	}
 }
+
+// A LOOKUP that no longer finds a name checks the object it last named: a
+// deleted one is retired, so a successor with the same stored inode gets
+// new handles; a renamed one keeps its handle.
+func TestLookupMissRetiresDeletedObjects(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	old, _ := c.lookup(root, "a.txt")
+	f.remove("a.txt")
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("lookup after the delete: %d", s)
+	}
+	f.add("a.txt", 1001, syscall.S_IFREG|0o644, "same stored inode")
+	if fresh, _ := c.lookup(root, "a.txt"); bytes.Equal(fresh, old) {
+		t.Fatal("the successor got the old handle")
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(old)); s != uint32(nfsErrStale) {
+		t.Fatalf("old handle: %d", s)
+	}
+
+	moved, _ := c.lookup(root, "secret")
+	f.rename("secret", "dir/secret")
+	if s := c.status(procLookup, wire{}.opaque(root).str("secret")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("lookup after the rename: %d", s)
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(moved)); s != 0 {
+		t.Fatalf("the renamed object's handle: %d", s)
+	}
+}
+
+// replaceDir puts another directory, with another stored inode, at a path.
+func replaceDir(f *fakeEngine, rel string, ino uint64) {
+	f.remove(rel)
+	f.add(rel, ino, syscall.S_IFDIR|0o755, "")
+}
+
+// Every procedure that reads by path after checking identity checks it
+// again before answering: a replacement in between answers STALE, and
+// nothing of the successor's goes out.
+func TestReplacementRaces(t *testing.T) {
+	t.Run("READLINK", func(t *testing.T) {
+		f := sampleEngine()
+		_, c := startServer(t, f)
+		link, _ := c.lookup(c.root(), "link")
+		f.beforeReadlink = func() {
+			f.remove("link")
+			f.add("link", 2004, syscall.S_IFLNK|0o777, "successor-target")
+		}
+		r := c.call(procReadlink, wire{}.opaque(link))
+		if s := r.u32(); s != uint32(nfsErrStale) || bytes.Contains(r.b, []byte("successor")) {
+			t.Fatalf("status %d, rest %q", s, r.b)
+		}
+	})
+	t.Run("LOOKUP", func(t *testing.T) {
+		f := sampleEngine()
+		_, c := startServer(t, f)
+		dir, _ := c.lookup(c.root(), "dir")
+		f.afterLookup = func() {
+			f.afterLookup = nil
+			replaceDir(f, "dir", 2002)
+			f.add("dir/b", 2003, syscall.S_IFREG|0o600, "successor")
+		}
+		if s := c.status(procLookup, wire{}.opaque(dir).str("b")); s != uint32(nfsErrStale) {
+			t.Fatalf("status %d", s)
+		}
+	})
+	t.Run("READDIRPLUS", func(t *testing.T) {
+		f := sampleEngine()
+		_, c := startServer(t, f)
+		dir, _ := c.lookup(c.root(), "dir")
+		f.beforeList = func() {
+			f.beforeList = nil
+			replaceDir(f, "dir", 2002)
+			f.add("dir/successor", 2005, syscall.S_IFREG|0o600, "")
+		}
+		if s, _ := c.readDirPlus(dir, 0, 0, 4096, 8192); s != uint32(nfsErrStale) {
+			t.Fatalf("status %d", s)
+		}
+	})
+}
+
+// Close ends calls still waiting for a worker without starting them, and
+// waits for the work running, at most rpcDeadline.
+func TestCloseQuiescesQueuedCalls(t *testing.T) {
+	short(t, 500*time.Millisecond, 5*time.Second)
+	f := sampleEngine()
+	srv, c := startServer(t, f)
+	root := c.root()
+	f.block = make(chan struct{})
+	defer close(f.block)
+	const queued = 10
+	for range maxWorkers + queued {
+		c.xid++
+		c.send(callMessage(c.xid, programNFS, 3, procGetAttr, 501, wire{}.opaque(root)))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.mu.Lock()
+		started := f.getAttrs
+		f.mu.Unlock()
+		if started == maxWorkers {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d calls reached the engine", started)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	srv.Close()
+	if took := time.Since(start); took < 400*time.Millisecond || took > 3*time.Second {
+		t.Fatalf("Close took %s with the engine stuck, want about rpcDeadline", took)
+	}
+	time.Sleep(100 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getAttrs != maxWorkers {
+		t.Fatalf("%d calls reached the engine, want only the %d running", f.getAttrs, maxWorkers)
+	}
+}
