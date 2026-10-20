@@ -411,3 +411,52 @@ func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
 		t.Fatalf("READ through the old handle: status %d", s)
 	}
 }
+
+// A single-path file overwritten by another while a handle holds the old
+// one open: READDIRPLUS lists the newcomer with its own attributes and a
+// handle that works. And a file overwritten by a hard link shares one
+// handle with that link's other name.
+func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+	for i, name := range []string{"f", "g", "x"} { // too many to cache
+		filer.put("/c/fs1/d", entry(name, 0o644, uint64(710+i), "original"))
+	}
+	engine := realEngine(t, filer, 2)
+	_, c := startServer(t, engine)
+	dir, _ := c.lookup(c.root(), "d")
+	_, a := c.lookup(dir, "f")
+	var opened fuse.OpenOut
+	h := fuse.InHeader{NodeId: a.fileid}
+	if st := engine.Open(nil, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
+		t.Fatalf("open: %v", st)
+	}
+	defer engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+	filer.put("/c/fs1/d", entry("f", 0o644, 9999, "the newcomer"))
+	_, p := c.readDirPlus(dir, 0, 0, 4096, 1<<16)
+	var listed *pageEntry
+	for i := range p.entries {
+		if p.entries[i].name == "f" {
+			listed = &p.entries[i]
+		}
+	}
+	if listed == nil || listed.attr == nil || listed.attr.size != 12 {
+		t.Fatalf("listed %+v", listed)
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(listed.fh)); s != 0 {
+		t.Fatalf("the listed handle: %d", s)
+	}
+
+	link := func(name string) *filer_pb.Entry {
+		e := entry(name, 0o644, 4242, "linked")
+		e.HardLinkId, e.HardLinkCounter = []byte("link-4242"), 2
+		return e
+	}
+	c.lookup(dir, "g")
+	filer.put("/c/fs1/d", link("h"))
+	filer.put("/c/fs1/d", link("g"))
+	g, _ := c.lookup(dir, "g")
+	if hh, _ := c.lookup(dir, "h"); !bytes.Equal(g, hh) {
+		t.Fatal("the overwriting link and its other name got different handles")
+	}
+}

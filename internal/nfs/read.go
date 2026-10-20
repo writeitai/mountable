@@ -147,8 +147,10 @@ func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
 	var out fuse.EntryOut
 	st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), n, &out)
 	if st == fuse.ENOENT {
-		if last, ok := s.objects.unnamed(key); ok {
-			s.checkExists(last)
+		// The name is forgotten only once the check was conclusive: after
+		// an error, the next miss checks again.
+		if last, ok := s.objects.lastNamed(key); ok && s.checkExists(last) {
+			s.objects.unnamed(key)
 		}
 	}
 	if st != fuse.OK {
@@ -218,6 +220,12 @@ func (s *service) readlink(o *op) reply {
 	if obj.attr.Mode&syscall.S_IFMT == syscall.S_IFLNK {
 		var st fuse.Status
 		target, st = s.engine.Readlink(o.cancel, ptr(header(obj.inode, o.cred)))
+		if st == fuse.ENOENT {
+			// Gone since it was resolved: the handle is stale, and whatever
+			// takes the name next is another link.
+			s.objects.retire(obj.inode, obj.incarnation)
+			return s.failure(o.call, nfsErrStale)
+		}
 		if status = statusOf(st); status == nfsOK {
 			// Readlink reads by path: the target is this link's only if
 			// the link is still there.
@@ -314,13 +322,14 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 }
 
 // checkExists retires the identity an inode holds if the namespace no
-// longer has its object. It asks the namespace itself, not GetAttr, which
-// answers from a handle that holds the file open, even after the file was
-// deleted. An error proves nothing, and retires nothing.
-func (s *service) checkExists(inode uint64) {
+// longer has its object, and reports whether it could tell. It asks the
+// namespace itself, not GetAttr, which answers from a handle that holds the
+// file open, even after the file was deleted. An error proves nothing, and
+// retires nothing.
+func (s *service) checkExists(inode uint64) (conclusive bool) {
 	incarnation, ok := s.objects.at(inode)
 	if !ok {
-		return
+		return true // retired already
 	}
 	id, _ := s.objects.current(inode, incarnation)
 	entry, st := s.engine.NamespaceEntry(inode)
@@ -330,12 +339,14 @@ func (s *service) checkExists(inode uint64) {
 			stored = inode // as GetAttr reports an entry without one
 		}
 		if stored == id.ino && entry.GetIsDirectory() == (id.kind == syscall.S_IFDIR) {
-			return
+			return true
 		}
 	}
-	if st == fuse.OK || st == fuse.ENOENT {
-		s.objects.retire(inode, incarnation)
+	if st != fuse.OK && st != fuse.ENOENT {
+		return false
 	}
+	s.objects.retire(inode, incarnation)
+	return true
 }
 
 // still checks that the inode still holds obj's identity, retiring it if

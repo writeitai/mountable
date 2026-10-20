@@ -670,3 +670,51 @@ func TestEndAbandonsPreparation(t *testing.T) {
 		t.Fatalf("answered % x", r.body)
 	}
 }
+
+// A miss whose check of the object is inconclusive (an error) keeps the
+// name, and the next miss checks again: a recreate with the same stored
+// inode then does not revive the old handle.
+func TestInconclusiveMissIsCheckedAgain(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	old, _ := c.lookup(root, "a.txt")
+	f.remove("a.txt")
+	f.mu.Lock()
+	f.namespaceFails = true
+	f.mu.Unlock()
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("first miss: %d", s)
+	}
+	f.mu.Lock()
+	f.namespaceFails = false
+	f.mu.Unlock()
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("second miss: %d", s)
+	}
+	f.add("a.txt", 1001, syscall.S_IFREG|0o644, "same stored inode")
+	if s := c.status(procRead, wire{}.opaque(old).u64(0).u32(100)); s != uint32(nfsErrStale) {
+		t.Fatalf("READ through the old handle: %d", s)
+	}
+}
+
+// A link that vanishes between being resolved and being read is retired
+// and STALE: recreated with the same stored inode, the old handle never
+// reads the new target.
+func TestReadlinkOfAVanishedLink(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	link, _ := c.lookup(c.root(), "link")
+	f.beforeReadlink = func() {
+		f.beforeReadlink = nil
+		f.remove("link")
+	}
+	if s := c.status(procReadlink, wire{}.opaque(link)); s != uint32(nfsErrStale) {
+		t.Fatalf("READLINK of the vanished link: %d", s)
+	}
+	f.add("link", 1004, syscall.S_IFLNK|0o777, "replacement-target")
+	r := c.call(procReadlink, wire{}.opaque(link))
+	if s := r.u32(); s != uint32(nfsErrStale) || bytes.Contains(r.b, []byte("replacement")) {
+		t.Fatalf("READLINK after the recreate: status %d", s)
+	}
+}

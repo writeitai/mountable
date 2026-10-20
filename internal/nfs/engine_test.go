@@ -34,7 +34,9 @@ type fakeEngine struct {
 	// afterLookup, when set, runs once a Lookup has succeeded;
 	// beforeReadlink and beforeList before Readlink and a listing.
 	afterLookup, beforeReadlink, beforeList func()
-	getAttrs                                int // GetAttr calls begun
+	// namespaceFails, while set, makes NamespaceEntry answer EIO.
+	namespaceFails bool
+	getAttrs       int // GetAttr calls begun
 }
 
 type fakeObject struct {
@@ -298,6 +300,9 @@ func (f *fakeEngine) MountRoot() util.FullPath { return util.FullPath(f.root) }
 func (f *fakeEngine) NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.namespaceFails {
+		return nil, fuse.EIO
+	}
 	p, ok := f.paths[inode]
 	if !ok {
 		return nil, fuse.ENOENT

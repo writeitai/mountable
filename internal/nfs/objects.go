@@ -129,14 +129,19 @@ func (o *objects) named(n name, inode uint64) {
 	o.byName[n] = inode
 }
 
-// unnamed forgets n, which a lookup no longer finds, returning the inode
-// it was last found at.
-func (o *objects) unnamed(n name) (uint64, bool) {
+// lastNamed is the inode a lookup of n last found.
+func (o *objects) lastNamed(n name) (uint64, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	inode, ok := o.byName[n]
-	delete(o.byName, n)
 	return inode, ok
+}
+
+// unnamed forgets n, which a lookup no longer finds.
+func (o *objects) unnamed(n name) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.byName, n)
 }
 
 // at returns the identity an inode holds now.
