@@ -17,14 +17,15 @@ type Engine interface {
 	Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status
 	Forget(nodeid, nlookup uint64)
 	Open(cancel <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status
-	Read(cancel <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status)
 	Release(cancel <-chan struct{}, in *fuse.ReleaseIn)
 	Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status)
-	// ReadDirectoryAfter and NamespaceEntry come from the engine patch set
-	// (writeitai/seaweedfs, branch mountable): a name-resuming listing, and
-	// an inode's entry as the namespace has it, whatever handle is open.
+	// ReadDirectoryAfter, NamespaceEntry and ReadAs come from the engine
+	// patch set (writeitai/seaweedfs, branch mountable): a name-resuming
+	// listing, an inode's entry as the namespace has it whatever handle is
+	// open, and a read bound to the expected object.
 	ReadDirectoryAfter(dir uint64, after string, plus bool, fits func(name string) bool, add func(*weedmount.ListedEntry) bool) (eof bool, code fuse.Status)
 	NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status)
+	ReadAs(cancel <-chan struct{}, in *fuse.ReadIn, buf []byte, storedInode uint64) (fuse.ReadResult, fuse.Status)
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath
@@ -59,8 +60,15 @@ type objects struct {
 	engine  Engine
 	mu      sync.Mutex
 	byInode map[uint64]*identity
-	byName  map[name]uint64 // the inode a name was last looked up to
-	last    uint64          // the last incarnation handed out
+	byName  map[name]binding // what a name was last looked up to
+	last    uint64           // the last incarnation handed out
+	version uint64           // the last binding made
+}
+
+// binding is a name's last lookup: the inode it found, and which lookup
+// that was, so a slow check of an older one cannot undo a newer one.
+type binding struct {
+	inode, version uint64
 }
 
 // name is a name in a directory, by the directory's inode.
@@ -73,7 +81,7 @@ func newObjects(engine Engine) *objects {
 	return &objects{
 		engine:  engine,
 		byInode: map[uint64]*identity{rootInode: {incarnation: rootIncarnation, ino: rootInode, kind: syscall.S_IFDIR}},
-		byName:  map[name]uint64{},
+		byName:  map[name]binding{},
 		last:    rootIncarnation,
 	}
 }
@@ -122,26 +130,33 @@ func (o *objects) retire(inode, incarnation uint64) {
 	}
 }
 
-// named records that a lookup of n found inode.
-func (o *objects) named(n name, inode uint64) {
+// named records that a lookup of n found inode, returning what n was
+// bound to before when that was another inode.
+func (o *objects) named(n name, inode uint64) (previous uint64, rebound bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.byName[n] = inode
+	old, had := o.byName[n]
+	o.version++
+	o.byName[n] = binding{inode: inode, version: o.version}
+	return old.inode, had && old.inode != inode
 }
 
-// lastNamed is the inode a lookup of n last found.
-func (o *objects) lastNamed(n name) (uint64, bool) {
+// lastNamed is what a lookup of n last found.
+func (o *objects) lastNamed(n name) (binding, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	inode, ok := o.byName[n]
-	return inode, ok
+	b, ok := o.byName[n]
+	return b, ok
 }
 
-// unnamed forgets n, which a lookup no longer finds.
-func (o *objects) unnamed(n name) {
+// unnamed forgets n, which a lookup no longer finds, if it is still bound
+// as it was when checked.
+func (o *objects) unnamed(n name, b binding) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	delete(o.byName, n)
+	if o.byName[n] == b {
+		delete(o.byName, n)
+	}
 }
 
 // at returns the identity an inode holds now.

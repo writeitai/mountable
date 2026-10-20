@@ -718,3 +718,50 @@ func TestReadlinkOfAVanishedLink(t *testing.T) {
 		t.Fatalf("READLINK after the recreate: status %d", s)
 	}
 }
+
+// A slow check of a lookup miss cannot undo a newer lookup's binding of the
+// name: a later deletion of the newer object is still noticed.
+func TestSlowMissKeepsANewerBinding(t *testing.T) {
+	f := sampleEngine()
+	_, c := startServer(t, f)
+	root := c.root()
+	c.lookup(root, "a.txt")
+	f.remove("a.txt")
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.namespaceGate = gate
+	f.mu.Unlock()
+	slow := dial(t, c.conn.RemoteAddr().String())
+	slow.xid = 5000
+	slow.send(callMessage(5001, programNFS, 3, procLookup, 501, wire{}.opaque(root).str("a.txt")))
+	time.Sleep(50 * time.Millisecond) // the miss is checking, held at the gate
+	f.add("a.txt", 2001, syscall.S_IFREG|0o644, "newer")
+	newer, _ := c.lookup(root, "a.txt")
+	f.mu.Lock()
+	f.namespaceGate = nil
+	f.mu.Unlock()
+	close(gate)
+	slow.receive()
+	f.remove("a.txt")
+	if s := c.status(procLookup, wire{}.opaque(root).str("a.txt")); s != uint32(nfsErrNoEnt) {
+		t.Fatalf("miss of the newer object: %d", s)
+	}
+	f.add("a.txt", 2001, syscall.S_IFREG|0o644, "newest, same stored inode")
+	if s := c.status(procRead, wire{}.opaque(newer).u64(0).u32(100)); s != uint32(nfsErrStale) {
+		t.Fatalf("READ through the newer object's handle: %d", s)
+	}
+}
+
+// The namespace check compares the full type: a file whose name now holds
+// a symlink with the same stored inode is gone.
+func TestCheckExistsComparesTheType(t *testing.T) {
+	f := sampleEngine()
+	srv, c := startServer(t, f)
+	_, a := c.lookup(c.root(), "a.txt")
+	f.remove("a.txt")
+	f.add("a.txt", 1001, syscall.S_IFLNK|0o777, "a symlink now")
+	srv.svc.checkExists(a.fileid)
+	if _, ok := srv.svc.objects.at(a.fileid); ok {
+		t.Fatal("the file's identity survived its replacement by a symlink")
+	}
+}

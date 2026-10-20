@@ -297,7 +297,7 @@ func (s *service) fill(o *op, dir object, entry *listed, plus bool) {
 	default:
 		obj = s.listedObject(entry.entry)
 		// As LOOKUP does: a later miss of the name then checks this object.
-		s.objects.named(name{dir: dir.inode, name: entry.name}, obj.inode)
+		s.rebind(name{dir: dir.inode, name: entry.name}, obj.inode)
 	}
 	if status != nfsOK {
 		entry.ino = dir.inode // a fileid of zero would hide the entry

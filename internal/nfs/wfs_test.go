@@ -405,11 +405,42 @@ func TestRealEngineOpenHandleIsNoProofOfLife(t *testing.T) {
 		t.Fatalf("lookup of the deleted name: %d", s)
 	}
 	filer.put("/c/fs1/d", entry("f", 0o644, 710, "successor"))
-	engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
-	r := c.call(procRead, wire{}.opaque(old).u64(0).u32(100))
-	if s := r.u32(); s != uint32(nfsErrStale) || bytes.Contains(r.b, []byte("successor")) {
-		t.Fatalf("READ through the old handle: status %d", s)
+	read := func(fh []byte) (uint32, string) {
+		r := c.call(procRead, wire{}.opaque(fh).u64(0).u32(100))
+		s := r.u32()
+		if s != 0 {
+			return s, ""
+		}
+		r.postOpAttr()
+		r.u32()
+		r.u32()
+		return 0, string(r.opaque())
 	}
+	check := func(when string) {
+		t.Helper()
+		if s := c.status(procGetAttr, wire{}.opaque(old)); s != uint32(nfsErrStale) {
+			t.Fatalf("%s: GETATTR of the old handle: %d", when, s)
+		}
+		if s, data := read(old); s != uint32(nfsErrStale) {
+			t.Fatalf("%s: READ through the old handle: %d %q", when, s, data)
+		}
+		fresh, b := c.lookup(dir, "f")
+		if bytes.Equal(fresh, old) || b.size != 9 {
+			t.Fatalf("%s: the newcomer's handle or size: %+v", when, b)
+		}
+		if s, data := read(fresh); s != 0 || data != "successor" {
+			t.Fatalf("%s: READ of the newcomer: %d %q", when, s, data)
+		}
+		_, p := c.readDirPlus(dir, 0, 0, 4096, 1<<16)
+		for _, e := range p.entries {
+			if e.name == "f" && (e.attr == nil || e.attr.size != 9) {
+				t.Fatalf("%s: listed %+v", when, e)
+			}
+		}
+	}
+	check("with the deleted file still open")
+	engine.Release(nil, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+	check("after it was closed")
 }
 
 // A single-path file overwritten by another while a handle holds the old
@@ -425,7 +456,7 @@ func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
 	engine := realEngine(t, filer, 2)
 	_, c := startServer(t, engine)
 	dir, _ := c.lookup(c.root(), "d")
-	_, a := c.lookup(dir, "f")
+	old, a := c.lookup(dir, "f")
 	var opened fuse.OpenOut
 	h := fuse.InHeader{NodeId: a.fileid}
 	if st := engine.Open(nil, &fuse.OpenIn{InHeader: h, Flags: syscall.O_RDONLY}, &opened); st != fuse.OK {
@@ -446,6 +477,17 @@ func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
 	if s := c.status(procGetAttr, wire{}.opaque(listed.fh)); s != 0 {
 		t.Fatalf("the listed handle: %d", s)
 	}
+	// The overwritten file's old handle is stale, though the WFS handle still
+	// holds it open.
+	for name, call := range map[string]func() uint32{
+		"GETATTR": func() uint32 { return c.status(procGetAttr, wire{}.opaque(old)) },
+		"ACCESS":  func() uint32 { return c.status(procAccess, wire{}.opaque(old).u32(0x3f)) },
+		"READ":    func() uint32 { return c.status(procRead, wire{}.opaque(old).u64(0).u32(100)) },
+	} {
+		if s := call(); s != uint32(nfsErrStale) {
+			t.Fatalf("%s of the overwritten file's handle: %d", name, s)
+		}
+	}
 
 	link := func(name string) *filer_pb.Entry {
 		e := entry(name, 0o644, 4242, "linked")
@@ -458,5 +500,54 @@ func TestRealEngineOverwrittenFileIsListedAsItself(t *testing.T) {
 	g, _ := c.lookup(dir, "g")
 	if hh, _ := c.lookup(dir, "h"); !bytes.Equal(g, hh) {
 		t.Fatal("the overwriting link and its other name got different handles")
+	}
+}
+
+// Two hard-link groups that share a legacy stored inode stay two files:
+// LOOKUP and READDIRPLUS give each its own handle, and READ its own bytes.
+func TestRealEngineLinkGroupsSharingAnInode(t *testing.T) {
+	filer := &memFiler{entries: map[string]*filer_pb.Entry{}}
+	filer.put("/c/fs1", entry("d", os.ModeDir|0o755, 700, ""))
+	link := func(name, group, content string) {
+		e := entry(name, 0o644, 4242, content)
+		e.HardLinkId, e.HardLinkCounter = []byte(group), 2
+		filer.put("/c/fs1/d", e)
+	}
+	link("a1", "group-A", "AAA")
+	link("a2", "group-A", "AAA")
+	link("b1", "group-B", "BBBBB")
+	_, c := startServer(t, realEngine(t, filer, 2))
+	dir, _ := c.lookup(c.root(), "d")
+	read := func(fh []byte) string {
+		r := c.call(procRead, wire{}.opaque(fh).u64(0).u32(100))
+		if s := r.u32(); s != 0 {
+			t.Fatalf("READ: %d", s)
+		}
+		r.postOpAttr()
+		r.u32()
+		r.u32()
+		return string(r.opaque())
+	}
+	a1, _ := c.lookup(dir, "a1")
+	b1, b := c.lookup(dir, "b1")
+	a2, _ := c.lookup(dir, "a2")
+	if !bytes.Equal(a1, a2) || bytes.Equal(a1, b1) || b.size != 5 {
+		t.Fatal("the groups' handles are mixed up")
+	}
+	if read(a1) != "AAA" || read(b1) != "BBBBB" || read(a2) != "AAA" {
+		t.Fatal("a handle read the other group's file")
+	}
+	_, p := c.readDirPlus(dir, 0, 0, 4096, 1<<16)
+	for _, e := range p.entries {
+		switch e.name {
+		case "a1", "a2":
+			if read(e.fh) != "AAA" {
+				t.Fatalf("listed %s reads another file", e.name)
+			}
+		case "b1":
+			if read(e.fh) != "BBBBB" {
+				t.Fatal("listed b1 reads another file")
+			}
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"os"
 	"path"
 	"sort"
 	"sync"
@@ -34,8 +35,10 @@ type fakeEngine struct {
 	// afterLookup, when set, runs once a Lookup has succeeded;
 	// beforeReadlink and beforeList before Readlink and a listing.
 	afterLookup, beforeReadlink, beforeList func()
-	// namespaceFails, while set, makes NamespaceEntry answer EIO.
+	// namespaceFails, while set, makes NamespaceEntry answer EIO;
+	// namespaceGate, while set, holds it until closed.
 	namespaceFails bool
+	namespaceGate  chan struct{}
 	getAttrs       int // GetAttr calls begun
 }
 
@@ -205,7 +208,9 @@ func (f *fakeEngine) Open(_ <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut)
 	return fuse.OK
 }
 
-func (f *fakeEngine) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.ReadResult, fuse.Status) {
+// ReadAs reads the object at the inode's path, refusing (ESTALE) one that
+// is not the expected object, as the patched WFS does.
+func (f *fakeEngine) ReadAs(_ <-chan struct{}, in *fuse.ReadIn, buf []byte, stored uint64) (fuse.ReadResult, fuse.Status) {
 	if f.beforeRead != nil {
 		f.beforeRead()
 	}
@@ -214,6 +219,9 @@ func (f *fakeEngine) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse.
 	o := f.objects[f.paths[in.NodeId]]
 	if o == nil {
 		return nil, fuse.EIO
+	}
+	if o.ino != stored {
+		return nil, fuse.Status(syscall.ESTALE)
 	}
 	n := copy(buf, o.data[min(int(in.Offset), len(o.data)):])
 	return fuse.ReadResultData(buf[:n]), fuse.OK
@@ -303,6 +311,12 @@ func (f *fakeEngine) NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status)
 	if f.namespaceFails {
 		return nil, fuse.EIO
 	}
+	if f.namespaceGate != nil {
+		gate := f.namespaceGate
+		f.mu.Unlock()
+		<-gate
+		f.mu.Lock()
+	}
 	p, ok := f.paths[inode]
 	if !ok {
 		return nil, fuse.ENOENT
@@ -311,5 +325,12 @@ func (f *fakeEngine) NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status)
 	if o == nil {
 		return nil, fuse.ENOENT
 	}
-	return &filer_pb.Entry{IsDirectory: o.mode&syscall.S_IFMT == syscall.S_IFDIR, Attributes: &filer_pb.FuseAttributes{Inode: o.ino}}, fuse.OK
+	mode := os.FileMode(o.mode & 0o777)
+	switch o.mode & syscall.S_IFMT {
+	case syscall.S_IFDIR:
+		mode |= os.ModeDir
+	case syscall.S_IFLNK:
+		mode |= os.ModeSymlink
+	}
+	return &filer_pb.Entry{IsDirectory: mode.IsDir(), Attributes: &filer_pb.FuseAttributes{Inode: o.ino, FileMode: uint32(mode)}}, fuse.OK
 }

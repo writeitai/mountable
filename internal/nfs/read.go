@@ -2,11 +2,13 @@ package nfs
 
 import (
 	"math"
+	"os"
 	"strings"
 	"syscall"
 	"unicode/utf8"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 )
 
 // Transfer sizes: what FSINFO advertises and the mount options ask for.
@@ -34,21 +36,35 @@ func (s *service) resolve(o *op, fh []byte) (object, nfsStatus) {
 	if status != nfsOK {
 		return object{}, status
 	}
+	attr, status := s.verified(o, inode, incarnation)
+	if status != nfsOK {
+		return object{}, status
+	}
+	return object{inode: inode, incarnation: incarnation, attr: attr}, nfsOK
+}
+
+// verified reads the attributes of the object at inode, checking that it
+// is still the identity issued: the same stored inode and type, and, for
+// anything but a directory, still in the namespace. A stateless NFS
+// handle has no open-unlink semantics: an object only an open WFS handle
+// still holds (nlink 0) is gone for it, and the identity is retired.
+func (s *service) verified(o *op, inode, incarnation uint64) (fuse.Attr, nfsStatus) {
 	id, ok := s.objects.current(inode, incarnation)
 	if !ok {
-		return object{}, nfsErrStale
+		return fuse.Attr{}, nfsErrStale
 	}
 	var out fuse.AttrOut
 	st := s.engine.GetAttr(o.cancel, &fuse.GetAttrIn{InHeader: header(inode, o.cred)}, &out)
-	if st == fuse.ENOENT || st == fuse.OK && (out.Ino != id.ino || out.Mode&syscall.S_IFMT != id.kind) {
+	switch {
+	case st == fuse.ENOENT || st == fuse.OK && (out.Ino != id.ino || out.Mode&syscall.S_IFMT != id.kind ||
+		id.kind != syscall.S_IFDIR && out.Nlink == 0):
 		s.objects.retire(inode, incarnation)
-		return object{}, nfsErrStale
-	}
-	if st != fuse.OK {
-		return object{}, statusOf(st)
+		return fuse.Attr{}, nfsErrStale
+	case st != fuse.OK:
+		return fuse.Attr{}, statusOf(st)
 	}
 	out.Ino = inode
-	return object{inode: inode, incarnation: incarnation, attr: out.Attr}, nfsOK
+	return out.Attr, nfsOK
 }
 
 // found turns an inode a WFS lookup just returned, holding one more
@@ -147,10 +163,11 @@ func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
 	var out fuse.EntryOut
 	st := s.engine.Lookup(o.cancel, ptr(header(inode, o.cred)), n, &out)
 	if st == fuse.ENOENT {
-		// The name is forgotten only once the check was conclusive: after
-		// an error, the next miss checks again.
-		if last, ok := s.objects.lastNamed(key); ok && s.checkExists(last) {
-			s.objects.unnamed(key)
+		// The name is forgotten only once the check was conclusive (after
+		// an error, the next miss checks again), and only as it was bound
+		// when checked.
+		if last, ok := s.objects.lastNamed(key); ok && s.checkExists(last.inode) {
+			s.objects.unnamed(key, last)
 		}
 	}
 	if st != fuse.OK {
@@ -158,9 +175,18 @@ func (s *service) child(o *op, inode uint64, n string) (object, nfsStatus) {
 	}
 	obj, status := s.found(o, out.NodeId)
 	if status == nfsOK {
-		s.objects.named(key, obj.inode)
+		s.rebind(key, obj.inode)
 	}
 	return obj, status
+}
+
+// rebind records that key names inode now. An object the name led to
+// before was overwritten or moved away: it keeps its handles only if the
+// namespace still has it.
+func (s *service) rebind(key name, inode uint64) {
+	if previous, rebound := s.objects.named(key, inode); rebound {
+		s.checkExists(previous)
+	}
 }
 
 // parent finds a directory's parent by walking its current path from the
@@ -289,7 +315,7 @@ func (s *service) read(o *op) reply {
 // readData reads through a WFS handle opened for this one READ. Open loads
 // the file by its path, which another object may have taken since the
 // handle was resolved, so the object is checked again through the opened
-// handle before reading and after: the bytes are returned only if they are
+// handle, and read bound to it: the bytes are returned only if they are
 // the handle's object's, and the read is STALE otherwise.
 func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]byte, nfsStatus) {
 	h := header(obj.inode, o.cred)
@@ -305,8 +331,18 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 	if status := s.still(o, obj); status != nfsOK {
 		return nil, status
 	}
+	id, ok := s.objects.current(obj.inode, obj.incarnation)
+	if !ok {
+		return nil, nfsErrStale
+	}
 	buf := make([]byte, count)
-	result, st := s.engine.Read(o.cancel, &fuse.ReadIn{InHeader: h, Fh: opened.Fh, Offset: offset, Size: count}, buf)
+	// ReadAs checks the opened handle's object and reads it under one lock:
+	// the bytes are this object's, whatever was swapped in and out between.
+	result, st := s.engine.ReadAs(o.cancel, &fuse.ReadIn{InHeader: h, Fh: opened.Fh, Offset: offset, Size: count}, buf, id.ino)
+	if st == fuse.Status(syscall.ESTALE) {
+		s.objects.retire(obj.inode, obj.incarnation)
+		return nil, nfsErrStale
+	}
 	if st != fuse.OK {
 		return nil, statusOf(st)
 	}
@@ -314,9 +350,6 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 	data, st := result.Bytes(buf)
 	if st != fuse.OK {
 		return nil, statusOf(st)
-	}
-	if status := s.still(o, obj); status != nfsOK {
-		return nil, status
 	}
 	return data, nfsOK
 }
@@ -338,7 +371,7 @@ func (s *service) checkExists(inode uint64) (conclusive bool) {
 		if stored == 0 {
 			stored = inode // as GetAttr reports an entry without one
 		}
-		if stored == id.ino && entry.GetIsDirectory() == (id.kind == syscall.S_IFDIR) {
+		if stored == id.ino && kindOf(entry) == id.kind {
 			return true
 		}
 	}
@@ -349,23 +382,31 @@ func (s *service) checkExists(inode uint64) (conclusive bool) {
 	return true
 }
 
-// still checks that the inode still holds obj's identity, retiring it if
-// not. With a WFS handle open, GetAttr reports the handle's own entry.
+// still checks that the inode still holds obj's identity, as resolve
+// does, retiring it if not.
 func (s *service) still(o *op, obj object) nfsStatus {
-	id, ok := s.objects.current(obj.inode, obj.incarnation)
-	if !ok {
-		return nfsErrStale
-	}
-	var out fuse.AttrOut
-	st := s.engine.GetAttr(o.cancel, &fuse.GetAttrIn{InHeader: header(obj.inode, o.cred)}, &out)
+	_, status := s.verified(o, obj.inode, obj.incarnation)
+	return status
+}
+
+// kindOf is an entry's file type as S_IFMT bits.
+func kindOf(entry *filer_pb.Entry) uint32 {
+	mode := os.FileMode(entry.GetAttributes().GetFileMode())
 	switch {
-	case st == fuse.ENOENT || st == fuse.OK && (out.Ino != id.ino || out.Mode&syscall.S_IFMT != id.kind):
-		s.objects.retire(obj.inode, obj.incarnation)
-		return nfsErrStale
-	case st != fuse.OK:
-		return statusOf(st)
+	case entry.GetIsDirectory() || mode.IsDir():
+		return syscall.S_IFDIR
+	case mode&os.ModeSymlink != 0:
+		return syscall.S_IFLNK
+	case mode&os.ModeNamedPipe != 0:
+		return syscall.S_IFIFO
+	case mode&os.ModeSocket != 0:
+		return syscall.S_IFSOCK
+	case mode&os.ModeCharDevice != 0:
+		return syscall.S_IFCHR
+	case mode&os.ModeDevice != 0:
+		return syscall.S_IFBLK
 	}
-	return nfsOK
+	return syscall.S_IFREG
 }
 
 func ptr(h fuse.InHeader) *fuse.InHeader { return &h }
