@@ -169,20 +169,12 @@ Backends that read and write files without mounting use the files API through
 the SDKs, which create and refresh their own short token sessions from an API
 key.
 
-The SDKs are not on PyPI or npm yet. Until the first `sdk-vX.Y.Z` release,
-install them from a checkout of this repository. For Python (3.10+), run
-from the repository root:
+Both are published as `mountable-sdk`, Python 3.10+ on PyPI and TypeScript on
+npm (Node 18+, Bun, or Deno):
 
 ```sh
-pip install ./sdk/python       # import mountable_sdk
-```
-
-For TypeScript, build the SDK in the checkout, then install it from the
-Node project that will import it (Node 18+, Bun, or Deno):
-
-```sh
-(cd sdk/typescript && npm ci && npm run build)  # in the checkout
-npm install /path/to/mountable/sdk/typescript   # in your project
+pip install mountable-sdk      # import mountable_sdk
+npm install mountable-sdk      # import { Mountable } from "mountable-sdk"
 ```
 
 ```python
