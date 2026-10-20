@@ -4,12 +4,8 @@ Read, write, delete, list and follow the files of a
 [Mountable](https://mountable.io) filesystem over HTTPS from a backend,
 without mounting it, and create one-time mount tickets for sandboxes.
 
-Not on npm yet. Until the first `sdk-vX.Y.Z` release, install from a
-checkout of this repository:
-
 ```sh
-(cd sdk/typescript && npm ci && npm run build)  # in the checkout
-npm install /path/to/mountable/sdk/typescript   # in your project
+npm install mountable-sdk
 ```
 
 An ES module with type declarations for Node 18+, Bun and Deno. It uses the

@@ -4,11 +4,8 @@ Read, write, delete, list and follow the files of a
 [Mountable](https://mountable.io) filesystem over HTTPS from a backend,
 without mounting it, and create one-time mount tickets for sandboxes.
 
-Not on PyPI yet. Until the first `sdk-vX.Y.Z` release, install from a
-checkout of this repository:
-
 ```sh
-pip install ./sdk/python       # run from the repository root
+pip install mountable-sdk
 ```
 
 Python 3.10+, synchronous, one dependency (`httpx`).
