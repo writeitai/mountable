@@ -3,6 +3,7 @@ package nfs
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -111,6 +112,7 @@ func conditionHolds(c *filer_pb.WriteCondition, current *filer_pb.Entry) bool {
 // filer then holds, and handles follow the objects.
 func TestRealEngineMutations(t *testing.T) {
 	filer := &memFiler{entries: map[string]*filer_pb.Entry{
+		"/c/fs1":       entry("fs1", os.ModeDir|0o755, 1, ""),
 		"/c/fs1/a.txt": entry("a.txt", 0o644, 9001, "hello"),
 	}}
 	_, c := startWritable(t, realEngine(t, filer, 1000))
@@ -127,6 +129,20 @@ func TestRealEngineMutations(t *testing.T) {
 	}
 	if s := c.status(procCreate, wire{}.opaque(root).str("new").u32(createGuarded).append(noAttrs)); s != uint32(nfsErrExist) {
 		t.Fatalf("CREATE GUARDED again: %d", s)
+	}
+	sized := wire{}.u32(0).u32(0).u32(0).u32(1).u64(23).u32(timeDontChange).u32(timeDontChange)
+	if _, a := c.call(procCreate, wire{}.opaque(root).str("sized").u32(createGuarded).append(sized)).created(); a.size != 23 || stored("sized").Attributes.FileSize != 23 {
+		t.Fatalf("CREATE with a size: %d, stored %d", a.size, stored("sized").Attributes.FileSize)
+	}
+	if s := c.status(procSetAttr, wire{}.opaque(root).append(modeAttrs(0o700)).u32(0)); s != uint32(nfsOK) {
+		t.Fatalf("SETATTR of the root: %d", s)
+	}
+	r := c.call(procGetAttr, wire{}.opaque(root))
+	if s := r.u32(); s != uint32(nfsOK) {
+		t.Fatalf("GETATTR of the root: %d", s)
+	}
+	if a := r.fattr(); a.mode != 0o700 {
+		t.Fatalf("the root's mode %o", a.mode)
 	}
 	verifier := wire{}.u32(1).u32(2)
 	lock, _ := c.call(procCreate, wire{}.opaque(root).str("lock").u32(createExclusive).append(verifier)).created()

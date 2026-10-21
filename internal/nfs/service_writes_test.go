@@ -410,3 +410,192 @@ func TestRemoveSettlesWrites(t *testing.T) {
 }
 
 func (w wire) append(more wire) wire { return append(w, more...) }
+
+// REMOVE, RMDIR and RENAME take single names, as LOOKUP does: a path or
+// a name the store would rewrite names nothing.
+func TestRemovedNamesAreSingleNames(t *testing.T) {
+	f, _, c, root := writable(t)
+	for _, name := range []string{"dir/b", "\xff", ""} {
+		if s := c.status(procRemove, wire{}.opaque(root).str(name)); s != uint32(nfsErrNoEnt) {
+			t.Fatalf("REMOVE %q: %d", name, s)
+		}
+		if s := c.status(procRename, wire{}.opaque(root).str(name).opaque(root).str("x")); s != uint32(nfsErrNoEnt) {
+			t.Fatalf("RENAME %q: %d", name, s)
+		}
+	}
+	if f.count("remove") != 0 || f.count("rename") != 0 {
+		t.Fatal("something was changed")
+	}
+}
+
+// UNCHECKED CREATE of an existing name: another user's read-only file is
+// not truncated, a directory is no file, and a size past the limit is
+// refused; the caller's own file is truncated, its writes persisted
+// first.
+func TestUncheckedCreateOfAnExistingFile(t *testing.T) {
+	f, _, c, root := writable(t)
+	f.add("theirs", 1020, syscall.S_IFREG|0o444, "keep").uid = 502
+	truncate := func(name string, size uint64) uint32 {
+		return c.status(procCreate, wire{}.opaque(root).str(name).u32(createUnchecked).u32(0).u32(0).u32(0).u32(1).u64(size).u32(0).u32(0))
+	}
+	if s := truncate("theirs", 0); s != uint32(nfsErrAccess) {
+		t.Fatalf("another user's file: %d", s)
+	}
+	if s := truncate("dir", 0); s != uint32(nfsErrIsDir) {
+		t.Fatalf("a directory: %d", s)
+	}
+	if s := truncate("new", maxFileSize+1); s != uint32(nfsErrFBig) {
+		t.Fatalf("past the limit: %d", s)
+	}
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	if s := truncate("a.txt", 0); s != uint32(nfsOK) {
+		t.Fatalf("the caller's file: %d", s)
+	}
+	f.mu.Lock()
+	theirs, mine := string(f.objects[f.root+"/theirs"].data), len(f.objects[f.root+"/a.txt"].data)
+	f.mu.Unlock()
+	if theirs != "keep" || mine != 0 || f.fsyncsNow() != 1 {
+		t.Fatalf("theirs %q, mine %d bytes, %d flushes", theirs, mine, f.fsyncsNow())
+	}
+}
+
+// A handle that took writeFlushBytes flushes at once and keeps its handle
+// and lease for the writes that follow.
+func TestFlushAfterManyBytesKeepsTheHandle(t *testing.T) {
+	saved := writeFlushBytes
+	writeFlushBytes = 4
+	defer func() { writeFlushBytes = saved }()
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(8).u32(stableUnstable).str("12345678"))
+	for deadline := time.Now().Add(5 * time.Second); f.fsyncsNow() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no flush")
+		}
+	}
+	c.call(procWrite, wire{}.opaque(fh).u64(8).u32(1).u32(stableUnstable).str("9"))
+	f.mu.Lock()
+	opens, releases := f.opens, f.releases
+	f.mu.Unlock()
+	if opens != 1 || releases != 0 {
+		t.Fatalf("%d opens, %d releases", opens, releases)
+	}
+}
+
+// A flush failing in a SETATTR's preparation that was already answered
+// "retry later" is not lost: the next COMMIT reports it.
+func TestSettleFailureAnsweredLaterIsKept(t *testing.T) {
+	short(t, 1500*time.Millisecond, 200*time.Millisecond)
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.fsyncGate, f.fsyncErr = gate, fuse.Status(syscall.EDQUOT)
+	f.mu.Unlock()
+	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsErrJukebox) {
+		t.Fatalf("SETATTR during the flush: %d", s)
+	}
+	close(gate)
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
+		t.Fatalf("COMMIT: %d", s)
+	}
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
+		t.Fatalf("COMMIT again: %d", s)
+	}
+}
+
+// A failed flush lets its handle go: the next WRITE opens a fresh one,
+// and the failure is reported once.
+func TestFailedFlushReleasesTheHandle(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	f.mu.Lock()
+	f.fsyncErr = fuse.Status(syscall.EDQUOT)
+	f.mu.Unlock()
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
+		t.Fatalf("COMMIT: %d", s)
+	}
+	f.mu.Lock()
+	f.fsyncErr = fuse.OK
+	f.mu.Unlock()
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("y"))
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
+		t.Fatalf("COMMIT after the new write: %d", s)
+	}
+	f.mu.Lock()
+	opens, releases := f.opens, f.releases
+	f.mu.Unlock()
+	if opens != 2 || releases != 1 {
+		t.Fatalf("%d opens, %d releases", opens, releases)
+	}
+}
+
+// An export that ended flushes nothing more: the idle flush is stopped.
+func TestEndStopsIdleFlushes(t *testing.T) {
+	saved := writeIdle
+	writeIdle = 50 * time.Millisecond
+	defer func() { writeIdle = saved }()
+	f, srv, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	srv.End()
+	time.Sleep(200 * time.Millisecond)
+	if f.fsyncsNow() != 0 {
+		t.Fatalf("%d flushes after End", f.fsyncsNow())
+	}
+}
+
+// RENAME onto another name of the same file does nothing (RFC 1813
+// §3.3.14): both names stay.
+func TestRenameOntoAnotherNameOfTheFile(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	if s := c.status(procLink, wire{}.opaque(fh).opaque(root).str("alias")); s != uint32(nfsOK) {
+		t.Fatalf("LINK: %d", s)
+	}
+	if s := c.status(procRename, wire{}.opaque(root).str("a.txt").opaque(root).str("alias")); s != uint32(nfsOK) {
+		t.Fatalf("RENAME: %d", s)
+	}
+	c.lookup(root, "a.txt")
+	c.lookup(root, "alias")
+	if f.count("rename") != 0 {
+		t.Fatal("the rename was sent")
+	}
+}
+
+// Arguments that do not decode are GARBAGE_ARGS; COMMIT of a symlink is
+// INVAL.
+func TestMutationArguments(t *testing.T) {
+	_, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	if got := c.raw(programNFS, 3, procSetAttr, 501, wire{}.opaque(fh).append(noAttrs).u32(1).u32(1).u32(1000000000)); !bytes.HasSuffix(got, wire{}.u32(acceptGarbageArgs)) {
+		t.Fatalf("a guard of 10^9 nanoseconds: % x", got)
+	}
+	if got := c.raw(programNFS, 3, procMknod, 501, wire{}.opaque(root).str("f").u32(typeFifo).append(noAttrs).u32(7)); !bytes.HasSuffix(got, wire{}.u32(acceptGarbageArgs)) {
+		t.Fatalf("MKNOD with trailing bytes: % x", got)
+	}
+	link, _ := c.lookup(root, "link")
+	if s := c.status(procCommit, wire{}.opaque(link).u64(0).u32(0)); s != uint32(nfsErrInval) {
+		t.Fatalf("COMMIT of a symlink: %d", s)
+	}
+}
+
+// A change of owner by anyone but root drops the set-id bits.
+func TestChownDropsSetIDBits(t *testing.T) {
+	f, _, c, root := writable(t)
+	f.add("tool", 1030, syscall.S_IFREG|0o6755, "x")
+	fh, _ := c.lookup(root, "tool")
+	chgrp := wire{}.opaque(fh).u32(0).u32(0).u32(1).u32(20).u32(0).u32(timeDontChange).u32(timeDontChange).u32(0)
+	if s := c.status(procSetAttr, chgrp); s != uint32(nfsOK) {
+		t.Fatalf("chgrp: %d", s)
+	}
+	f.mu.Lock()
+	mode := f.objects[f.root+"/tool"].mode
+	f.mu.Unlock()
+	if mode&0o7777 != 0o755 {
+		t.Fatalf("mode %o", mode&0o7777)
+	}
+}

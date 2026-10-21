@@ -137,6 +137,19 @@ func newName(name string) nfsStatus {
 	return nfsOK
 }
 
+// oldName checks the name of an existing object a call removes or moves:
+// a single name, as LOOKUP takes it, never a path or a name the store
+// would rewrite.
+func oldName(name string) nfsStatus {
+	switch {
+	case len(name) > nameMax:
+		return nfsErrNameLong
+	case name == "" || strings.ContainsAny(name, "/\x00") || !utf8.ValidString(name):
+		return nfsErrNoEnt // no such name can be stored
+	}
+	return nfsOK
+}
+
 // putPreOpAttr writes pre_op_attr: the size and times before a change.
 func putPreOpAttr(e *encoder, a *fuse.Attr) {
 	if a == nil {
@@ -265,6 +278,12 @@ func (s *service) create(o *op) reply {
 	if status == nfsOK {
 		status = newName(n)
 	}
+	if status == nfsOK && attrs.size != nil && *attrs.size > maxFileSize {
+		status = nfsErrFBig
+	}
+	if status == nfsOK && how == createUnchecked {
+		status = s.mayReuse(o, dir, n, attrs)
+	}
 	if status != nfsOK {
 		return s.failureWithDir(o, status, dir)
 	}
@@ -278,6 +297,30 @@ func (s *service) create(o *op) reply {
 		s.exclusive.add(inode)
 	}
 	return s.createdReply(o, dir, n, inode, resultOf(st))
+}
+
+// mayReuse checks an UNCHECKED CREATE that may open an existing file:
+// a regular file, and, when the call sets its size, one the caller may
+// truncate, its accepted writes persisted first. A name that does not
+// exist yet is for the create.
+func (s *service) mayReuse(o *op, dir object, n string, attrs sattr) nfsStatus {
+	existing, status := s.child(o, dir, n)
+	switch {
+	case status == nfsErrNoEnt:
+		return nfsOK
+	case status != nfsOK:
+		return status
+	case isDir(&existing.attr):
+		return nfsErrIsDir
+	case existing.attr.Mode&syscall.S_IFMT != syscall.S_IFREG:
+		return nfsErrExist
+	case attrs.size == nil:
+		return nfsOK
+	}
+	if status := mayChange(o.cred, &existing.attr, sattr{size: attrs.size}); status != nfsOK {
+		return status
+	}
+	return s.writes.settle(o, existing.inode)
 }
 
 func (s *service) mkdir(o *op) reply {
@@ -330,7 +373,18 @@ func (s *service) mknod(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	d.string(mountPathLen)
-	if d.err != nil {
+	switch d.uint32() { // mknoddata3
+	case typeChr, typeBlk:
+		decodeSattr(d)
+		d.uint32() // specdata3
+		d.uint32()
+	case typeSock, typeFifo:
+		decodeSattr(d)
+	case typeReg, typeDir, typeLnk:
+	default:
+		d.err = errGarbage
+	}
+	if !d.done() {
 		return garbage()
 	}
 	dir, status := s.resolve(o, fh)
@@ -378,8 +432,8 @@ func (s *service) removeName(o *op, directory bool) reply {
 		status = nfsErrNotEmpty
 	case n == "." || n == "..":
 		status = nfsErrIsDir
-	case len(n) > nameMax:
-		status = nfsErrNameLong
+	default:
+		status = oldName(n)
 	}
 	if status != nfsOK {
 		return s.failureWithDir(o, status, dir)
@@ -453,8 +507,10 @@ func (s *service) rename(o *op) reply {
 	if status == nfsOK {
 		status = newName(toName)
 	}
-	if status == nfsOK && (fromName == "." || fromName == ".." || len(fromName) > nameMax) {
+	if status == nfsOK && (fromName == "." || fromName == "..") {
 		status = nfsErrInval
+	} else if status == nfsOK {
+		status = oldName(fromName)
 	}
 	if status != nfsOK {
 		return s.renameReply(o, status, from, to)
@@ -468,6 +524,9 @@ func (s *service) rename(o *op) reply {
 	}
 	target, targetStatus := s.child(o, to, toName)
 	switch {
+	case targetStatus == nfsOK && target.inode == source.inode:
+		// Two names of one file: nothing to do (RFC 1813 §3.3.14).
+		return s.renameReply(o, nfsOK, from, to)
 	case targetStatus == nfsOK && !mayRemove(o.cred, &to.attr, &target.attr):
 		return s.renameReply(o, nfsErrAccess, from, to)
 	case targetStatus != nfsOK && targetStatus != nfsErrNoEnt:
@@ -577,6 +636,9 @@ func (s *service) setAttr(o *op) reply {
 	var guard *time.Time
 	if d.bool() {
 		sec, nsec := d.uint32(), d.uint32()
+		if nsec > 999999999 {
+			d.err = errGarbage
+		}
 		t := time.Unix(int64(sec), int64(nsec))
 		guard = &t
 	}
@@ -604,6 +666,15 @@ func (s *service) setAttr(o *op) reply {
 			return fail(nfsErrIsDir)
 		}
 		return fail(nfsErrInval)
+	}
+	if attrs.size != nil && *attrs.size > maxFileSize {
+		return fail(nfsErrFBig)
+	}
+	if (attrs.uid != nil || attrs.gid != nil) && attrs.mode == nil && o.cred.uid != 0 && obj.attr.Mode&0o6000 != 0 {
+		// A change of owner by anyone but root drops the set-id bits,
+		// as chown(2) does.
+		cleared := obj.attr.Mode & 0o7777 &^ 0o6000
+		attrs.mode = &cleared
 	}
 	// Accepted writes are persisted first: the change applies to the file
 	// as written (design §4, "Step 1").

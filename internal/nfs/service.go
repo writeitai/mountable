@@ -150,6 +150,9 @@ func (s *service) handle(c *call) (r reply, late <-chan reply) {
 // end marks the export ended and cancels the calls being worked on.
 func (s *service) end() {
 	s.ended.Store(true)
+	if s.writes != nil {
+		s.writes.end()
+	}
 	s.endOnce.Do(func() { close(s.endCh) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
