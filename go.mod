@@ -67,4 +67,4 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
-replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261021083740-ef46b039df0a
+replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261021084848-37ace02ba38c
