@@ -175,7 +175,8 @@ func (c *conn) dispatch(cl *call) {
 		}
 		c.s.spawn(func() {
 			defer c.release()
-			c.send(cl.xid, svc.handle(cl))
+			r, _ := svc.handle(cl)
+			c.send(cl.xid, r)
 		})
 		return
 	}
@@ -188,9 +189,18 @@ func (c *conn) dispatch(cl *call) {
 	case drcNew:
 		c.s.spawn(func() {
 			defer c.release()
-			r := svc.handle(cl)
-			c.s.drc.finish(entry, r)
+			r, late := svc.handle(cl)
+			if late == nil {
+				c.s.drc.finish(entry, r)
+				c.send(cl.xid, r)
+				return
+			}
+			// Answered NFS3ERR_IO while still changing things: the cache
+			// keeps the call in progress, and takes its own reply once the
+			// work is done, never the IO, so a retransmission then gets
+			// what happened.
 			c.send(cl.xid, r)
+			c.s.drc.finish(entry, svc.unlessEnded(cl, <-late))
 		})
 	case drcFull:
 		c.send(cl.xid, svc.retryLater(cl)) // a new call, changed nothing

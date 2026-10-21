@@ -122,8 +122,10 @@ func (s *service) admit(c *call) (reply, bool) {
 	return reply{}, true
 }
 
-// handle works on an admitted NFS call.
-func (s *service) handle(c *call) reply {
+// handle works on an admitted NFS call. late, when not nil, delivers the
+// call's own reply after an answer of NFS3ERR_IO given while it was still
+// changing things.
+func (s *service) handle(c *call) (r reply, late <-chan reply) {
 	proc := procedures[c.proc]
 	return s.run(c, proc.changesNothing, func(o *op) reply { return proc.fn(s, o) })
 }
@@ -253,24 +255,25 @@ func (o *op) beginMutation() bool { return o.state.CompareAndSwap(opPreparing, o
 // then the procedure. A call still preparing at its limit (prepareBudget,
 // or rpcDeadline for a procedure that changes nothing) answers "retry later"; one
 // already changing things gets until rpcDeadline, and then answers
-// NFS3ERR_IO, since its outcome is unknown. Work that outlives its answer
-// finishes in the background, keeping its worker until it does.
-func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply {
+// NFS3ERR_IO, since its outcome is unknown; late then delivers the reply
+// the work makes, for the duplicate-request cache. Work that outlives its
+// answer finishes in the background, keeping its worker until it does.
+func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) (r reply, late <-chan reply) {
 	wait := time.NewTimer(time.Until(c.received.Add(prepareBudget)))
 	select {
 	case s.workers <- struct{}{}:
 		wait.Stop()
 	case <-wait.C:
-		return s.retryLater(c)
+		return s.retryLater(c), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	}
 	o := &op{call: c, cancel: make(chan struct{})}
 	s.mu.Lock()
 	if s.ended.Load() { // ended while the call waited for its worker
 		s.mu.Unlock()
 		<-s.workers
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	}
 	s.ops[o] = struct{}{}
 	s.work.Add(1)
@@ -294,24 +297,24 @@ func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply 
 	defer timer.Stop()
 	select {
 	case r := <-result:
-		return s.unlessEnded(c, r)
+		return s.unlessEnded(c, r), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	case <-timer.C:
 	}
 	if o.state.CompareAndSwap(opPreparing, opAbandoned) {
 		o.stop()
-		return s.retryLater(c)
+		return s.retryLater(c), nil
 	}
 	timer.Reset(time.Until(c.received.Add(rpcDeadline)))
 	select {
 	case r := <-result:
-		return s.unlessEnded(c, r)
+		return s.unlessEnded(c, r), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	case <-timer.C:
 		o.stop()
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), result
 	}
 }
 

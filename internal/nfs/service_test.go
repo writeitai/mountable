@@ -399,7 +399,7 @@ func TestBoundedSteps(t *testing.T) {
 	// Still preparing at the budget: retry later, and the procedure is told.
 	c.received = time.Now()
 	stopped := make(chan bool, 1)
-	r := s.run(c, false, func(o *op) reply {
+	r, _ := s.run(c, false, func(o *op) reply {
 		<-o.cancel
 		stopped <- o.beginMutation()
 		return reply{}
@@ -413,7 +413,7 @@ func TestBoundedSteps(t *testing.T) {
 
 	// Already mutating at the deadline: the outcome is unknown, so IO.
 	c.received = time.Now()
-	r = s.run(c, false, func(o *op) reply {
+	r, _ = s.run(c, false, func(o *op) reply {
 		o.beginMutation()
 		<-release
 		return reply{}
@@ -425,7 +425,7 @@ func TestBoundedSteps(t *testing.T) {
 	// No worker free within the budget: retry later. The one worker is
 	// still held by the stuck mutation above.
 	c.received = time.Now()
-	if r = s.run(c, true, func(*op) reply { return reply{} }); !r.retry {
+	if r, _ = s.run(c, true, func(*op) reply { return reply{} }); !r.retry {
 		t.Fatal("ran without a worker")
 	}
 }
@@ -678,12 +678,13 @@ func TestEndAbandonsPreparation(t *testing.T) {
 	entered := make(chan struct{})
 	result := make(chan reply, 1)
 	go func() {
-		result <- s.run(c, false, func(o *op) reply {
+		r, _ := s.run(c, false, func(o *op) reply {
 			close(entered)
 			<-o.cancel
 			began <- o.beginMutation()
 			return reply{}
 		})
+		result <- r
 	}()
 	<-entered
 	s.end()
