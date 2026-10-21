@@ -2,6 +2,18 @@
   "name": "mountable-cli",
   "version": "0.0.0-dev",
   "description": "The Mountable CLI: mount a Mountable filesystem on Linux or macOS.",
+  "mcpName": "io.github.writeitai/mountable",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "agent-sandbox",
+    "e2b",
+    "modal",
+    "fuse",
+    "filesystem",
+    "posix"
+  ],
   "homepage": "https://mountable.io/docs",
   "license": "Apache-2.0",
   "bin": {

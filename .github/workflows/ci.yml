@@ -53,6 +53,10 @@ jobs:
           packaging/build.sh 0.0.0
           npx -y --package ./dist/mountable-cli-0.0.0.tgz mountable version | grep -x "mountable 0.0.0"
           uvx --from ./dist/mountable-0.0.0-py3-none-any.whl mountable version | grep -x "mountable 0.0.0"
+      - name: The npm package keeps the MCP Registry name
+        run: |
+          tar -xzOf dist/mountable-cli-0.0.0.tgz package/package.json |
+            python3 -c 'import json, sys; assert json.load(sys.stdin)["mcpName"] == "io.github.writeitai/mountable"'
       - name: Every channel carries the license and notices
         run: |
           tar -tzf dist/mountable-cli-0.0.0.tgz | grep -x package/THIRD_PARTY_NOTICES
