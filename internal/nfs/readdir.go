@@ -120,10 +120,12 @@ func (s *service) readDirPlus(o *op) reply {
 const pageOverhead = 4 + 4 + fattrSize + 8 + 4 + 4
 
 // entrySize is an entry's encoded size in the reply, and its share of
-// READDIRPLUS's dircount (fileid, name and cookie).
+// READDIRPLUS's dircount: the entry without its attributes and handle
+// (RFC 1813 §3.3.17), that is its list discriminant, fileid, name and
+// cookie.
 func entrySize(name string, plus bool) (size, dirSize int) {
-	dirSize = 8 + 4 + len(name) + pad(len(name)) + 8
-	size = 4 + dirSize // value_follows
+	dirSize = 4 + 8 + 4 + len(name) + pad(len(name)) + 8 // value_follows first
+	size = dirSize
 	if plus {
 		size += 4 + fattrSize + 4 + 4 + handleSize // post_op_attr, post_op_fh3
 	}
