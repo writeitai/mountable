@@ -116,11 +116,12 @@ func granted(cred credential, a *fuse.Attr, asked uint32) uint32 {
 	return g & asked
 }
 
-// mayRead is READ's own check, with RFC 1813 §4.4's owner exception: the
-// owner reads whatever the mode bits say, because the client checked
-// permission when the file was opened.
+// mayRead is READ's own check, as RFC 1813 §4.4 has it: read or execute
+// permission, since a client reads an executable to run it, and the owner
+// reads whatever the mode bits say, because the client checked permission
+// when the file was opened.
 func mayRead(cred credential, a *fuse.Attr) bool {
-	return cred.uid == a.Uid || allowed(cred, a, permRead)
+	return cred.uid == a.Uid || allowed(cred, a, permRead) || allowed(cred, a, permExecute)
 }
 
 // statusOf maps the engine's result to nfsstat3, name by name; anything

@@ -47,6 +47,7 @@ type fakeObject struct {
 	mode   uint32
 	data   []byte
 	target string
+	uid    uint32 // the owner, if not the mount's user
 }
 
 func newFakeEngine() *fakeEngine {
@@ -115,6 +116,9 @@ func (f *fakeEngine) attr(inode uint64, o *fakeObject, out *fuse.Attr) {
 	out.Blocks = (out.Size + 511) / 512
 	out.Nlink = 1
 	out.Uid, out.Gid = 501, 20
+	if o.uid != 0 {
+		out.Uid, out.Gid = o.uid, 30
+	}
 	out.Mtime, out.Mtimensec = 1700000000, 123456789
 	out.Atime, out.Atimensec = 1700000000, 123456789
 	out.Ctime, out.Ctimensec = 1700000001, 5

@@ -199,7 +199,10 @@ func TestAccess(t *testing.T) {
 }
 
 func TestRead(t *testing.T) {
-	_, c := startServer(t, sampleEngine())
+	f := sampleEngine()
+	f.add("tool", 1007, syscall.S_IFREG|0o111, "binary").uid = 502
+	f.add("theirs", 1008, syscall.S_IFREG|0o000, "private").uid = 502
+	_, c := startServer(t, f)
 	root := c.root()
 	file, _ := c.lookup(root, "a.txt")
 	read := func(fh []byte, offset uint64, count uint32) (uint32, []byte, bool) {
@@ -232,6 +235,16 @@ func TestRead(t *testing.T) {
 	secret, _ := c.lookup(root, "secret")
 	if _, data, _ := read(secret, 0, 100); string(data) != "s3cret" {
 		t.Fatalf("owner exception: %q", data)
+	}
+	// Another user's executable is read with execute permission alone, as
+	// a client pages it in; their 0000 file is not.
+	tool, _ := c.lookup(root, "tool")
+	if _, data, _ := read(tool, 0, 100); string(data) != "binary" {
+		t.Fatalf("executable: %q", data)
+	}
+	theirs, _ := c.lookup(root, "theirs")
+	if s, _, _ := read(theirs, 0, 100); s != uint32(nfsErrAccess) {
+		t.Fatalf("another user's 0000 file: %d", s)
 	}
 	dir, _ := c.lookup(root, "dir")
 	if s, _, _ := read(dir, 0, 10); s != uint32(nfsErrIsDir) {
