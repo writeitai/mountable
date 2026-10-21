@@ -17,6 +17,13 @@ const fuseConnections = "/sys/fs/fuse/connections"
 // abortConnection aborts the FUSE connection behind dir: the kernel fails
 // every pending and further operation in it.
 func abortConnection(dir string) error {
+	if err := abortFUSE(dir); err != nil {
+		return fmt.Errorf("aborting the FUSE connection: %w", err)
+	}
+	return nil
+}
+
+func abortFUSE(dir string) error {
 	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return err
@@ -77,3 +84,14 @@ func fusermount(dir, flags string) error {
 	}
 	return err
 }
+
+// isMountPoint is for macOS, where canonicalDir must not touch a mount
+// point; on Linux reading the link of one is harmless.
+func isMountPoint(string) bool { return false }
+
+// prepareMountPoint has nothing to do on Linux.
+func prepareMountPoint(string) error { return nil }
+
+// clearStaleMount is for macOS's NFS mounts, which outlive their process;
+// a dead FUSE mount is unmounted the ordinary way.
+func clearStaleMount(string) (bool, error) { return false, nil }

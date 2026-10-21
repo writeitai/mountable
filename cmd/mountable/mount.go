@@ -101,6 +101,9 @@ func mount(o *output, ticket, dir string) error {
 	}
 	// Check the directory before the ticket is exchanged, so a missing
 	// directory does not use up the ticket. Bounded: dir may be a stale mount.
+	if err := prepareMountPoint(dir); err != nil {
+		return err
+	}
 	if err := withTimeout(helperTimeout, func() error { return isDirectory(dir) }); err != nil {
 		return &cliError{Code: "mount_failed", Message: fmt.Sprintf("mount directory %s: %v", dir, err), Hint: "create it first: mkdir -p " + dir}
 	}
@@ -148,10 +151,11 @@ func mount(o *output, ticket, dir string) error {
 		}
 		return err
 	}
+	defer e.close() // however the mount ends, also when its shutdown was cut short
 	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
-		if session.readOnly {
+		if e.readOnly {
 			mode = "ro"
 		}
 		if err := o.emit(map[string]string{
@@ -279,14 +283,22 @@ func isDirectory(dir string) error {
 	return nil
 }
 
-// mountCacheDir creates a private cache directory for one mount.
+// mountCacheDir creates a private cache directory for one mount. Without a
+// user cache directory it goes under the temporary directory, in a
+// directory of this user's own. The directory it goes in must be this
+// user's, mode 0700 and not a symlink.
 func mountCacheDir() (string, error) {
 	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
+	if err == nil {
+		base = filepath.Join(base, "mountable")
+	} else {
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("mountable-%d", os.Getuid()))
 	}
-	base = filepath.Join(base, "mountable")
 	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	// base may be reused, even made by someone else in a shared /tmp.
+	if err := checkPrivate(base); err != nil {
 		return "", err
 	}
 	return os.MkdirTemp(base, "mount-")
@@ -298,6 +310,9 @@ func mountCacheDir() (string, error) {
 func unmount(dir string) error {
 	dir, err := canonicalDir(dir)
 	if err != nil {
+		return err
+	}
+	if cleared, err := clearStaleMount(dir); cleared || err != nil {
 		return err
 	}
 	err = cleanUnmount(dir)
