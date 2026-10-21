@@ -235,15 +235,6 @@ func (f *fakeEngine) ReadAs(_ <-chan struct{}, in *fuse.ReadIn, buf []byte, stor
 	return fuse.ReadResultData(buf[:n]), fuse.OK
 }
 
-func (f *fakeEngine) Release(_ <-chan struct{}, in *fuse.ReleaseIn) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.writeHandles[in.Fh] {
-		delete(f.writeHandles, in.Fh)
-		f.releases++
-	}
-}
-
 func (f *fakeEngine) Readlink(_ <-chan struct{}, h *fuse.InHeader) ([]byte, fuse.Status) {
 	if f.beforeReadlink != nil {
 		f.beforeReadlink()

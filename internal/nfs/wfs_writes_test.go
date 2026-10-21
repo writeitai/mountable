@@ -114,6 +114,11 @@ func TestRealEngineMutations(t *testing.T) {
 	filer := &memFiler{entries: map[string]*filer_pb.Entry{
 		"/c/fs1":       entry("fs1", os.ModeDir|0o755, 1, ""),
 		"/c/fs1/a.txt": entry("a.txt", 0o644, 9001, "hello"),
+		"/c/fs1/theirs": func() *filer_pb.Entry {
+			e := entry("theirs", 0o444, 9002, "keep")
+			e.Attributes.Uid = 2000 // another user's
+			return e
+		}(),
 	}}
 	_, c := startWritable(t, realEngine(t, filer, 1000))
 	root := c.root()
@@ -158,7 +163,15 @@ func TestRealEngineMutations(t *testing.T) {
 	if _, a := c.call(procMkdir, wire{}.opaque(root).str("d").append(noAttrs)).created(); a.ftype != typeDir || stored("d") == nil || !stored("d").IsDirectory {
 		t.Fatalf("MKDIR: %+v", a)
 	}
+	truncate := wire{}.opaque(root).str("theirs").u32(createUnchecked).u32(0).u32(0).u32(0).u32(1).u64(0).u32(0).u32(0)
+	if s := c.status(procCreate, truncate); s != uint32(nfsErrAccess) || string(stored("theirs").Content) != "keep" {
+		t.Fatalf("UNCHECKED over another user's file: %d, %q", s, stored("theirs").Content)
+	}
 	a1, _ := c.lookup(root, "a.txt")
+	r = c.call(procWrite, wire{}.opaque(a1).u64(100).u32(0).u32(stableFileSync).str(""))
+	if s := r.u32(); s != uint32(nfsOK) || stored("a.txt").Attributes.FileSize != 5 {
+		t.Fatalf("an empty FILE_SYNC WRITE: %d, size %d", s, stored("a.txt").Attributes.FileSize)
+	}
 	if s := c.status(procLink, wire{}.opaque(a1).opaque(root).str("a2")); s != uint32(nfsOK) {
 		t.Fatalf("LINK: %d", s)
 	}

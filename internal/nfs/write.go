@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
 // WRITE and COMMIT (design §4, "Writes"). A WRITE adds its data to one
@@ -110,15 +111,14 @@ func (t *writes) give(w *writer) {
 }
 
 // schedule flushes and releases the writer after d, unless the export
-// ended.
+// ended. Timers are set under t.mu, which end stops them under.
 func (t *writes) schedule(w *writer, d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if w.timer != nil {
 		w.timer.Stop()
 	}
-	t.mu.Lock()
-	ended := t.ended
-	t.mu.Unlock()
-	if !ended {
+	if !t.ended {
 		w.timer = time.AfterFunc(d, func() { t.idle(w) })
 	}
 }
@@ -160,7 +160,7 @@ func (t *writes) flush(w *writer, cred credential) nfsStatus {
 	h := header(w.inode, cred)
 	if st := t.s.engine.Fsync(nil, &fuse.FsyncIn{InHeader: h, Fh: w.fh}); st != fuse.OK {
 		w.failed = statusOf(st)
-		t.close(w)
+		t.closeHandle(w, true)
 		return w.failed
 	}
 	w.dirty, w.unflushed = false, 0
@@ -170,15 +170,16 @@ func (t *writes) flush(w *writer, cred credential) nfsStatus {
 // release flushes the writer, then closes its handle.
 func (t *writes) release(w *writer) {
 	t.flush(w, credential{uid: t.s.uid})
-	t.close(w)
+	t.closeHandle(w, false)
 }
 
-// close closes the writer's handle, letting its lease go.
-func (t *writes) close(w *writer) {
+// closeHandle closes the writer's handle, letting its lease go, without a
+// flush; discard drops what a failed flush left behind.
+func (t *writes) closeHandle(w *writer, discard bool) {
 	if w.fh == 0 {
 		return
 	}
-	t.s.engine.Release(nil, &fuse.ReleaseIn{InHeader: header(w.inode, credential{uid: t.s.uid}), Fh: w.fh})
+	t.s.engine.NFSCloseWrite(weedmount.FileHandleId(w.fh), discard)
 	w.fh, w.dirty, w.unflushed = 0, false, 0
 }
 
@@ -241,9 +242,11 @@ func (t *writes) flushAll() {
 	t.mu.Unlock()
 	for _, w := range all {
 		w.slot <- struct{}{}
+		t.mu.Lock()
 		if w.timer != nil {
 			w.timer.Stop()
 		}
+		t.mu.Unlock()
 		t.release(w)
 		<-w.slot
 	}
@@ -326,6 +329,9 @@ func (t *writes) accept(o *op, w *writer, offset uint64, data []byte) (uint32, n
 			return 0, resultOf(st)
 		}
 		w.fh = uint64(fh)
+	}
+	if len(data) == 0 {
+		return 0, nfsOK // nothing to write: the file stays as it is
 	}
 	h := header(w.inode, o.cred)
 	written, st := t.s.engine.Write(o.cancel, &fuse.WriteIn{InHeader: h, Fh: w.fh, Offset: offset, Size: uint32(len(data))}, data)

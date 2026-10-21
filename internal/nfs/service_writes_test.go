@@ -599,3 +599,38 @@ func TestChownDropsSetIDBits(t *testing.T) {
 		t.Fatalf("mode %o", mode&0o7777)
 	}
 }
+
+// A WRITE of no bytes past the end, even FILE_SYNC, leaves the file as
+// it is and answers with the stability asked for.
+func TestEmptyWriteChangesNothing(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	r := c.call(procWrite, wire{}.opaque(fh).u64(100).u32(0).u32(stableFileSync).str(""))
+	if s := r.u32(); s != uint32(nfsOK) {
+		t.Fatalf("WRITE: %d", s)
+	}
+	r.wcc()
+	if n, committed := r.u32(), r.u32(); n != 0 || committed != stableFileSync {
+		t.Fatalf("wrote %d, committed %d", n, committed)
+	}
+	f.mu.Lock()
+	size := len(f.objects[f.root+"/a.txt"].data)
+	f.mu.Unlock()
+	if size != len("hello world") {
+		t.Fatalf("the file is %d bytes", size)
+	}
+}
+
+// RENAME to or from "." or ".." is INVAL (RFC 1813 §3.3.14).
+func TestRenameDotNames(t *testing.T) {
+	_, _, c, root := writable(t)
+	for _, args := range []wire{
+		wire{}.opaque(root).str("a.txt").opaque(root).str("."),
+		wire{}.opaque(root).str("a.txt").opaque(root).str(".."),
+		wire{}.opaque(root).str("..").opaque(root).str("x"),
+	} {
+		if s := c.status(procRename, args); s != uint32(nfsErrInval) {
+			t.Fatalf("RENAME: %d", s)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 )
 
 // writeState is the fake engine's write path: what the mutation helpers
@@ -86,7 +87,7 @@ func (f *fakeEngine) make(p string, mode uint32, attrs weedmount.NFSAttrs) uint6
 	return inode
 }
 
-func (f *fakeEngine) NFSCreate(step weedmount.NFSStep, dir uint64, name string, mode weedmount.NFSCreateMode, attrs weedmount.NFSAttrs, verifier [8]byte, uid, gid uint32) (uint64, fuse.Status) {
+func (f *fakeEngine) NFSCreate(step weedmount.NFSStep, dir uint64, name string, mode weedmount.NFSCreateMode, attrs weedmount.NFSAttrs, verifier [8]byte, uid, gid uint32, reuse func(*filer_pb.Entry) fuse.Status) (uint64, fuse.Status) {
 	if st := f.prepare(step); st != fuse.OK {
 		return 0, st
 	}
@@ -97,11 +98,23 @@ func (f *fakeEngine) NFSCreate(step weedmount.NFSStep, dir uint64, name string, 
 		return 0, st
 	}
 	if o := f.objects[p]; o != nil {
+		owner := uint32(501)
+		if o.uid != 0 {
+			owner = o.uid
+		}
 		switch {
-		case mode == weedmount.NFSGuarded,
+		case mode == weedmount.NFSUnchecked && o.mode&syscall.S_IFMT == syscall.S_IFDIR:
+			return 0, fuse.Status(syscall.EISDIR)
+		case mode == weedmount.NFSGuarded, o.mode&syscall.S_IFMT != syscall.S_IFREG,
 			mode == weedmount.NFSExclusive && (o.verifier == nil || *o.verifier != verifier):
 			return 0, fuse.Status(syscall.EEXIST)
-		case attrs.Size != nil:
+		}
+		if mode == weedmount.NFSUnchecked && reuse != nil {
+			if st := reuse(&filer_pb.Entry{Attributes: &filer_pb.FuseAttributes{FileMode: o.mode & 0o7777, Uid: owner, Gid: 20}}); st != fuse.OK {
+				return 0, st
+			}
+		}
+		if attrs.Size != nil {
 			o.data = o.data[:min(len(o.data), int(*attrs.Size))]
 		}
 		inode := f.register(p, o)
@@ -280,6 +293,17 @@ func (f *fakeEngine) NFSOpenForWrite(ctx context.Context, inode uint64, uid, gid
 	f.writeHandles[f.nextFh] = true
 	f.opens++
 	return weedmount.FileHandleId(f.nextFh), fuse.OK
+}
+
+func (f *fakeEngine) NFSCloseRead(weedmount.FileHandleId) {}
+
+func (f *fakeEngine) NFSCloseWrite(fh weedmount.FileHandleId, discard bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.writeHandles[uint64(fh)] {
+		delete(f.writeHandles, uint64(fh))
+		f.releases++
+	}
 }
 
 func (f *fakeEngine) Write(_ <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status) {

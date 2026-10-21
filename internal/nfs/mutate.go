@@ -10,6 +10,7 @@ import (
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
+	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 )
 
 // The namespace and attribute procedures of a read-write export (design
@@ -282,7 +283,7 @@ func (s *service) create(o *op) reply {
 		status = nfsErrFBig
 	}
 	if status == nfsOK && how == createUnchecked {
-		status = s.mayReuse(o, dir, n, attrs)
+		status = s.settleExisting(o, dir, n, attrs)
 	}
 	if status != nfsOK {
 		return s.failureWithDir(o, status, dir)
@@ -290,7 +291,7 @@ func (s *service) create(o *op) reply {
 	step, done := s.step(o)
 	defer done()
 	mode := map[uint32]weedmount.NFSCreateMode{createUnchecked: weedmount.NFSUnchecked, createGuarded: weedmount.NFSGuarded, createExclusive: weedmount.NFSExclusive}[how]
-	inode, st := s.engine.NFSCreate(step, dir.inode, n, mode, attrs.engineAttrs(time.Now()), verifier, o.cred.uid, o.cred.gid)
+	inode, st := s.engine.NFSCreate(step, dir.inode, n, mode, attrs.engineAttrs(time.Now()), verifier, o.cred.uid, o.cred.gid, reuse(o.cred, attrs))
 	if st == fuse.OK && how == createExclusive {
 		// Its times hold the verifier until the SETATTR that must follow
 		// (RFC 1813 §3.3.8) replaces them.
@@ -299,28 +300,36 @@ func (s *service) create(o *op) reply {
 	return s.createdReply(o, dir, n, inode, resultOf(st))
 }
 
-// mayReuse checks an UNCHECKED CREATE that may open an existing file:
-// a regular file, and, when the call sets its size, one the caller may
-// truncate, its accepted writes persisted first. A name that does not
-// exist yet is for the create.
-func (s *service) mayReuse(o *op, dir object, n string, attrs sattr) nfsStatus {
-	existing, status := s.child(o, dir, n)
-	switch {
-	case status == nfsErrNoEnt:
-		return nfsOK
-	case status != nfsOK:
-		return status
-	case isDir(&existing.attr):
-		return nfsErrIsDir
-	case existing.attr.Mode&syscall.S_IFMT != syscall.S_IFREG:
-		return nfsErrExist
-	case attrs.size == nil:
+// settleExisting persists the accepted writes of a file an UNCHECKED
+// CREATE may truncate, before the create's own preparation. Whether it may
+// is decided on the entry the engine reads under the file's lease (reuse).
+func (s *service) settleExisting(o *op, dir object, n string, attrs sattr) nfsStatus {
+	if attrs.size == nil {
 		return nfsOK
 	}
-	if status := mayChange(o.cred, &existing.attr, sattr{size: attrs.size}); status != nfsOK {
-		return status
+	if existing, status := s.child(o, dir, n); status == nfsOK {
+		return s.writes.settle(o, existing.inode)
 	}
-	return s.writes.settle(o, existing.inode)
+	return nfsOK // none known here: the engine finds out
+}
+
+// reuse is the check an UNCHECKED CREATE makes, under the lease, on an
+// existing file it would open: truncating it takes SETATTR's rights for
+// its size.
+func reuse(cred credential, attrs sattr) func(*filer_pb.Entry) fuse.Status {
+	return func(e *filer_pb.Entry) fuse.Status {
+		if attrs.size == nil {
+			return fuse.OK
+		}
+		a := fuse.Attr{Mode: e.Attributes.FileMode & 0o7777, Owner: fuse.Owner{Uid: e.Attributes.Uid, Gid: e.Attributes.Gid}}
+		switch mayChange(cred, &a, sattr{size: attrs.size}) {
+		case nfsOK:
+			return fuse.OK
+		case nfsErrPerm:
+			return fuse.EPERM
+		}
+		return fuse.EACCES
+	}
 }
 
 func (s *service) mkdir(o *op) reply {
@@ -504,13 +513,14 @@ func (s *service) rename(o *op) reply {
 		return s.failureWithDir(o, status, from)
 	}
 	to, status := s.writableDir(o, toFh)
-	if status == nfsOK {
-		status = newName(toName)
-	}
-	if status == nfsOK && (fromName == "." || fromName == "..") {
-		status = nfsErrInval
-	} else if status == nfsOK {
-		status = oldName(fromName)
+	switch {
+	case status != nfsOK:
+	case fromName == "." || fromName == ".." || toName == "." || toName == "..":
+		status = nfsErrInval // RFC 1813 §3.3.14
+	default:
+		if status = oldName(fromName); status == nfsOK {
+			status = newName(toName)
+		}
 	}
 	if status != nfsOK {
 		return s.renameReply(o, status, from, to)
