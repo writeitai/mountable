@@ -248,7 +248,7 @@ func (s *service) access(o *op) reply {
 	e := &encoder{}
 	e.uint32(uint32(nfsOK))
 	putPostOpAttr(e, &obj.attr, s.fsid)
-	e.uint32(granted(o.cred, &obj.attr, asked))
+	e.uint32(granted(o.cred, &obj.attr, asked, !s.readOnly))
 	return reply{body: e.buf}
 }
 

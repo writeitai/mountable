@@ -348,7 +348,7 @@ func TestDeadlineIOIsNotCached(t *testing.T) {
 		return s.failure(o.call, nfsErrNotEmpty)
 	}}
 	t.Cleanup(func() { procedures[procRemove] = saved })
-	_, c := startServer(t, newFakeEngine())
+	_, c := startWritable(t, newFakeEngine())
 	args := wire{}.opaque(c.root()).str("x")
 	c.send(callMessage(99, programNFS, 3, procRemove, 501, args))
 	if got := c.receive(); !bytes.HasPrefix(got[24:], be32(uint32(nfsErrIO))) {
@@ -367,7 +367,7 @@ func TestDeadlineIOIsNotCached(t *testing.T) {
 // the new connection, and gets the answer there, without a second run.
 func TestRetransmissionAfterReconnect(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	args := wire{}.opaque(fh).str("x")
 	c.send(callMessage(88, programNFS, 3, procRemove, 501, args))
@@ -493,7 +493,7 @@ func TestStatusMapping(t *testing.T) {
 // would resend it under a new XID and it would run twice.
 func TestDuplicatesUnderSaturation(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	args := wire{}.opaque(fh).str("x")
 	c.send(callMessage(60, programNFS, 3, procCreate, 501, args))
@@ -559,7 +559,7 @@ func TestSimultaneousCopiesAtTheLastSlot(t *testing.T) {
 // left, both answered by the one run.
 func TestSimultaneousCopiesOverTheWire(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	for range maxPending - 1 {
 		srv.pending <- struct{}{}
