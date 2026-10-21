@@ -183,13 +183,14 @@ const engineLogFlush = "\x00mountable: flush\n"
 // secrets removed. The engine writes to os.Stderr directly, so os.Stderr
 // becomes a pipe whose lines are redacted onto the process's stderr.
 func logToStderr() error {
-	if err := fla9.Set("logtostderr", "true"); err != nil {
-		return err
-	}
 	engineLog.mu.Lock()
 	defer engineLog.mu.Unlock()
 	if engineLog.pipe != nil {
 		return nil
+	}
+	// Once: the engine reads the flag unlocked while it logs.
+	if err := fla9.Set("logtostderr", "true"); err != nil {
+		return err
 	}
 	r, w, err := os.Pipe()
 	if err != nil {
