@@ -152,6 +152,7 @@ func realEngine(t *testing.T, filer *memFiler, maxCached int) *weedmount.WFS {
 		VolumeServerAccess: "filerProxy",
 		UidGidMapper:       mapper,
 		DefaultPermissions: true,
+		EagerFilerCreate:   true,
 	})
 }
 
