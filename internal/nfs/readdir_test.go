@@ -144,17 +144,37 @@ func TestReadDirPlusPages(t *testing.T) {
 	}
 }
 
-// dircount bounds a page even when maxcount would allow more.
+// dircount bounds a page even when maxcount would allow more, and maxcount
+// even when dircount would: each budget checked on its own, from what the
+// reply encodes. An entry's share of dircount is all of it but its
+// attributes and handle, its list discriminant included (RFC 1813
+// §3.3.17).
 func TestReadDirPlusHonoursDirCount(t *testing.T) {
 	_, c := startServer(t, wideEngine(50))
 	dir, _ := c.lookup(c.root(), "wide")
-	_, p := c.readDirPlus(dir, 0, 0, 200, 1<<20)
-	used := 0
-	for _, e := range p.entries {
-		used += 8 + 4 + len(e.name) + pad(len(e.name)) + 8
+	dirInfo := func(p listing) int {
+		used := 0
+		for _, e := range p.entries {
+			used += 4 + 8 + 4 + len(e.name) + pad(len(e.name)) + 8
+		}
+		return used
 	}
-	if used > 200 || p.eof {
-		t.Fatalf("%d bytes of directory information, eof %v", used, p.eof)
+	for _, dirCount := range []uint32{24, 28, 200} {
+		status, p := c.readDirPlus(dir, 0, 0, dirCount, 1<<20)
+		if dirCount == 24 {
+			// Not even "." fits: 28 bytes of directory information.
+			if status != uint32(nfsErrTooSmall) {
+				t.Fatalf("dircount 24: status %d, %d entries", status, len(p.entries))
+			}
+			continue
+		}
+		if used := dirInfo(p); status != 0 || used > int(dirCount) || len(p.entries) == 0 || p.eof {
+			t.Fatalf("dircount %d: status %d, %d bytes of directory information in %d entries, eof %v", dirCount, status, used, len(p.entries), p.eof)
+		}
+	}
+	// maxcount binds on its own: readDirPlus fails a page larger than it.
+	if status, p := c.readDirPlus(dir, 0, 0, 1<<20, 1024); status != 0 || len(p.entries) == 0 || p.eof {
+		t.Fatalf("maxcount 1024: status %d, %d entries, eof %v", status, len(p.entries), p.eof)
 	}
 }
 
