@@ -130,6 +130,10 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		MetadataFlushSeconds:  120,
 		DirIdleEvictSec:       600,
 		EnableDistributedLock: true,
+		// Creates reach the filer before they are reported, so a create
+		// adopts the inode the filer stored, on every platform; the
+		// writeback cache stays off (D43, architecture §4 obligation 13).
+		EagerFilerCreate: true,
 	})
 	parent, name := util.FullPath(c.root).DirAndName()
 	if err := unlessCancelled(ctx, func() error {
