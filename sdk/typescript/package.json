@@ -2,6 +2,14 @@
   "name": "mountable-sdk",
   "version": "0.0.0-dev",
   "description": "Read, write, list and follow files in a Mountable filesystem over HTTPS.",
+  "keywords": [
+    "sdk",
+    "ai-agents",
+    "agent-sandbox",
+    "filesystem",
+    "file-storage",
+    "change-feed"
+  ],
   "homepage": "https://mountable.io/docs",
   "license": "Apache-2.0",
   "type": "module",

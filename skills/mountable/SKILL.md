@@ -1,6 +1,6 @@
 ---
 name: mountable
-description: Give an agent sandbox a shared, persistent POSIX filesystem with Mountable. Use when files must outlive a sandbox, be shared between sandboxes or agents, or be handed from a backend to a sandbox; covers creating filesystems, minting one-time mount tickets with an API key, mounting with `mountable mount --ticket-stdin --json`, error codes and safe retries.
+description: Give an agent sandbox a shared, persistent POSIX filesystem with Mountable. Use when files must outlive a sandbox, be shared between sandboxes or agents, or be handed from a backend to a sandbox; covers creating filesystems, minting one-time mount tickets with an API key, mounting with `mountable mount --ticket-stdin --json`, error codes and safe retries, per-end-user spend caps, and signed webhooks when files change.
 ---
 
 # Mountable
@@ -158,6 +158,38 @@ A backend that only reads and writes files can skip mounting and use the
 SDKs: conditional writes with ETags, listings, and a change feed (take a
 cursor first, then list, then follow changes). Install them as
 `mountable-sdk` (`pip install mountable-sdk`, `npm install mountable-sdk`).
+
+## Limits per end user
+
+Give each end user of your app a filesystem with its own monthly spend cap
+and change rate, set through the REST API when you create it (the CLI, MCP
+server and SDKs cannot set limits yet; `ORG_ID` is in `mountable orgs list`):
+
+```sh
+curl -X POST https://mountable.io/api/v1/orgs/$ORG_ID/filesystems \
+  -H "Authorization: Bearer $MOUNTABLE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "user-42", "spending_cap_cents": 500, "mutations_per_minute": 120}'
+```
+
+`PATCH` the filesystem's URL to change a limit; `null` removes a cap. Past the
+cap, its mounts and the files API (`402 filesystem_spending_cap_reached`)
+refuse billable work, and other end users keep working. A key limited to one
+filesystem cannot raise its own limits. See https://mountable.io/docs/end-user-limits
+
+## Webhooks when files change
+
+```sh
+curl https://mountable.io/api/v1/orgs/$ORG_ID/filesystems/$FS_ID/webhooks \
+  -H "Authorization: Bearer $MOUNTABLE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/hooks/mountable", "path_prefix": "/"}'
+```
+
+The response shows the signing `secret` (`whsec_…`) once; store it. Every
+change, from mounts or the files API, then arrives in a `files.changed`
+message signed per Standard Webhooks. Verify the signature on the raw body,
+answer `2xx` within 10 seconds, apply a message only if its `data.cursor` is
+greater than the last one applied (delivery is at least once), and on
+`files.resync` list again. See https://mountable.io/docs/webhooks
 
 ## Limitations
 
