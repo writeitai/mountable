@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -31,6 +32,11 @@ func abortConnection(dir string) error {
 
 // detach has nothing left to do on macOS: the forced unmount detached dir.
 func detach(string) error { return nil }
+
+// notMounted reports whether a clean unmount failed because nothing is
+// mounted at the directory (as after macOS dropped a dead mount): the
+// kernel answers EINVAL, whatever spelling of the path was given.
+func notMounted(err error) bool { return errors.Is(err, unix.EINVAL) }
 
 // cleanUnmount unmounts dir; it fails while the mount is busy.
 func cleanUnmount(dir string) error {
@@ -101,14 +107,6 @@ func served(socket string) bool {
 	}
 	c.Close()
 	return true
-}
-
-// mountedAt reports whether the mount table lists dir as a mount point, so
-// unmounting something that is not mounted (as after macOS dropped a dead
-// mount) says so instead of failing to abort it.
-func mountedAt(dir string) bool {
-	_, ok := mountAt(dir)
-	return ok
 }
 
 // isMountPoint reports whether the mount table lists path as a mount point,

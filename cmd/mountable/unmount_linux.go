@@ -89,9 +89,9 @@ func fusermount(dir, flags string) error {
 // point; on Linux reading the link of one is harmless.
 func isMountPoint(string) bool { return false }
 
-// mountedAt leaves it to the unmount helper on Linux to report a directory
+// notMounted leaves it to the unmount helper on Linux to report a directory
 // that is not mounted.
-func mountedAt(string) bool { return true }
+func notMounted(error) bool { return false }
 
 // prepareMountPoint has nothing to do on Linux.
 func prepareMountPoint(string) error { return nil }
