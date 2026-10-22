@@ -28,15 +28,16 @@ type writeState struct {
 	prepareDelay time.Duration
 	// writeHandles are the shared write handles open, each holding its
 	// inode's lease, which this mount's own mutations of the inode wait
-	// for as for another mount's; opens and releases count them, discards
-	// the releases dropping writes, fsyncs the flushes, fsyncUids whose.
-	writeHandles                      map[uint64]uint64
-	opens, releases, discards, fsyncs int
-	fsyncUids                         []uint32
-	// fsyncErr fails flushes; fsyncGate and writeGate, while set, hold
-	// flushes and writes until closed.
-	fsyncErr             fuse.Status
-	fsyncGate, writeGate chan struct{}
+	// for as for another mount's; opens and releases count them, persists
+	// the WRITEs persisted (or failed at their entry write), persistUids
+	// whose.
+	writeHandles                        map[uint64]uint64
+	opens, releases, discards, persists int
+	persistUids                         []uint32
+	// writeErr fails WRITEs at their entry write; uploadGate and
+	// persistGate, while set, hold them before and at it until closed.
+	writeErr                fuse.Status
+	uploadGate, persistGate chan struct{}
 	// madeAttrs are what the last object made was given.
 	madeAttrs weedmount.NFSAttrs
 }
@@ -333,42 +334,44 @@ func (f *fakeEngine) NFSCloseWrite(fh weedmount.FileHandleId, discard bool) {
 	}
 }
 
-func (f *fakeEngine) Write(_ <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status) {
+// NFSWrite persists data as the engine does: uploadGate holds it before
+// its entry write, which a call whose preparation ended does not begin;
+// persistGate holds the entry write, and writeErr fails it. A failure
+// applies nothing.
+func (f *fakeEngine) NFSWrite(step weedmount.NFSStep, fh weedmount.FileHandleId, offset uint64, data []byte, uid, gid uint32) (uint32, fuse.Status) {
 	f.mu.Lock()
-	gate := f.writeGate
+	gate := f.uploadGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	if !step.Begin() {
+		return 0, weedmount.NFSRetryLater
+	}
+	f.mu.Lock()
+	gate = f.persistGate
 	f.mu.Unlock()
 	if gate != nil {
 		<-gate
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, open := f.writeHandles[in.Fh]; !open {
+	inode, open := f.writeHandles[uint64(fh)]
+	if !open {
 		return 0, fuse.EBADF
 	}
-	o := f.objects[f.paths[in.NodeId]]
+	f.persists++
+	f.persistUids = append(f.persistUids, uid)
+	if f.writeErr != fuse.OK {
+		return 0, f.writeErr
+	}
+	o := f.objects[f.paths[inode]]
 	if o == nil {
 		return 0, fuse.ENOENT
 	}
-	if end := int(in.Offset) + len(data); end > len(o.data) {
+	if end := int(offset) + len(data); end > len(o.data) {
 		o.data = append(o.data, make([]byte, end-len(o.data))...)
 	}
-	copy(o.data[in.Offset:], data)
+	copy(o.data[offset:], data)
 	return uint32(len(data)), fuse.OK
-}
-
-func (f *fakeEngine) NFSFsync(fh weedmount.FileHandleId, uid, gid uint32) fuse.Status {
-	f.mu.Lock()
-	gate := f.fsyncGate
-	f.mu.Unlock()
-	if gate != nil {
-		<-gate
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.fsyncs++
-	f.fsyncUids = append(f.fsyncUids, uid)
-	if f.fsyncErr != fuse.OK {
-		return f.fsyncErr
-	}
-	return fuse.OK
 }

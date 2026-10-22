@@ -57,10 +57,10 @@ func NewServer(c Config) (*Server, error) {
 	}, nil
 }
 
-// Flush persists every write accepted and not yet committed, and releases
-// the write handles, as a clean stop does once the mount is gone. It
-// returns how many files' accepted writes could not be persisted.
-func (s *Server) Flush() int { return s.svc.writes.flushAll() }
+// Flush releases the write handles, as a clean stop does once the mount is
+// gone. Every WRITE was persisted before its reply, so nothing is left to
+// persist.
+func (s *Server) Flush() { s.svc.writes.closeAll() }
 
 // End makes every call fail at once, before the mount is forced off: the
 // session ended, and nothing may be served from it any more. Calls being
@@ -146,10 +146,10 @@ func (s *service) admit(c *call) (reply, bool) {
 func (s *service) handle(c *call) (r reply, late <-chan reply) {
 	proc := procedures[c.proc]
 	fn := proc.fn
-	if s.readOnly && !proc.changesNothing {
+	if s.readOnly && (!proc.changesNothing || c.proc == procCommit) {
 		fn = readOnlyExport
 	}
-	return s.run(c, proc.changesNothing || proc.flush, func(o *op) reply { return fn(s, o) })
+	return s.run(c, proc.changesNothing, func(o *op) reply { return fn(s, o) })
 }
 
 // end marks the export ended and cancels the calls being worked on.
@@ -185,13 +185,11 @@ func (s *service) wait(d time.Duration) {
 
 // procedure is one NFSv3 procedure. One that changesNothing may answer
 // "retry later" at any point before the call's deadline, and is not kept in
-// the duplicate-request cache. One that is a flush (WRITE and COMMIT,
-// which only add to or persist what clients accepted) may answer "retry
-// later" at any point too, but is kept in the cache.
+// the duplicate-request cache. Every other one is a mutation, WRITE
+// included (D45), answering "retry later" only before it changes anything.
 type procedure struct {
 	fn             func(s *service, o *op) reply
 	changesNothing bool
-	flush          bool
 }
 
 var procedures = map[uint32]procedure{
@@ -202,7 +200,7 @@ var procedures = map[uint32]procedure{
 	procAccess:      {fn: (*service).access, changesNothing: true},
 	procReadlink:    {fn: (*service).readlink, changesNothing: true},
 	procRead:        {fn: (*service).read, changesNothing: true},
-	procWrite:       {fn: (*service).write, flush: true},
+	procWrite:       {fn: (*service).write},
 	procCreate:      {fn: (*service).create},
 	procMkdir:       {fn: (*service).mkdir},
 	procSymlink:     {fn: (*service).symlink},
@@ -216,7 +214,7 @@ var procedures = map[uint32]procedure{
 	procFSStat:      {fn: (*service).fsStat, changesNothing: true},
 	procFSInfo:      {fn: (*service).fsInfo, changesNothing: true},
 	procPathConf:    {fn: (*service).pathConf, changesNothing: true},
-	procCommit:      {fn: (*service).commit, flush: true},
+	procCommit:      {fn: (*service).commit, changesNothing: true},
 }
 
 // failWords is, per procedure, the size in XDR words of its failure result
