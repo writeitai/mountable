@@ -630,6 +630,32 @@ def group_writes(r):
             os.remove(path)
         finally:
             m.end()
+    # W3: a busy mount forced off keeps every write it acknowledged
+    m = mounted_with(False)
+    busy = subprocess.Popen(["/bin/sleep", "300"], cwd=m.path)
+    d = os.path.join(m.path, "g4-writes")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "w3-busy")
+    data = os.urandom(4 << 20)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.write(fd, data)
+        os.fsync(fd)
+        os.close(fd)
+        m.proc.send_signal(2)
+        code = m.wait(40)
+    finally:
+        busy.kill()
+        m.end()
+    m = mounted_with(False)
+    try:
+        import hashlib
+        got = sha(path) if os.path.exists(path) else "missing"
+        r.row("W3 a busy mount forced off (SIGINT) keeps what it acknowledged", got == hashlib.sha256(data).hexdigest(),
+              f"4 MiB written and fsynced, then SIGINT with a process inside: CLI exit {code}; after a fresh mount the data is {'all there' if got == hashlib.sha256(data).hexdigest() else got}")
+        os.remove(path)
+    finally:
+        m.end()
     rounds = int(os.environ.get("G4_W2_ROUNDS", "8"))
     for i in range(rounds):
         m = mounted_with(False)
@@ -1260,7 +1286,7 @@ def group_limits(r):
             finally:
                 m.end()
             size = stored_size(os.path.relpath(path, m.path))
-            r.row(f"Li3 byte quota, {name} requests", size is not None and size <= quota - retained and "errno 69" in ev,
+            r.row(f"Li3 byte quota, {name} requests", size is not None and size <= done and "errno 69" in ev,
                   f"byte_quota {quota} with {retained} retained; the application saw: {ev}; stored afterwards {size}")
     # Li6: the spending cap on writes
     reserved = cli_json("fs", "usage", FS)["reserved_cents"]
@@ -1272,7 +1298,7 @@ def group_limits(r):
         finally:
             m.end()
         size = stored_size(os.path.relpath(path, m.path))
-        r.row("Li6 spending cap on writes", size is not None and size < (256 << 20) and "errno" in ev,
+        r.row("Li6 spending cap on writes", size is not None and size < (256 << 20) and "errno 69" in ev,
               f"spending_cap_cents {reserved} (the reservation); 256 MiB of writes: {ev}; stored afterwards {size}")
     # Li1: the spending cap on reads of uncached data, from a file written
     # before the cap
