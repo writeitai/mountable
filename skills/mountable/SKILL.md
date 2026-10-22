@@ -195,5 +195,7 @@ once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
 
 - Linux sandboxes need FUSE: `/dev/fuse` must exist and be usable. Providers
   without FUSE cannot mount.
-- Mounting on macOS is not yet supported in sandboxes.
+- macOS sandboxes are not supported. On a Mac, `mountable mount` works
+  without installing anything; writes are slower than on Linux and macOS
+  adds `._` files (see the CLI README).
 - Deleting a filesystem is done in the console, not from the CLI.

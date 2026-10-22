@@ -9,8 +9,8 @@ uvx mountable mount <filesystem> /mnt/work             # PyPI
 curl -fsSL https://mountable.io/install.sh | sh         # installs to ~/.local/bin
 ```
 
-`mountable` is one self-contained binary; mounting needs FUSE (`/dev/fuse` on
-Linux). `mountable version` prints the CLI version and `mountable licenses` the
+`mountable` is one self-contained binary; mounting needs FUSE (`/dev/fuse`) on
+Linux, and nothing installed and no `sudo` on macOS. `mountable version` prints the CLI version and `mountable licenses` the
 third-party licenses and notices, also shipped as `THIRD_PARTY_NOTICES`.
 
 Documentation: https://mountable.io/docs

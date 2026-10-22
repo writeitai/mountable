@@ -12,8 +12,9 @@ curl -fsSL https://mountable.io/install.sh | sh     # standalone binary
 ```
 
 The CLI is one self-contained binary: it downloads nothing at mount time and
-keeps the session's credentials in memory. Mounting needs FUSE (`/dev/fuse`
-on Linux).
+keeps the session's credentials in memory. Mounting needs FUSE (`/dev/fuse`)
+on Linux; on macOS it needs nothing installed and no `sudo` (see
+[macOS](#macos)).
 
 ## Authentication
 
@@ -106,6 +107,55 @@ mountable unmount /mnt/work
 Any existing, writable directory works as the mount point; `mount` checks it
 before it uses the ticket. The ticket is read from stdin, so it never appears
 in an argument list.
+
+## macOS
+
+On a Mac (macOS 26 on Apple Silicon is what the release was qualified on),
+`mountable mount` needs no macFUSE, no kernel extension and no `sudo`. The CLI
+serves the filesystem to macOS's own NFS client over a private Unix socket
+that only you can open, and mounts it on a directory you own:
+
+```sh
+mkdir -p ~/mnt/work
+mountable mount <filesystem> ~/mnt/work        # or --ro; Ctrl-C or `mountable unmount ~/mnt/work` to stop
+```
+
+The mount shows in Finder. Another local user cannot use it: the socket is
+private, and every request is checked against your user ID. A revoked or
+expired session forces the mount off within about 15 seconds.
+
+Every write is persisted, data and the file's entry, before macOS is told it
+succeeded, so an acknowledged write survives a crash of the CLI. What that
+means in practice, and the other macOS limits:
+
+- **Write throughput is lower than on Linux:** about 7 MiB/s was measured,
+  and each write request macOS sends (up to 1 MiB) counts as one metadata
+  mutation. At the filesystem's metadata rate (1,000 a minute by default,
+  shared with all other changes) writes slow down rather than fail.
+- **File size by write pattern:** a file holds at most 9,999 chunks, and each
+  write request makes one (two if it is not aligned). That is about 9.76 GiB
+  written sequentially in 1 MiB requests, about 312 MiB in 32 KiB requests,
+  or about 9,999 appends with an `fsync` after each. Past it a write fails
+  with "file too large".
+- **A failed write is reported once per file:** macOS gives the error to
+  the first `write`, `fsync` or `close` of that file, in any process. If
+  another process (a backup tool or a file watcher, say) closes it first,
+  the writer's own `fsync` returns success for data that was not stored.
+  Writes that were acknowledged are always stored.
+- **Mapped writes:** an error writing `mmap`ed pages may not be reported by
+  `msync` or `fsync`.
+- **Forced unmounts:** when a mount is forced off (a busy unmount, a revoked
+  session, or a crashed CLI), writes macOS had not sent yet can be lost
+  without an error. A busy `mountable unmount` or Ctrl-C forces the mount off
+  at once and says so.
+- **`._` files:** NFS has no extended attributes, so macOS stores them in
+  AppleDouble `._name` files next to each file. Many tools set attributes on
+  every file they create, so expect one `._` file per file; other mounts and
+  the files API see them as ordinary files. Add `._*` to your global
+  gitignore (`git config --global core.excludesFile`).
+- **Not indexed by Spotlight**, and **locks (`flock`, `fcntl`) are local to
+  the one mount**; they do not coordinate with other Macs or Linux mounts.
+- Changes made elsewhere usually become visible within about a second.
 
 ## Skill
 
