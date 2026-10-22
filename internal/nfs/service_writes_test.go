@@ -860,3 +860,25 @@ func TestCreateLooksUpOnlyWhileWriting(t *testing.T) {
 		t.Fatalf("CREATE: %d, %d lookups", s, lookups)
 	}
 }
+
+// A CREATE answered "retry later" by the flush settling the file at its
+// name is not cached: its retransmission, same XID, is worked on again.
+func TestCreateRetryLaterIsNotCached(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	f.mu.Lock()
+	f.fsyncErr = weedmount.NFSRetryLater
+	f.mu.Unlock()
+	args := wire{}.opaque(root).str("a.txt").u32(createUnchecked).append(noAttrs)
+	if s := c.status(procCreate, args); s != uint32(nfsErrJukebox) {
+		t.Fatalf("CREATE while the flush is refused: %d", s)
+	}
+	f.mu.Lock()
+	f.fsyncErr = fuse.OK
+	f.mu.Unlock()
+	c.send(callMessage(c.xid, programNFS, 3, procCreate, 501, args))
+	if s := c.accepted(c.receive()).u32(); s != uint32(nfsOK) {
+		t.Fatalf("CREATE retransmitted: %d", s)
+	}
+}

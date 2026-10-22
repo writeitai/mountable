@@ -432,6 +432,9 @@ func (s *service) mknod(o *op) reply {
 // failureWithDir is dirFailure for a directory that may not have been
 // resolved (status STALE or BADHANDLE): no attributes then.
 func (s *service) failureWithDir(o *op, status nfsStatus, dir object) reply {
+	if status == nfsErrJukebox {
+		return s.retryLater(o.call)
+	}
 	if status == nfsErrStale || status == nfsErrBadFH || dir.inode == 0 {
 		return s.failure(o.call, status)
 	}
