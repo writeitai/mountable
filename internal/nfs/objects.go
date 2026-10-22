@@ -1,8 +1,10 @@
 package nfs
 
 import (
+	"context"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
@@ -17,7 +19,6 @@ type Engine interface {
 	Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status
 	Forget(nodeid, nlookup uint64)
 	Open(cancel <-chan struct{}, in *fuse.OpenIn, out *fuse.OpenOut) fuse.Status
-	Release(cancel <-chan struct{}, in *fuse.ReleaseIn)
 	Readlink(cancel <-chan struct{}, header *fuse.InHeader) ([]byte, fuse.Status)
 	// ReadDirectoryAfter, NamespaceEntry and ReadAs come from the engine
 	// patch set (writeitai/seaweedfs, branch mountable): a name-resuming
@@ -26,6 +27,23 @@ type Engine interface {
 	ReadDirectoryAfter(dir uint64, after string, plus bool, fits func(name string) bool, add func(*weedmount.ListedEntry) bool) (eof bool, code fuse.Status)
 	NamespaceEntry(inode uint64) (*filer_pb.Entry, fuse.Status)
 	ReadAs(cancel <-chan struct{}, in *fuse.ReadIn, buf []byte, storedInode uint64) (fuse.ReadResult, fuse.Status)
+	// The mutations of a read-write export, from the engine patch set
+	// (branch nfs-writes): each in two steps, its calls sent once.
+	NFSCreate(step weedmount.NFSStep, dir uint64, name string, mode weedmount.NFSCreateMode, attrs weedmount.NFSAttrs, verifier [8]byte, uid, gid uint32, reuse func(*filer_pb.Entry) fuse.Status) (uint64, fuse.Status)
+	NFSMkdir(step weedmount.NFSStep, dir uint64, name string, attrs weedmount.NFSAttrs, uid, gid uint32) (uint64, fuse.Status)
+	NFSSymlink(step weedmount.NFSStep, dir uint64, name, target string, attrs weedmount.NFSAttrs, uid, gid uint32) (uint64, fuse.Status)
+	NFSRemove(step weedmount.NFSStep, dir uint64, name string) fuse.Status
+	NFSRmdir(step weedmount.NFSStep, dir uint64, name string) fuse.Status
+	NFSRename(step weedmount.NFSStep, fromDir uint64, fromName string, toDir uint64, toName string) fuse.Status
+	NFSLink(step weedmount.NFSStep, source, dir uint64, name string, uid, gid uint32) fuse.Status
+	NFSSetAttr(step weedmount.NFSStep, inode uint64, attrs weedmount.NFSAttrs, guard *time.Time, clearVerifier bool) fuse.Status
+	NFSOpenForWrite(ctx context.Context, inode uint64, uid, gid uint32) (weedmount.FileHandleId, fuse.Status)
+	// NFSCloseRead and NFSCloseWrite let a handle go without flushing it.
+	NFSCloseRead(fh weedmount.FileHandleId)
+	NFSCloseWrite(fh weedmount.FileHandleId, discard bool)
+	Write(cancel <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status)
+	// NFSFsync persists a write handle; NFSRetryLater keeps its writes.
+	NFSFsync(fh weedmount.FileHandleId, uid, gid uint32) fuse.Status
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath
@@ -157,6 +175,13 @@ func (o *objects) unnamed(n name, b binding) {
 	if o.byName[n] == b {
 		delete(o.byName, n)
 	}
+}
+
+// unnamedAny forgets n, as a rename moves the name away.
+func (o *objects) unnamedAny(n name) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.byName, n)
 }
 
 // at returns the identity an inode holds now.

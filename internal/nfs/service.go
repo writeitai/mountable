@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
 // Config is one export: the engine it serves and the one user it serves it
@@ -18,11 +19,12 @@ type Config struct {
 	// refused: on the private socket, the UID comes from the kernel client
 	// acting for the real caller.
 	UID uint32
+	// ReadOnly makes every procedure that would change something answer
+	// NFS3ERR_ROFS, for a read-only session.
+	ReadOnly bool
 }
 
-// NewServer returns a server for one read-only export. The write path is
-// not implemented yet: every procedure that would change something answers
-// NFS3ERR_ROFS, and the export must be mounted read-only.
+// NewServer returns a server for one export.
 func NewServer(c Config) (*Server, error) {
 	h, err := newHandles()
 	if err != nil {
@@ -31,15 +33,20 @@ func NewServer(c Config) (*Server, error) {
 	fsid := fnv.New64a()
 	fsid.Write([]byte(c.Engine.MountRoot()))
 	s := &service{
-		engine:  c.Engine,
-		uid:     c.UID,
-		handles: h,
-		objects: newObjects(c.Engine),
-		dirs:    &directories{tables: map[object]*cookieTable{}},
-		fsid:    fsid.Sum64() | 1, // never zero
-		workers: make(chan struct{}, maxWorkers),
-		ops:     map[*op]struct{}{},
-		endCh:   make(chan struct{}),
+		engine:    c.Engine,
+		uid:       c.UID,
+		readOnly:  c.ReadOnly,
+		handles:   h,
+		exclusive: &exclusiveSet{inodes: map[uint64]struct{}{}},
+		objects:   newObjects(c.Engine),
+		dirs:      &directories{tables: map[object]*cookieTable{}},
+		fsid:      fsid.Sum64() | 1, // never zero
+		workers:   make(chan struct{}, maxWorkers),
+		ops:       map[*op]struct{}{},
+		endCh:     make(chan struct{}),
+	}
+	if s.writes, err = newWrites(s); err != nil {
+		return nil, err
 	}
 	return &Server{
 		svc:     s,
@@ -49,6 +56,11 @@ func NewServer(c Config) (*Server, error) {
 		conns:   map[net.Conn]struct{}{},
 	}, nil
 }
+
+// Flush persists every write accepted and not yet committed, and releases
+// the write handles, as a clean stop does once the mount is gone. It
+// returns how many files' accepted writes could not be persisted.
+func (s *Server) Flush() int { return s.svc.writes.flushAll() }
 
 // End makes every call fail at once, before the mount is forced off: the
 // session ended, and nothing may be served from it any more. Calls being
@@ -72,19 +84,25 @@ var (
 	// not started changing anything by then answers NFS3ERR_JUKEBOX ("retry
 	// later") and changes nothing; the client's retry starts afresh.
 	prepareBudget = 10 * time.Second
+	// releaseTime is how much of it a mutation leaves the engine to let
+	// its locks go once its change is made, before the call is answered.
+	releaseTime = weedmount.NFSReleaseTime
 )
 
 type service struct {
-	engine  Engine
-	uid     uint32
-	handles *handles
-	objects *objects
-	dirs    *directories
-	fsid    uint64
-	workers chan struct{}
-	ended   atomic.Bool
-	endCh   chan struct{} // closed by end
-	endOnce sync.Once
+	engine    Engine
+	uid       uint32
+	readOnly  bool
+	writes    *writes
+	exclusive *exclusiveSet
+	handles   *handles
+	objects   *objects
+	dirs      *directories
+	fsid      uint64
+	workers   chan struct{}
+	ended     atomic.Bool
+	endCh     chan struct{} // closed by end
+	endOnce   sync.Once
 
 	mu   sync.Mutex
 	ops  map[*op]struct{} // the calls being worked on
@@ -122,15 +140,24 @@ func (s *service) admit(c *call) (reply, bool) {
 	return reply{}, true
 }
 
-// handle works on an admitted NFS call.
-func (s *service) handle(c *call) reply {
+// handle works on an admitted NFS call. late, when not nil, delivers the
+// call's own reply after an answer of NFS3ERR_IO given while it was still
+// changing things.
+func (s *service) handle(c *call) (r reply, late <-chan reply) {
 	proc := procedures[c.proc]
-	return s.run(c, proc.changesNothing, func(o *op) reply { return proc.fn(s, o) })
+	fn := proc.fn
+	if s.readOnly && !proc.changesNothing {
+		fn = readOnlyExport
+	}
+	return s.run(c, proc.changesNothing || proc.flush, func(o *op) reply { return fn(s, o) })
 }
 
 // end marks the export ended and cancels the calls being worked on.
 func (s *service) end() {
 	s.ended.Store(true)
+	if s.writes != nil {
+		s.writes.end()
+	}
 	s.endOnce.Do(func() { close(s.endCh) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,35 +185,38 @@ func (s *service) wait(d time.Duration) {
 
 // procedure is one NFSv3 procedure. One that changesNothing may answer
 // "retry later" at any point before the call's deadline, and is not kept in
-// the duplicate-request cache.
+// the duplicate-request cache. One that is a flush (WRITE and COMMIT,
+// which only add to or persist what clients accepted) may answer "retry
+// later" at any point too, but is kept in the cache.
 type procedure struct {
 	fn             func(s *service, o *op) reply
 	changesNothing bool
+	flush          bool
 }
 
 var procedures = map[uint32]procedure{
 	procNull:        {changesNothing: true},
 	procGetAttr:     {fn: (*service).getAttr, changesNothing: true},
-	procSetAttr:     {fn: readOnlyExport},
+	procSetAttr:     {fn: (*service).setAttr},
 	procLookup:      {fn: (*service).lookup, changesNothing: true},
 	procAccess:      {fn: (*service).access, changesNothing: true},
 	procReadlink:    {fn: (*service).readlink, changesNothing: true},
 	procRead:        {fn: (*service).read, changesNothing: true},
-	procWrite:       {fn: readOnlyExport},
-	procCreate:      {fn: readOnlyExport},
-	procMkdir:       {fn: readOnlyExport},
-	procSymlink:     {fn: readOnlyExport},
-	procMknod:       {fn: readOnlyExport},
-	procRemove:      {fn: readOnlyExport},
-	procRmdir:       {fn: readOnlyExport},
-	procRename:      {fn: readOnlyExport},
-	procLink:        {fn: readOnlyExport},
+	procWrite:       {fn: (*service).write, flush: true},
+	procCreate:      {fn: (*service).create},
+	procMkdir:       {fn: (*service).mkdir},
+	procSymlink:     {fn: (*service).symlink},
+	procMknod:       {fn: (*service).mknod},
+	procRemove:      {fn: (*service).remove},
+	procRmdir:       {fn: (*service).rmdir},
+	procRename:      {fn: (*service).rename},
+	procLink:        {fn: (*service).link},
 	procReadDir:     {fn: (*service).readDir, changesNothing: true},
 	procReadDirPlus: {fn: (*service).readDirPlus, changesNothing: true},
 	procFSStat:      {fn: (*service).fsStat, changesNothing: true},
 	procFSInfo:      {fn: (*service).fsInfo, changesNothing: true},
 	procPathConf:    {fn: (*service).pathConf, changesNothing: true},
-	procCommit:      {fn: readOnlyExport},
+	procCommit:      {fn: (*service).commit, flush: true},
 }
 
 // failWords is, per procedure, the size in XDR words of its failure result
@@ -253,24 +283,25 @@ func (o *op) beginMutation() bool { return o.state.CompareAndSwap(opPreparing, o
 // then the procedure. A call still preparing at its limit (prepareBudget,
 // or rpcDeadline for a procedure that changes nothing) answers "retry later"; one
 // already changing things gets until rpcDeadline, and then answers
-// NFS3ERR_IO, since its outcome is unknown. Work that outlives its answer
-// finishes in the background, keeping its worker until it does.
-func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply {
+// NFS3ERR_IO, since its outcome is unknown; late then delivers the reply
+// the work makes, for the duplicate-request cache. Work that outlives its
+// answer finishes in the background, keeping its worker until it does.
+func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) (r reply, late <-chan reply) {
 	wait := time.NewTimer(time.Until(c.received.Add(prepareBudget)))
 	select {
 	case s.workers <- struct{}{}:
 		wait.Stop()
 	case <-wait.C:
-		return s.retryLater(c)
+		return s.retryLater(c), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	}
 	o := &op{call: c, cancel: make(chan struct{})}
 	s.mu.Lock()
 	if s.ended.Load() { // ended while the call waited for its worker
 		s.mu.Unlock()
 		<-s.workers
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	}
 	s.ops[o] = struct{}{}
 	s.work.Add(1)
@@ -294,24 +325,24 @@ func (s *service) run(c *call, changesNothing bool, fn func(o *op) reply) reply 
 	defer timer.Stop()
 	select {
 	case r := <-result:
-		return s.unlessEnded(c, r)
+		return s.unlessEnded(c, r), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	case <-timer.C:
 	}
 	if o.state.CompareAndSwap(opPreparing, opAbandoned) {
 		o.stop()
-		return s.retryLater(c)
+		return s.retryLater(c), nil
 	}
 	timer.Reset(time.Until(c.received.Add(rpcDeadline)))
 	select {
 	case r := <-result:
-		return s.unlessEnded(c, r)
+		return s.unlessEnded(c, r), nil
 	case <-s.endCh:
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), nil
 	case <-timer.C:
 		o.stop()
-		return s.failure(c, nfsErrIO)
+		return s.failure(c, nfsErrIO), result
 	}
 }
 

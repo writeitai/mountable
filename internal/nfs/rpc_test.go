@@ -334,11 +334,40 @@ func slowRemove(t *testing.T) (started, release chan struct{}) {
 	return started, release
 }
 
+// A mutation still running at its deadline is answered NFS3ERR_IO, but
+// the cache never keeps that answer: a retransmission once the work is
+// done gets the call's own reply.
+func TestDeadlineIOIsNotCached(t *testing.T) {
+	short(t, 300*time.Millisecond, 100*time.Millisecond)
+	release, done := make(chan struct{}), make(chan struct{})
+	saved := procedures[procRemove]
+	procedures[procRemove] = procedure{fn: func(s *service, o *op) reply {
+		defer close(done)
+		o.beginMutation()
+		<-release
+		return s.failure(o.call, nfsErrNotEmpty)
+	}}
+	t.Cleanup(func() { procedures[procRemove] = saved })
+	_, c := startWritable(t, newFakeEngine())
+	args := wire{}.opaque(c.root()).str("x")
+	c.send(callMessage(99, programNFS, 3, procRemove, 501, args))
+	if got := c.receive(); !bytes.HasPrefix(got[24:], be32(uint32(nfsErrIO))) {
+		t.Fatalf("at the deadline % x", got)
+	}
+	close(release)
+	<-done
+	time.Sleep(50 * time.Millisecond) // the cache takes the late reply
+	c.send(callMessage(99, programNFS, 3, procRemove, 501, args))
+	if got := c.receive(); !bytes.HasPrefix(got[24:], be32(uint32(nfsErrNotEmpty))) {
+		t.Fatalf("the retransmission got % x", got)
+	}
+}
+
 // A client that reconnects while its call is still running resends it on
 // the new connection, and gets the answer there, without a second run.
 func TestRetransmissionAfterReconnect(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	args := wire{}.opaque(fh).str("x")
 	c.send(callMessage(88, programNFS, 3, procRemove, 501, args))
@@ -464,7 +493,7 @@ func TestStatusMapping(t *testing.T) {
 // would resend it under a new XID and it would run twice.
 func TestDuplicatesUnderSaturation(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	args := wire{}.opaque(fh).str("x")
 	c.send(callMessage(60, programNFS, 3, procCreate, 501, args))
@@ -530,7 +559,7 @@ func TestSimultaneousCopiesAtTheLastSlot(t *testing.T) {
 // left, both answered by the one run.
 func TestSimultaneousCopiesOverTheWire(t *testing.T) {
 	started, release := slowRemove(t)
-	srv, c := startServer(t, newFakeEngine())
+	srv, c := startWritable(t, newFakeEngine())
 	fh := c.root()
 	for range maxPending - 1 {
 		srv.pending <- struct{}{}

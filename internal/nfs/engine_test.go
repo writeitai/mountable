@@ -40,6 +40,8 @@ type fakeEngine struct {
 	namespaceFails bool
 	namespaceGate  chan struct{}
 	getAttrs       int // GetAttr calls begun
+	// The write path's: see engine_writes_test.go.
+	writeState
 }
 
 type fakeObject struct {
@@ -48,6 +50,8 @@ type fakeObject struct {
 	data   []byte
 	target string
 	uid    uint32 // the owner, if not the mount's user
+	// verifier is an EXCLUSIVE create's, until a SETATTR clears it.
+	verifier *[8]byte
 }
 
 func newFakeEngine() *fakeEngine {
@@ -230,8 +234,6 @@ func (f *fakeEngine) ReadAs(_ <-chan struct{}, in *fuse.ReadIn, buf []byte, stor
 	n := copy(buf, o.data[min(int(in.Offset), len(o.data)):])
 	return fuse.ReadResultData(buf[:n]), fuse.OK
 }
-
-func (f *fakeEngine) Release(<-chan struct{}, *fuse.ReleaseIn) {}
 
 func (f *fakeEngine) Readlink(_ <-chan struct{}, h *fuse.InHeader) ([]byte, fuse.Status) {
 	if f.beforeReadlink != nil {

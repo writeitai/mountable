@@ -102,10 +102,22 @@ type testClient struct {
 	xid  uint32
 }
 
-// startServer serves engine to the mounting user 501 over a Unix socket.
+// startServer serves engine as a read-only export, to the mounting user
+// 501 over a Unix socket.
 func startServer(t *testing.T, engine Engine) (*Server, *testClient) {
 	t.Helper()
-	srv, err := NewServer(Config{Engine: engine, UID: 501})
+	return startExport(t, Config{Engine: engine, UID: 501, ReadOnly: true})
+}
+
+// startWritable serves engine as a read-write export.
+func startWritable(t *testing.T, engine Engine) (*Server, *testClient) {
+	t.Helper()
+	return startExport(t, Config{Engine: engine, UID: 501})
+}
+
+func startExport(t *testing.T, config Config) (*Server, *testClient) {
+	t.Helper()
+	srv, err := NewServer(config)
 	if err != nil {
 		t.Fatal(err)
 	}

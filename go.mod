@@ -8,6 +8,7 @@ require (
 	github.com/seaweedfs/seaweedfs v0.0.0-20260928155340-530be3e37337
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.85.0-dev.0.20260915183914-4e49413dcab7
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -64,7 +65,6 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/grpc/security/advancedtls v1.0.0 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
 )
 
-replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261021105823-dcf27c400504
+replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261022085940-a7c7ef8a4431

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
 )
 
@@ -248,7 +249,7 @@ func (s *service) access(o *op) reply {
 	e := &encoder{}
 	e.uint32(uint32(nfsOK))
 	putPostOpAttr(e, &obj.attr, s.fsid)
-	e.uint32(granted(o.cred, &obj.attr, asked))
+	e.uint32(granted(o.cred, &obj.attr, asked, !s.readOnly))
 	return reply{body: e.buf}
 }
 
@@ -343,7 +344,9 @@ func (s *service) readData(o *op, obj object, offset uint64, count uint32) ([]by
 		}
 		return nil, statusOf(st)
 	}
-	defer s.engine.Release(o.cancel, &fuse.ReleaseIn{InHeader: h, Fh: opened.Fh, Flags: syscall.O_RDONLY})
+	// Let go without a flush: what the handle holds dirty is the shared
+	// write handle's.
+	defer s.engine.NFSCloseRead(weedmount.FileHandleId(opened.Fh))
 	if status := s.still(o, obj); status != nfsOK {
 		return nil, status
 	}

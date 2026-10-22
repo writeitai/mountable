@@ -50,24 +50,21 @@ type engine struct {
 	closeOnce sync.Once
 }
 
-// attach serves wfs on a private socket and mounts it at c.dir. The write
-// path is not implemented yet, so every mount is read-only.
+// attach serves wfs on a private socket and mounts it at c.dir, read-only
+// for a read-only session.
 func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, error) {
-	if !c.readOnly {
-		diagnose("read-write mounts are not available on macOS yet; mounting read-only")
-	}
 	socketDir, err := makeSocketDir(c.cacheDir)
 	if err != nil {
 		return nil, fmt.Errorf("creating the NFS socket's directory: %w", err)
 	}
-	server, err := nfs.NewServer(nfs.Config{Engine: wfs, UID: uint32(os.Getuid())})
+	server, err := nfs.NewServer(nfs.Config{Engine: wfs, UID: uint32(os.Getuid()), ReadOnly: c.readOnly})
 	if err != nil {
 		os.RemoveAll(socketDir)
 		return nil, err
 	}
 	e := &engine{
 		dir:       c.dir,
-		readOnly:  true,
+		readOnly:  c.readOnly,
 		wfs:       wfs,
 		server:    server,
 		socketDir: socketDir,
@@ -309,9 +306,13 @@ func (e *engine) unmount() error {
 	return nil
 }
 
-// flush runs once the mount is gone: it waits for pending writes, stops
-// serving and drops the local caches.
+// flush runs once the mount is gone: it persists the writes accepted and
+// not committed, waits for pending ones, stops serving and drops the local
+// caches.
 func (e *engine) flush() {
+	if lost := e.server.Flush(); lost > 0 {
+		diagnose("writes to %d files could not be persisted", lost)
+	}
 	e.wfs.WaitForAsyncFlush()
 	e.close()
 	e.wfs.ClearCacheDir()

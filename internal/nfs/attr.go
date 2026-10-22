@@ -99,9 +99,9 @@ func allowed(cred credential, a *fuse.Attr, want uint32) bool {
 }
 
 // granted is ACCESS's answer: of the rights asked for, those cred has on an
-// object with attributes a. The export is read-only, so modifying,
-// extending and deleting are never granted.
-func granted(cred credential, a *fuse.Attr, asked uint32) uint32 {
+// object with attributes a. On a read-only export, modifying, extending
+// and deleting are never granted.
+func granted(cred credential, a *fuse.Attr, asked uint32, writable bool) uint32 {
 	var g uint32
 	if allowed(cred, a, permRead) {
 		g |= accessRead
@@ -112,6 +112,13 @@ func granted(cred credential, a *fuse.Attr, asked uint32) uint32 {
 		} else {
 			g |= accessExecute
 		}
+	}
+	switch {
+	case !writable:
+	case isDir(a) && allowed(cred, a, permWrite|permExecute):
+		g |= accessModify | accessExtend | accessDelete
+	case !isDir(a) && allowed(cred, a, permWrite):
+		g |= accessModify | accessExtend
 	}
 	return g & asked
 }

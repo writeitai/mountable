@@ -67,6 +67,7 @@ const (
 	nfsErrBadCook  nfsStatus = 10003
 	nfsErrNotSupp  nfsStatus = 10004
 	nfsErrTooSmall nfsStatus = 10005
+	nfsErrBadType  nfsStatus = 10007
 	nfsErrJukebox  nfsStatus = 10008
 )
 
