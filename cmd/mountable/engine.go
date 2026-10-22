@@ -134,6 +134,11 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		// adopts the inode the filer stored, on every platform; the
 		// writeback cache stays off (D43, architecture §4 obligation 13).
 		EagerFilerCreate: true,
+		// A macOS WRITE is write-through (D45): a refusal the gateway
+		// made final is answered at once instead of retried for seconds
+		// while the file's other writes wait. Linux keeps the engine's
+		// retries.
+		RefusalsAreFinal: runtime.GOOS == "darwin",
 	})
 	parent, name := util.FullPath(c.root).DirAndName()
 	if err := unlessCancelled(ctx, func() error {

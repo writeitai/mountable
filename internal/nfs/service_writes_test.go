@@ -2,7 +2,6 @@ package nfs
 
 import (
 	"bytes"
-	"encoding/binary"
 	"syscall"
 	"testing"
 	"time"
@@ -191,104 +190,16 @@ func TestLinkSharesTheHandle(t *testing.T) {
 	}
 }
 
-// WRITE UNSTABLE is accepted and not persisted; COMMIT persists it, with
-// the same verifier; a FILE_SYNC WRITE is persisted before its reply.
-func TestWriteAndCommit(t *testing.T) {
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	write := func(offset uint64, data string, stable uint32) (uint32, []byte) {
-		r := c.call(procWrite, wire{}.opaque(fh).u64(offset).u32(uint32(len(data))).u32(stable).str(data))
-		if s := r.u32(); s != uint32(nfsOK) {
-			t.Fatalf("WRITE: %d", s)
-		}
-		r.wcc()
-		if n := r.u32(); n != uint32(len(data)) {
-			t.Fatalf("wrote %d", n)
-		}
-		committed := r.u32()
-		return committed, append([]byte(nil), r.b[:8]...)
-	}
-	committed, verifier := write(0, "HELLO", stableUnstable)
-	if committed != stableUnstable || f.fsyncsNow() != 0 {
-		t.Fatalf("UNSTABLE: committed %d, %d flushes", committed, f.fsyncsNow())
-	}
-	r := c.call(procCommit, wire{}.opaque(fh).u64(0).u32(0))
-	if s := r.u32(); s != uint32(nfsOK) {
-		t.Fatalf("COMMIT: %d", s)
-	}
-	r.wcc()
-	if !bytes.Equal(r.b, verifier) || f.fsyncsNow() != 1 {
-		t.Fatalf("COMMIT verifier % x, WRITE's % x, %d flushes", r.b, verifier, f.fsyncsNow())
-	}
-	if committed, _ := write(5, " world", stableFileSync); committed != stableFileSync || f.fsyncsNow() != 2 {
-		t.Fatalf("FILE_SYNC: committed %d, %d flushes", committed, f.fsyncsNow())
-	}
-	f.mu.Lock()
-	data := string(f.objects[f.root+"/a.txt"].data)
-	f.mu.Unlock()
-	if data != "HELLO world" {
-		t.Fatalf("data %q", data)
-	}
-}
-
-func (f *fakeEngine) fsyncsNow() int {
+func (f *fakeEngine) persistsNow() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.fsyncs
-}
-
-// A flush that fails while idle is kept until a COMMIT reports it, once;
-// the idle handle is released with its lease.
-func TestIdleFlushFailureIsReportedByCommit(t *testing.T) {
-	saved := writeIdle
-	writeIdle = 50 * time.Millisecond
-	defer func() { writeIdle = saved }()
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	f.mu.Lock()
-	f.fsyncErr = fuse.Status(syscall.EDQUOT)
-	f.mu.Unlock()
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	for deadline := time.Now().Add(5 * time.Second); f.releasesNow() == 0; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the idle handle was not released")
-		}
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
-		t.Fatalf("COMMIT after the failed flush: %d", s)
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("the next COMMIT: %d", s)
-	}
+	return f.persists
 }
 
 func (f *fakeEngine) releasesNow() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.releases
-}
-
-// A COMMIT whose flush outlasts the call answers "retry later"; the retry
-// waits for that flush and reports it.
-func TestLongCommitAcrossRetries(t *testing.T) {
-	short(t, 1200*time.Millisecond, 200*time.Millisecond)
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	gate := make(chan struct{})
-	f.mu.Lock()
-	f.fsyncGate = gate
-	f.mu.Unlock()
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrJukebox) {
-		t.Fatalf("COMMIT during the flush: %d", s)
-	}
-	close(gate)
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("COMMIT retried: %d", s)
-	}
-	if f.fsyncsNow() != 1 {
-		t.Fatalf("%d flushes", f.fsyncsNow())
-	}
 }
 
 // CREATE, REMOVE, SETATTR, RENAME and LINK held up by another mount's
@@ -388,20 +299,20 @@ func TestMutationRights(t *testing.T) {
 	}
 }
 
-// A clean stop persists what was accepted and not committed, and lets the
-// write handles go.
+// A clean stop lets the write handles go; every WRITE was persisted
+// before its reply.
 func TestFlushOnStop(t *testing.T) {
 	f, srv, c, root := writable(t)
 	fh, _ := c.lookup(root, "a.txt")
 	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
 	srv.Flush()
-	if f.fsyncsNow() != 1 || f.releasesNow() != 1 {
-		t.Fatalf("%d flushes, %d releases", f.fsyncsNow(), f.releasesNow())
+	if f.persistsNow() != 1 || f.releasesNow() != 1 {
+		t.Fatalf("%d persisted, %d releases", f.persistsNow(), f.releasesNow())
 	}
 }
 
-// A REMOVE persists the file's accepted writes and lets its write handle
-// go before the name goes.
+// A REMOVE lets the file's write handle, and with it the lease, go before
+// the name goes.
 func TestRemoveSettlesWrites(t *testing.T) {
 	f, _, c, root := writable(t)
 	fh, _ := c.lookup(root, "a.txt")
@@ -409,8 +320,8 @@ func TestRemoveSettlesWrites(t *testing.T) {
 	if s := c.status(procRemove, wire{}.opaque(root).str("a.txt")); s != uint32(nfsOK) {
 		t.Fatalf("REMOVE: %d", s)
 	}
-	if f.fsyncsNow() != 1 || f.releasesNow() != 1 {
-		t.Fatalf("%d flushes, %d releases", f.fsyncsNow(), f.releasesNow())
+	if f.persistsNow() != 1 || f.releasesNow() != 1 {
+		t.Fatalf("%d persisted, %d releases", f.persistsNow(), f.releasesNow())
 	}
 }
 
@@ -435,8 +346,7 @@ func TestRemovedNamesAreSingleNames(t *testing.T) {
 
 // UNCHECKED CREATE of an existing name: another user's read-only file is
 // not truncated, a directory is no file, and a size past the limit is
-// refused; the caller's own file is truncated, its writes persisted
-// first.
+// refused; the caller's own file is truncated.
 func TestUncheckedCreateOfAnExistingFile(t *testing.T) {
 	f, _, c, root := writable(t)
 	f.add("theirs", 1020, syscall.S_IFREG|0o444, "keep").uid = 502
@@ -460,86 +370,13 @@ func TestUncheckedCreateOfAnExistingFile(t *testing.T) {
 	f.mu.Lock()
 	theirs, mine := string(f.objects[f.root+"/theirs"].data), len(f.objects[f.root+"/a.txt"].data)
 	f.mu.Unlock()
-	if theirs != "keep" || mine != 0 || f.fsyncsNow() != 1 {
-		t.Fatalf("theirs %q, mine %d bytes, %d flushes", theirs, mine, f.fsyncsNow())
+	if theirs != "keep" || mine != 0 || f.releasesNow() != 1 {
+		t.Fatalf("theirs %q, mine %d bytes, %d releases", theirs, mine, f.releasesNow())
 	}
 }
 
-// A handle that took writeFlushBytes flushes at once and keeps its handle
-// and lease for the writes that follow.
-func TestFlushAfterManyBytesKeepsTheHandle(t *testing.T) {
-	saved := writeFlushBytes
-	writeFlushBytes = 4
-	defer func() { writeFlushBytes = saved }()
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(8).u32(stableUnstable).str("12345678"))
-	for deadline := time.Now().Add(5 * time.Second); f.fsyncsNow() == 0; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("no flush")
-		}
-	}
-	c.call(procWrite, wire{}.opaque(fh).u64(8).u32(1).u32(stableUnstable).str("9"))
-	f.mu.Lock()
-	opens, releases := f.opens, f.releases
-	f.mu.Unlock()
-	if opens != 1 || releases != 0 {
-		t.Fatalf("%d opens, %d releases", opens, releases)
-	}
-}
-
-// A flush failing in a SETATTR's preparation that was already answered
-// "retry later" is not lost: the next COMMIT reports it.
-func TestSettleFailureAnsweredLaterIsKept(t *testing.T) {
-	short(t, 1500*time.Millisecond, 200*time.Millisecond)
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	gate := make(chan struct{})
-	f.mu.Lock()
-	f.fsyncGate, f.fsyncErr = gate, fuse.Status(syscall.EDQUOT)
-	f.mu.Unlock()
-	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsErrJukebox) {
-		t.Fatalf("SETATTR during the flush: %d", s)
-	}
-	close(gate)
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
-		t.Fatalf("COMMIT: %d", s)
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("COMMIT again: %d", s)
-	}
-}
-
-// A failed flush lets its handle go: the next WRITE opens a fresh one,
-// and the failure is reported once.
-func TestFailedFlushReleasesTheHandle(t *testing.T) {
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	f.mu.Lock()
-	f.fsyncErr = fuse.Status(syscall.EDQUOT)
-	f.mu.Unlock()
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
-		t.Fatalf("COMMIT: %d", s)
-	}
-	f.mu.Lock()
-	f.fsyncErr = fuse.OK
-	f.mu.Unlock()
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("y"))
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("COMMIT after the new write: %d", s)
-	}
-	f.mu.Lock()
-	opens, releases := f.opens, f.releases
-	f.mu.Unlock()
-	if opens != 2 || releases != 1 {
-		t.Fatalf("%d opens, %d releases", opens, releases)
-	}
-}
-
-// An export that ended flushes nothing more: the idle flush is stopped.
-func TestEndStopsIdleFlushes(t *testing.T) {
+// An export that ended changes nothing more: the idle release is stopped.
+func TestEndStopsIdleReleases(t *testing.T) {
 	saved := writeIdle
 	writeIdle = 50 * time.Millisecond
 	defer func() { writeIdle = saved }()
@@ -548,8 +385,8 @@ func TestEndStopsIdleFlushes(t *testing.T) {
 	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
 	srv.End()
 	time.Sleep(200 * time.Millisecond)
-	if f.fsyncsNow() != 0 {
-		t.Fatalf("%d flushes after End", f.fsyncsNow())
+	if f.releasesNow() != 0 {
+		t.Fatalf("%d releases after End", f.releasesNow())
 	}
 }
 
@@ -605,12 +442,12 @@ func TestChownDropsSetIDBits(t *testing.T) {
 	}
 }
 
-// A WRITE of no bytes past the end, even FILE_SYNC, leaves the file as
-// it is and answers with the stability asked for.
+// A WRITE of no bytes past the end leaves the file as it is, takes no
+// write handle or lease, and answers FILE_SYNC.
 func TestEmptyWriteChangesNothing(t *testing.T) {
 	f, _, c, root := writable(t)
 	fh, _ := c.lookup(root, "a.txt")
-	r := c.call(procWrite, wire{}.opaque(fh).u64(100).u32(0).u32(stableFileSync).str(""))
+	r := c.call(procWrite, wire{}.opaque(fh).u64(100).u32(0).u32(stableUnstable).str(""))
 	if s := r.u32(); s != uint32(nfsOK) {
 		t.Fatalf("WRITE: %d", s)
 	}
@@ -619,10 +456,23 @@ func TestEmptyWriteChangesNothing(t *testing.T) {
 		t.Fatalf("wrote %d, committed %d", n, committed)
 	}
 	f.mu.Lock()
-	size := len(f.objects[f.root+"/a.txt"].data)
+	size, opens := len(f.objects[f.root+"/a.txt"].data), f.opens
 	f.mu.Unlock()
-	if size != len("hello world") {
-		t.Fatalf("the file is %d bytes", size)
+	if size != len("hello world") || opens != 0 {
+		t.Fatalf("the file is %d bytes; %d write handles opened", size, opens)
+	}
+}
+
+// A WRITE to a file replaced elsewhere (ESTALE from the engine) answers
+// STALE, so the client drops the handle.
+func TestWriteToAReplacedFileIsStale(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	f.mu.Lock()
+	f.writeErr = fuse.Status(syscall.ESTALE)
+	f.mu.Unlock()
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply(); s != uint32(nfsErrStale) {
+		t.Fatalf("WRITE: %d", s)
 	}
 }
 
@@ -640,66 +490,8 @@ func TestRenameDotNames(t *testing.T) {
 	}
 }
 
-// A mutation whose settling flush fails is still applied: the failure
-// stays for COMMIT, which reports it once, so no COMMIT succeeds over the
-// lost writes.
-func TestSettleLeavesItsFailureToCommit(t *testing.T) {
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	f.mu.Lock()
-	f.fsyncErr = fuse.Status(syscall.EDQUOT)
-	f.mu.Unlock()
-	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("SETATTR: %d", s)
-	}
-	f.mu.Lock()
-	mode := f.objects[f.root+"/a.txt"].mode & 0o7777
-	f.mu.Unlock()
-	if mode != 0o600 {
-		t.Fatalf("mode %o", mode)
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
-		t.Fatalf("COMMIT: %d", s)
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
-		t.Fatalf("COMMIT again: %d", s)
-	}
-}
-
-// A WRITE arriving while a mutation settles the file waits for the
-// mutation, instead of taking the file's lease back from it.
-func TestWritesWaitForTheMutationSettlingThem(t *testing.T) {
-	short(t, 1500*time.Millisecond, 500*time.Millisecond)
-	f, srv, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	gate := make(chan struct{})
-	f.mu.Lock()
-	f.fsyncGate, f.prepareDelay = gate, 100*time.Millisecond
-	f.mu.Unlock()
-	setAttr := make(chan []byte, 1)
-	go func() {
-		c.send(callMessage(c.xid+1, programNFS, 3, procSetAttr, 501, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)))
-		setAttr <- c.receive()
-	}()
-	time.Sleep(50 * time.Millisecond) // settling, held at the gate
-	other := dial(t, srv.listener.Addr().String())
-	other.xid = 5000
-	other.send(callMessage(5001, programNFS, 3, procWrite, 501, wire{}.opaque(fh).u64(1).u32(1).u32(stableUnstable).str("y")))
-	time.Sleep(50 * time.Millisecond) // the WRITE waits for the writer
-	close(gate)
-	// The status follows the 24-byte accepted reply header.
-	if s := binary.BigEndian.Uint32((<-setAttr)[24:]); s != uint32(nfsOK) {
-		t.Fatalf("SETATTR: %d", s)
-	}
-	if s := binary.BigEndian.Uint32(other.receive()[24:]); s != uint32(nfsOK) {
-		t.Fatalf("WRITE: %d", s)
-	}
-}
-
-// CREATE in any mode of a name whose file this mount is writing settles
-// that file first, so the create's own lease is free.
+// CREATE in any mode of a name whose file this mount is writing lets that
+// file's write handle go first, so the create's own lease is free.
 func TestCreateSettlesTheFileAtItsName(t *testing.T) {
 	short(t, 1500*time.Millisecond, 300*time.Millisecond)
 	f, _, c, root := writable(t)
@@ -712,8 +504,8 @@ func TestCreateSettlesTheFileAtItsName(t *testing.T) {
 	if s := c.status(procCreate, wire{}.opaque(root).str("a.txt").u32(createUnchecked).append(noAttrs)); s != uint32(nfsOK) {
 		t.Fatalf("CREATE UNCHECKED: %d", s)
 	}
-	if f.fsyncsNow() != 2 {
-		t.Fatalf("%d flushes", f.fsyncsNow())
+	if f.releasesNow() != 2 {
+		t.Fatalf("%d releases", f.releasesNow())
 	}
 }
 
@@ -743,74 +535,8 @@ func TestCreatesKeepTheCallersOwnership(t *testing.T) {
 	}
 }
 
-// A flush the gateway asks to retry later keeps the writes: COMMIT and a
-// mutation settling them answer "retry later", and a retry flushes them.
-func TestFlushToRetryLaterKeepsTheWrites(t *testing.T) {
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	f.mu.Lock()
-	f.fsyncErr = fuse.Status(syscall.EAGAIN)
-	f.mu.Unlock()
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrJukebox) {
-		t.Fatalf("COMMIT: %d", s)
-	}
-	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsErrJukebox) {
-		t.Fatalf("SETATTR: %d", s)
-	}
-	f.mu.Lock()
-	f.fsyncErr = fuse.OK
-	releases := f.releases
-	f.mu.Unlock()
-	if releases != 0 {
-		t.Fatalf("%d releases", releases)
-	}
-	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) || f.fsyncsNow() != 3 {
-		t.Fatalf("COMMIT retried: %d, %d flushes", s, f.fsyncsNow())
-	}
-}
-
-// A clean stop counts the files whose accepted writes it could not
-// persist, dropping them.
-func TestFlushOnStopCountsWhatItLost(t *testing.T) {
-	f, srv, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	f.mu.Lock()
-	f.fsyncErr = fuse.Status(syscall.EAGAIN)
-	f.mu.Unlock()
-	if lost := srv.Flush(); lost != 1 {
-		t.Fatalf("%d lost", lost)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.discards != 1 {
-		t.Fatalf("%d discards", f.discards)
-	}
-}
-
-// An idle flush is its last writer's, as a COMMIT is.
-func TestIdleFlushIsTheWritersOwn(t *testing.T) {
-	saved := writeIdle
-	writeIdle = 50 * time.Millisecond
-	defer func() { writeIdle = saved }()
-	f, _, c, root := writable(t)
-	fh, _ := c.lookup(root, "a.txt")
-	c.callAs(0, procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
-	for deadline := time.Now().Add(5 * time.Second); f.releasesNow() == 0; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the idle handle was not released")
-		}
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.fsyncUids) != 1 || f.fsyncUids[0] != 0 {
-		t.Fatalf("flushed as %v", f.fsyncUids)
-	}
-}
-
-// An idle flush whose time came while a WRITE used the writer waits for
-// the idle time that WRITE started.
+// An idle release whose time came while a WRITE used the writer waits
+// for the idle time that WRITE started.
 func TestIdleTimeRestartsWithEachWrite(t *testing.T) {
 	saved := writeIdle
 	writeIdle = 300 * time.Millisecond
@@ -820,7 +546,7 @@ func TestIdleTimeRestartsWithEachWrite(t *testing.T) {
 	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
 	gate := make(chan struct{})
 	f.mu.Lock()
-	f.writeGate = gate
+	f.uploadGate = gate
 	f.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
@@ -829,7 +555,7 @@ func TestIdleTimeRestartsWithEachWrite(t *testing.T) {
 	}()
 	time.Sleep(400 * time.Millisecond) // the first idle time passes
 	f.mu.Lock()
-	f.writeGate = nil
+	f.uploadGate = nil
 	f.mu.Unlock()
 	close(gate)
 	<-done
@@ -861,24 +587,131 @@ func TestCreateLooksUpOnlyWhileWriting(t *testing.T) {
 	}
 }
 
-// A CREATE answered "retry later" by the flush settling the file at its
-// name is not cached: its retransmission, same XID, is worked on again.
-func TestCreateRetryLaterIsNotCached(t *testing.T) {
+// writeReply reads a WRITE's result: its status, and when it succeeded
+// the count, the stability and the verifier.
+func (r *replyReader) writeReply() (status, count, committed uint32, verifier []byte) {
+	status = r.u32()
+	r.wcc()
+	if status != uint32(nfsOK) {
+		return status, 0, 0, nil
+	}
+	count, committed = r.u32(), r.u32()
+	return status, count, committed, append([]byte(nil), r.b[:8]...)
+}
+
+func (f *fakeEngine) dataOf(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return string(f.objects[f.root+"/"+name].data)
+}
+
+// Every WRITE, whatever stability it asks for, is persisted before its
+// reply, which says FILE_SYNC with this process's verifier; COMMIT then
+// has nothing to do and answers with the same verifier (D45).
+func TestWritesAreWriteThrough(t *testing.T) {
 	f, _, c, root := writable(t)
 	fh, _ := c.lookup(root, "a.txt")
-	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	var verifiers [][]byte
+	for i, stable := range []uint32{stableUnstable, stableDataSync, stableFileSync} {
+		s, n, committed, v := c.call(procWrite, wire{}.opaque(fh).u64(uint64(i)).u32(1).u32(stable).str("XYZ"[i:i+1])).writeReply()
+		if s != uint32(nfsOK) || n != 1 || committed != stableFileSync || f.persistsNow() != i+1 {
+			t.Fatalf("WRITE asking %d: status %d, %d bytes, committed %d, %d persisted", stable, s, n, committed, f.persistsNow())
+		}
+		verifiers = append(verifiers, v)
+	}
+	if got := f.dataOf("a.txt"); got != "XYZlo world" {
+		t.Fatalf("data %q", got)
+	}
+	r := c.call(procCommit, wire{}.opaque(fh).u64(0).u32(0))
+	if s := r.u32(); s != uint32(nfsOK) {
+		t.Fatalf("COMMIT: %d", s)
+	}
+	r.wcc()
+	if !bytes.Equal(r.b, verifiers[0]) || !bytes.Equal(verifiers[1], verifiers[0]) || f.persistsNow() != 3 {
+		t.Fatalf("COMMIT verifier % x, WRITEs' % x, %d persisted", r.b, verifiers, f.persistsNow())
+	}
+}
+
+// A WRITE that fails answers its own status and applies nothing, and lets
+// its handle go; the next WRITE opens a fresh one and is persisted alone.
+func TestFailedWriteLeavesNothing(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
 	f.mu.Lock()
-	f.fsyncErr = weedmount.NFSRetryLater
+	f.writeErr = fuse.Status(syscall.EDQUOT)
 	f.mu.Unlock()
-	args := wire{}.opaque(root).str("a.txt").u32(createUnchecked).append(noAttrs)
-	if s := c.status(procCreate, args); s != uint32(nfsErrJukebox) {
-		t.Fatalf("CREATE while the flush is refused: %d", s)
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply(); s != uint32(nfsErrDQuot) {
+		t.Fatalf("WRITE: %d", s)
 	}
 	f.mu.Lock()
-	f.fsyncErr = fuse.OK
+	f.writeErr = fuse.OK
 	f.mu.Unlock()
-	c.send(callMessage(c.xid, programNFS, 3, procCreate, 501, args))
-	if s := c.accepted(c.receive()).u32(); s != uint32(nfsOK) {
-		t.Fatalf("CREATE retransmitted: %d", s)
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(1).u32(1).u32(stableUnstable).str("Y")).writeReply(); s != uint32(nfsOK) {
+		t.Fatalf("the next WRITE: %d", s)
+	}
+	f.mu.Lock()
+	opens, releases := f.opens, f.releases
+	f.mu.Unlock()
+	if got := f.dataOf("a.txt"); got != "hYllo world" || opens != 2 || releases != 1 {
+		t.Fatalf("data %q, %d opens, %d releases", got, opens, releases)
+	}
+}
+
+// A WRITE still waiting before its entry write when its preparation budget
+// runs out answers "retry later", and nothing of it is persisted; its
+// retry is.
+func TestWriteRetryLaterBeforeItsEntryWrite(t *testing.T) {
+	short(t, 1500*time.Millisecond, 200*time.Millisecond)
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.uploadGate = gate
+	f.mu.Unlock()
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply(); s != uint32(nfsErrJukebox) {
+		t.Fatalf("WRITE: %d", s)
+	}
+	f.mu.Lock()
+	f.uploadGate = nil
+	f.mu.Unlock()
+	close(gate)
+	time.Sleep(50 * time.Millisecond) // the abandoned WRITE finishes
+	if got := f.dataOf("a.txt"); got != "hello world" || f.persistsNow() != 0 {
+		t.Fatalf("data %q, %d persisted", got, f.persistsNow())
+	}
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply(); s != uint32(nfsOK) || f.dataOf("a.txt") != "Xello world" {
+		t.Fatalf("the retry: %d, data %q", s, f.dataOf("a.txt"))
+	}
+}
+
+// A WRITE whose entry write outlasts the call answers IO, never "retry
+// later": it is a mutation, so a retransmission waits for its work and
+// gets the reply it made, and it is applied once.
+func TestWriteIsAMutation(t *testing.T) {
+	short(t, 600*time.Millisecond, 200*time.Millisecond)
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.persistGate = gate
+	f.mu.Unlock()
+	args := wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")
+	if s, _, _, _ := c.call(procWrite, args).writeReply(); s != uint32(nfsErrIO) {
+		t.Fatalf("WRITE past its deadline: %d", s)
+	}
+	close(gate)
+	time.Sleep(50 * time.Millisecond) // its work finishes, persisting it
+	c.send(callMessage(c.xid, programNFS, 3, procWrite, 501, args))
+	if s, _, _, _ := c.accepted(c.receive()).writeReply(); s != uint32(nfsOK) || f.persistsNow() != 1 {
+		t.Fatalf("retransmitted: %d, %d persisted", s, f.persistsNow())
+	}
+}
+
+// COMMIT on a read-only export is ROFS, as every other change is.
+func TestReadOnlyCommit(t *testing.T) {
+	_, c := startServer(t, sampleEngine())
+	fh, _ := c.lookup(c.root(), "a.txt")
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrROFS) {
+		t.Fatalf("COMMIT: %d", s)
 	}
 }

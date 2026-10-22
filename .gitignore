@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .venv/
 node_modules/
+/cmd/mountable/mountable

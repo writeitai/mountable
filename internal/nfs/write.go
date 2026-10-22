@@ -11,17 +11,14 @@ import (
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
-// WRITE and COMMIT (design §4, "Writes"). A WRITE adds its data to one
-// shared WFS write handle per dirty inode, holding the inode's -dlm write
-// lease, and replies UNSTABLE with this process's write verifier. COMMIT,
-// and a WRITE asking for DATA_SYNC or FILE_SYNC, waits for WFS to persist
-// the chunks and the entry, then replies FILE_SYNC. A dirty handle also
-// flushes once idle for writeIdle, and once writeFlushBytes were written
-// to it, so data reaches whole chunks without one entry write per request;
-// a clean, idle handle is released with its lease. A failed flush is kept,
-// sticky, until a COMMIT or stable WRITE reports it: a COMMIT never
-// succeeds later because its handle went away. A flush the gateway asks
-// to retry later keeps what it could not persist, to be flushed again.
+// WRITE and COMMIT (design §4, "Writes"; D45). WRITE is write-through: it
+// is persisted through one shared WFS write handle per inode, data and
+// entry, and only then answered FILE_SYNC with this process's write
+// verifier. A failure is that WRITE's own, because macOS's client never
+// passes on a failed COMMIT, and it leaves nothing in the handle. WRITEs of
+// a file go one at a time under its writer. The handle holds the file's
+// -dlm writer lock and is released once unused for writeIdle. COMMIT has
+// nothing left to flush and answers with the verifier.
 
 // stable_how (RFC 1813 §3.3.7).
 const (
@@ -30,30 +27,17 @@ const (
 	stableFileSync = 2
 )
 
-var (
-	// writeIdle is how long a dirty handle waits for more writes before it
-	// flushes, and a clean one before it is released.
-	writeIdle = 2 * time.Second
-	// writeFlushBytes is how much a handle takes before it flushes without
-	// waiting to be idle.
-	writeFlushBytes int64 = 64 << 20
-)
+// writeIdle is how long an unused write handle, and with it the file's
+// lease, is kept for the next WRITE.
+var writeIdle = 2 * time.Second
 
 // writer is one inode's shared write handle.
 type writer struct {
 	inode uint64
-	// slot is held while a call or a flush uses the writer.
+	// slot is held while a call uses the writer.
 	slot chan struct{}
 	fh   uint64 // the WFS handle; 0 when none is open
-	// dirty is set once a write was accepted and not yet persisted;
-	// unflushed counts its bytes.
-	dirty     bool
-	unflushed int64
-	// failed is a flush's failure not yet reported.
-	failed nfsStatus
-	// cred is the last writer's, whose flushes the idle ones are.
-	cred credential
-	// timer is the idle flush; gen tells the one last scheduled.
+	// timer releases the handle once unused; gen tells the one last set.
 	timer *time.Timer
 	gen   uint64
 }
@@ -75,8 +59,7 @@ func newWrites(s *service) (*writes, error) {
 	return w, nil
 }
 
-// none reports whether no writer is held: nothing accepted, or being
-// written, waits to be settled.
+// none reports whether no writer is held: nothing is being written.
 func (t *writes) none() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -108,13 +91,12 @@ func (t *writes) take(inode uint64, cancel <-chan struct{}) (*writer, bool) {
 	return w, true
 }
 
-// give lets the writer go, scheduling its idle flush while it has a
-// handle, and dropping it when it holds nothing.
+// give lets the writer go, timing its release while it has a handle, and
+// dropping it when it has none.
 func (t *writes) give(w *writer) {
-	switch {
-	case w.fh != 0:
+	if w.fh != 0 {
 		t.schedule(w, writeIdle)
-	case w.failed == nfsOK:
+	} else {
 		t.mu.Lock()
 		if t.byInode[w.inode] == w {
 			delete(t.byInode, w.inode)
@@ -124,8 +106,8 @@ func (t *writes) give(w *writer) {
 	<-w.slot
 }
 
-// schedule flushes and releases the writer after d, unless the export
-// ended. Timers are set under t.mu, which end stops them under.
+// schedule releases the writer's handle after d, unless the export ended.
+// Timers are set under t.mu, which end stops them under.
 func (t *writes) schedule(w *writer, d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -138,9 +120,9 @@ func (t *writes) schedule(w *writer, d time.Duration) {
 	}
 }
 
-// idle flushes a writer nothing used for writeIdle, recording a failure,
-// and releases its handle, which lets its lease go. A writer replaced,
-// rescheduled or ended while it waited is left alone.
+// idle releases the handle of a writer nothing used for writeIdle, which
+// lets its lease go. A writer replaced, rescheduled or ended while it
+// waited is left alone.
 func (t *writes) idle(w *writer, gen uint64) {
 	w.slot <- struct{}{}
 	t.mu.Lock()
@@ -150,11 +132,12 @@ func (t *writes) idle(w *writer, gen uint64) {
 		<-w.slot
 		return
 	}
-	t.release(w)
+	t.closeHandle(w)
 	t.give(w)
 }
 
-// end stops every idle flush: an export that ended flushes nothing more.
+// end stops every release timer: an export that ended changes nothing
+// more.
 func (t *writes) end() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -166,72 +149,21 @@ func (t *writes) end() {
 	}
 }
 
-// flush persists what the writer accepted. A failure is kept until it is
-// reported, and the handle, whose writes may be lost with it, released;
-// a flush to retry later keeps the handle and its writes, and answers
-// "retry later".
-func (t *writes) flush(w *writer, cred credential) nfsStatus {
-	if w.fh == 0 || !w.dirty {
-		return nfsOK
-	}
-	switch st := t.s.engine.NFSFsync(weedmount.FileHandleId(w.fh), cred.uid, cred.gid); st {
-	case fuse.OK:
-	case weedmount.NFSRetryLater:
-		return nfsErrJukebox // unavailable, out of time, or over the metadata rate
-	default:
-		w.failed = statusOf(st)
-		t.closeHandle(w, true)
-		return w.failed
-	}
-	w.dirty, w.unflushed = false, 0
-	return nfsOK
-}
-
-// release flushes the writer with its last writer's credential, then
-// closes its handle, unless the flush is to be retried later.
-func (t *writes) release(w *writer) nfsStatus {
-	if status := t.flush(w, w.cred); status == nfsErrJukebox {
-		return status
-	}
-	t.closeHandle(w, false)
-	return nfsOK
-}
-
-// closeHandle closes the writer's handle, letting its lease go, without a
-// flush; discard drops what a failed flush left behind.
-func (t *writes) closeHandle(w *writer, discard bool) {
+// closeHandle closes the writer's handle, letting its lease go. Nothing
+// is left to flush: every WRITE was persisted before its reply.
+func (t *writes) closeHandle(w *writer) {
 	if w.fh == 0 {
 		return
 	}
-	t.s.engine.NFSCloseWrite(weedmount.FileHandleId(w.fh), discard)
-	w.fh, w.dirty, w.unflushed = 0, false, 0
+	t.s.engine.NFSCloseWrite(weedmount.FileHandleId(w.fh), false)
+	w.fh = 0
 }
 
-// report hands a failure not reported yet to the call, and lets the
-// writer go. The failure counts as reported only when the call will be
-// answered with it: a call already answered "retry later" leaves it for
-// the next.
-func (t *writes) report(o *op, w *writer) nfsStatus {
-	failed := w.failed
-	if failed != nfsOK {
-		if o.beginMutation() {
-			w.failed = nfsOK
-		} else {
-			failed = nfsErrJukebox
-		}
-	}
-	t.give(w)
-	return failed
-}
-
-// settle persists the accepted writes of the inodes a mutation changes
-// and releases their handles, as its preparation does before it changes
-// them (design §4, "Step 1"), and holds their writers until the returned
-// give: a WRITE then waits for the mutation instead of taking the lease
-// back from it. Writers are taken in inode order. A failed flush stays
-// for a COMMIT or stable WRITE to report; the mutation goes on. A flush
-// outlasting the call goes on, holding its writer, and the call, as one
-// to be retried, answers "retry later".
+// settle takes the writers of the inodes a mutation changes, in inode
+// order, waiting for any WRITE in progress, and releases their handles, as
+// its preparation does before it changes them (design §4, "Step 1"). It
+// holds them until the returned give: a WRITE then waits for the mutation
+// instead of taking the lease back from it.
 func (t *writes) settle(o *op, inodes ...uint64) (give func(), status nfsStatus) {
 	var held []*writer
 	give = func() {
@@ -245,30 +177,14 @@ func (t *writes) settle(o *op, inodes ...uint64) (give func(), status nfsStatus)
 			give()
 			return nil, nfsErrJukebox
 		}
-		done := make(chan nfsStatus, 1)
-		go func() { done <- t.release(w) }()
-		select {
-		case status = <-done:
-		case <-o.cancel:
-			go func() {
-				<-done
-				t.give(w)
-			}()
-			give()
-			return nil, nfsErrJukebox
-		}
+		t.closeHandle(w)
 		held = append(held, w)
-		if status != nfsOK {
-			give()
-			return nil, status
-		}
 	}
 	return give, nfsOK
 }
 
-// flushAll persists and releases every writer, as a clean stop does,
-// returning how many files' accepted writes could not be persisted.
-func (t *writes) flushAll() (lost int) {
+// closeAll releases every writer's handle, as a clean stop does.
+func (t *writes) closeAll() {
 	t.mu.Lock()
 	all := make([]*writer, 0, len(t.byInode))
 	for _, w := range t.byInode {
@@ -282,16 +198,9 @@ func (t *writes) flushAll() (lost int) {
 			w.timer.Stop()
 		}
 		t.mu.Unlock()
-		if t.release(w) != nfsOK {
-			t.closeHandle(w, true) // nothing retries once the mount is gone
-			w.failed = nfsErrIO
-		}
-		if w.failed != nfsOK {
-			lost++
-		}
+		t.closeHandle(w)
 		<-w.slot
 	}
-	return lost
 }
 
 func (s *service) write(o *op) reply {
@@ -325,71 +234,62 @@ func (s *service) write(o *op) reply {
 	case offset+uint64(count) > maxFileSize || offset+uint64(count) < offset:
 		return fail(nfsErrFBig)
 	}
+	if len(data) == 0 {
+		return s.written(o, obj, 0) // nothing to write: the file stays as it is
+	}
 	w, ok := s.writes.take(obj.inode, o.cancel)
 	if !ok {
 		return fail(nfsErrJukebox)
 	}
-	written, status := s.writes.accept(o, w, offset, data)
+	written, status := s.writes.persist(o, w, offset, data)
 	if status != nfsOK {
-		s.writes.give(w)
+		// Nothing of it is left in the handle; its lease goes too.
+		s.writes.closeHandle(w)
+	}
+	s.writes.give(w)
+	if status != nfsOK {
 		return fail(status)
 	}
-	committed := uint32(stableUnstable)
-	if stable != stableUnstable {
-		if status := s.writes.commit(o, w); status != nfsOK {
-			return fail(status)
-		}
-		committed = stableFileSync
-	} else if w.unflushed >= writeFlushBytes {
-		// Flushed now, the handle and its lease kept: the writer goes with
-		// the flush, which lets it go.
-		go func(cred credential) {
-			s.writes.flush(w, cred)
-			s.writes.give(w)
-		}(o.cred)
-	} else {
-		s.writes.give(w)
-	}
+	return s.written(o, obj, written)
+}
+
+// written answers a WRITE persisted: FILE_SYNC, with the verifier.
+func (s *service) written(o *op, obj object, count uint32) reply {
 	e := &encoder{}
 	e.uint32(uint32(nfsOK))
 	s.putWcc(e, &obj.attr, s.now(o, obj))
-	e.uint32(written)
-	e.uint32(committed)
+	e.uint32(count)
+	e.uint32(stableFileSync)
 	e.buf = append(e.buf, s.writes.verifier[:]...)
 	return reply{body: e.buf}
 }
 
-// accept adds data at offset to the writer's handle, opened first if it
-// has none, with the file's write lease taken within the call's
-// preparation budget.
-func (t *writes) accept(o *op, w *writer, offset uint64, data []byte) (uint32, nfsStatus) {
+// persist writes data at offset through the writer's handle, opened first
+// if it has none with the file's lease taken within the call's
+// preparation, and persists it, data and entry, before it returns. Until
+// the entry write is sent the call may still answer "retry later"; after
+// that, its own status, or IO at the deadline.
+func (t *writes) persist(o *op, w *writer, offset uint64, data []byte) (uint32, nfsStatus) {
+	step, done := t.s.step(o)
+	defer done()
 	if w.fh == 0 {
-		step, done := t.s.step(o)
 		fh, st := t.s.engine.NFSOpenForWrite(step.Prepare, w.inode, o.cred.uid, o.cred.gid)
-		done()
 		if st != fuse.OK {
 			return 0, resultOf(st)
 		}
 		w.fh = uint64(fh)
 	}
-	w.cred = o.cred
-	if len(data) == 0 {
-		return 0, nfsOK // nothing to write: the file stays as it is
+	written, st := t.s.engine.NFSWrite(step, weedmount.FileHandleId(w.fh), offset, data, o.cred.uid, o.cred.gid)
+	if st == fuse.Status(syscall.ESTALE) {
+		return 0, nfsErrStale // the file was replaced or removed elsewhere
 	}
-	h := header(w.inode, o.cred)
-	written, st := t.s.engine.Write(o.cancel, &fuse.WriteIn{InHeader: h, Fh: w.fh, Offset: offset, Size: uint32(len(data))}, data)
-	if st != fuse.OK {
-		return 0, statusOf(st)
-	}
-	w.dirty = true
-	w.unflushed += int64(written)
-	return written, nfsOK
+	return written, resultOf(st)
 }
 
 func (s *service) commit(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
-	d.uint64() // offset and count: the whole file is persisted
+	d.uint64() // offset and count: every WRITE was persisted already
 	d.uint32()
 	if !d.done() {
 		return garbage()
@@ -403,11 +303,6 @@ func (s *service) commit(o *op) reply {
 		status = nfsErrIsDir
 	case obj.attr.Mode&syscall.S_IFMT != syscall.S_IFREG:
 		status = nfsErrInval
-	default:
-		status = s.writes.commitInode(o, obj.inode)
-	}
-	if status == nfsErrJukebox {
-		return s.retryLater(o.call)
 	}
 	e := &encoder{}
 	e.uint32(uint32(status))
@@ -416,49 +311,6 @@ func (s *service) commit(o *op) reply {
 		e.buf = append(e.buf, s.writes.verifier[:]...)
 	}
 	return reply{body: e.buf}
-}
-
-// commitInode persists inode's accepted writes, reporting a failure not
-// reported yet.
-func (t *writes) commitInode(o *op, inode uint64) nfsStatus {
-	t.mu.Lock()
-	_, known := t.byInode[inode]
-	t.mu.Unlock()
-	if !known {
-		return nfsOK // nothing accepted, or all persisted and reported
-	}
-	w, ok := t.take(inode, o.cancel)
-	if !ok {
-		return nfsErrJukebox
-	}
-	return t.commit(o, w)
-}
-
-// commit persists the writer's accepted writes for a call, and lets the
-// writer go. The call is answered before its deadline: a flush still
-// running then goes on, holding the writer, and the call answers "retry
-// later"; the retry waits for the writer and reports how the flush went.
-// A failure is reported once; a flush to retry later is retried by the
-// call's retry.
-func (t *writes) commit(o *op, w *writer) nfsStatus {
-	done := make(chan nfsStatus, 1)
-	go func(cred credential) { done <- t.flush(w, cred) }(o.cred)
-	limit := time.NewTimer(time.Until(o.received.Add(rpcDeadline - time.Second)))
-	defer limit.Stop()
-	select {
-	case status := <-done:
-		if status == nfsErrJukebox {
-			t.give(w)
-			return status
-		}
-	case <-limit.C:
-		go func() {
-			<-done
-			t.give(w)
-		}()
-		return nfsErrJukebox
-	}
-	return t.report(o, w)
 }
 
 // mayWrite is WRITE's own check, with RFC 1813 §4.4's owner exception.

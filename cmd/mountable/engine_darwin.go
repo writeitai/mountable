@@ -306,13 +306,11 @@ func (e *engine) unmount() error {
 	return nil
 }
 
-// flush runs once the mount is gone: it persists the writes accepted and
-// not committed, waits for pending ones, stops serving and drops the local
-// caches.
+// flush runs once the mount is gone: it releases the write handles (every
+// WRITE was persisted before its reply), waits for pending writes, stops
+// serving and drops the local caches.
 func (e *engine) flush() {
-	if lost := e.server.Flush(); lost > 0 {
-		diagnose("writes to %d files could not be persisted", lost)
-	}
+	e.server.Flush()
 	e.wfs.WaitForAsyncFlush()
 	e.close()
 	e.wfs.ClearCacheDir()
