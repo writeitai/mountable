@@ -20,9 +20,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
 
@@ -113,10 +115,11 @@ func mount(o *output, ticket, dir string) error {
 	defer signal.Stop(signals)
 
 	// Caches live in a private directory removed on exit.
-	cacheDir, err := mountCacheDir()
+	cacheDir, release, err := mountCacheDir()
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer os.RemoveAll(cacheDir)
 
 	var (
@@ -283,11 +286,13 @@ func isDirectory(dir string) error {
 	return nil
 }
 
-// mountCacheDir creates a private cache directory for one mount. Without a
-// user cache directory it goes under the temporary directory, in a
-// directory of this user's own. The directory it goes in must be this
-// user's, mode 0700 and not a symlink.
-func mountCacheDir() (string, error) {
+// mountCacheDir creates a private cache directory for one mount, and
+// returns it with its lock, held until release. Without a user cache
+// directory it goes under the temporary directory, in a directory of this
+// user's own. The directory it goes in must be this user's, mode 0700 and
+// not a symlink. The directories of mounts whose process ended without
+// removing them (killed or crashed) are removed first.
+func mountCacheDir() (string, func(), error) {
 	base, err := os.UserCacheDir()
 	if err == nil {
 		base = filepath.Join(base, "mountable")
@@ -295,13 +300,63 @@ func mountCacheDir() (string, error) {
 		base = filepath.Join(os.TempDir(), fmt.Sprintf("mountable-%d", os.Getuid()))
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// base may be reused, even made by someone else in a shared /tmp.
 	if err := checkPrivate(base); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return os.MkdirTemp(base, "mount-")
+	pruneCacheDirs(base)
+	dir, err := os.MkdirTemp(base, "mount-")
+	if err != nil {
+		return "", nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			lock.Close()
+		}
+	}
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", nil, err
+	}
+	return dir, func() { lock.Close() }, nil
+}
+
+// cacheLockName is the file in a mount's cache directory its process
+// holds a lock on while it runs; the lock goes with the process.
+const cacheLockName = "lock"
+
+// cacheGrace is how old a cache directory must be before it can be
+// removed: a younger one may be another mount's, made and not yet locked.
+const cacheGrace = 10 * time.Second
+
+// pruneCacheDirs removes the cache directories in base whose lock is free:
+// their mount's process ended without removing them. A directory with no
+// lock (made by an older CLI) or younger than cacheGrace stays.
+func pruneCacheDirs(base string) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "mount-") {
+			continue
+		}
+		dir := filepath.Join(base, e.Name())
+		if info, err := os.Lstat(dir); err != nil || time.Since(info.ModTime()) < cacheGrace {
+			continue
+		}
+		lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
+		if err != nil {
+			continue
+		}
+		if unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil {
+			os.RemoveAll(dir)
+		}
+		lock.Close()
+	}
 }
 
 // unmount is `mountable unmount DIR`: a clean unmount, after which the

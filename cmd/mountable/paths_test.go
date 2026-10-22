@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCanonicalDir(t *testing.T) {
@@ -62,10 +65,11 @@ func TestCacheDirFallback(t *testing.T) {
 	t.Setenv("TMPDIR", tmp)
 	base := filepath.Join(tmp, fmt.Sprintf("mountable-%d", os.Getuid()))
 
-	dir, err := mountCacheDir()
+	dir, release, err := mountCacheDir()
 	if err != nil {
 		t.Fatal(err)
 	}
+	release()
 	if filepath.Dir(dir) != base {
 		t.Fatalf("cache directory %s, want one in %s", dir, base)
 	}
@@ -80,7 +84,7 @@ func TestCacheDirFallback(t *testing.T) {
 	if err := os.Symlink(elsewhere, base); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mountCacheDir(); err == nil {
+	if _, _, err := mountCacheDir(); err == nil {
 		t.Fatal("a symlinked fallback directory was used")
 	}
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
@@ -92,10 +96,74 @@ func TestCacheDirFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Chmod(base, 0o777) // whatever the umask
-	if _, err := mountCacheDir(); err == nil {
+	if _, _, err := mountCacheDir(); err == nil {
 		t.Fatal("a fallback directory others can write was used")
 	}
 	if entries, _ := os.ReadDir(base); len(entries) != 0 {
 		t.Fatal("something was created in it")
+	}
+}
+
+// A new mount removes the cache directories of mounts whose process ended
+// without removing them (their lock is free), and leaves a running mount's,
+// one made by an older CLI (no lock) and one just made.
+func TestStaleCacheDirsArePruned(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache) // Linux
+	t.Setenv("HOME", cache)           // macOS: ~/Library/Caches
+	base, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = filepath.Join(base, "mountable")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * cacheGrace)
+	mkdir := func(name string, lock bool, at time.Time) string {
+		dir := filepath.Join(base, name)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if lock {
+			if err := os.WriteFile(filepath.Join(dir, cacheLockName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(dir, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	killed := mkdir("mount-killed", true, old)
+	running := mkdir("mount-running", true, old)
+	older := mkdir("mount-older-cli", false, old)
+	fresh := mkdir("mount-fresh", true, time.Now())
+	held, err := os.OpenFile(filepath.Join(running, cacheLockName), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	dir, release, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for path, want := range map[string]bool{killed: false, running: true, older: true, fresh: true, dir: true} {
+		if _, err := os.Stat(path); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", filepath.Base(path), err == nil, want)
+		}
+	}
+	// Its own lock is held while it runs.
+	other, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := unix.Flock(int(other.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		t.Fatal("the new mount's lock is free")
 	}
 }
