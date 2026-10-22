@@ -140,8 +140,8 @@ moments.
 - A file takes about 9,999 writes that change existing bytes or append small
   pieces; after that, writes to it fail with "file too large". Keep
   databases (SQLite and the like) and other files rewritten in place on local
-  disk, or copy them in and out. Saving a whole file again, as editors and
-  git do, is not affected.
+  disk, or copy them in and out. Editors and git save by writing a fresh file
+  (or truncating first), so they are unaffected.
 - A failed write is reported once per file, to the first `write`, `fsync` or
   `close` of it by any program.
 - Writes through `mmap` can fail without an error.
