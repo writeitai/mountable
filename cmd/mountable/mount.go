@@ -307,8 +307,8 @@ func mountCacheDir() (string, error) {
 // unmount is `mountable unmount DIR`: a clean unmount, after which the
 // mounting process finishes its pending writes and exits. A mount that
 // cannot be unmounted cleanly (busy, or not answering) is aborted instead.
-func unmount(dir string) error {
-	dir, err := canonicalDir(dir)
+func unmount(given string) error {
+	dir, err := canonicalDir(given)
 	if err != nil {
 		return err
 	}
@@ -318,6 +318,9 @@ func unmount(dir string) error {
 	err = cleanUnmount(dir)
 	if err == nil {
 		return nil
+	}
+	if notMounted(err) {
+		return &cliError{Code: "not_mounted", Message: given + " is not mounted"}
 	}
 	why := fmt.Sprintf("%s could not be unmounted cleanly (%s)", dir, oneLine(err))
 	diagnose("%s; aborting the mount", why)

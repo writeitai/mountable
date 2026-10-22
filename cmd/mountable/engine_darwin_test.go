@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -208,5 +209,23 @@ func TestSocketDirNeedsPrivateParents(t *testing.T) {
 	}
 	if _, err := makeSocketDir(cache); err == nil {
 		t.Fatal("a socket went under a 0755 directory")
+	}
+}
+
+// Unmounting a directory nothing is mounted on, as after macOS dropped a
+// dead mount, says so, under the path as given; nothing was aborted, so
+// nothing may be lost. The kernel decides, so another spelling of the path
+// on a case-insensitive volume is answered alike.
+func TestUnmountOfADirectoryNotMounted(t *testing.T) {
+	dir := t.TempDir()
+	for _, given := range []string{dir, strings.ToUpper(dir)} {
+		if _, err := os.Stat(given); err != nil {
+			continue // a case-sensitive volume
+		}
+		err := unmount(given)
+		var cerr *cliError
+		if !errors.As(err, &cerr) || cerr.Code != "not_mounted" || cerr.Message != given+" is not mounted" {
+			t.Fatalf("unmount %s: %v", given, err)
+		}
 	}
 }
