@@ -84,6 +84,12 @@ func (f *memFiler) StreamRenameEntry(r *filer_pb.StreamRenameEntryRequest, strea
 	moved := proto.Clone(e).(*filer_pb.Entry)
 	moved.Name = r.NewName
 	f.entries[to] = moved
+	for key, child := range f.entries { // what is below a directory moves with it
+		if strings.HasPrefix(key, from+"/") {
+			delete(f.entries, key)
+			f.entries[to+key[len(from):]] = child
+		}
+	}
 	f.mu.Unlock()
 	return stream.Send(&filer_pb.StreamRenameEntryResponse{Directory: r.OldDirectory, EventNotification: &filer_pb.EventNotification{
 		OldEntry: &filer_pb.Entry{Name: r.OldName}, NewEntry: proto.Clone(moved).(*filer_pb.Entry), NewParentPath: r.NewDirectory,
@@ -192,6 +198,19 @@ func TestRealEngineMutations(t *testing.T) {
 	}
 	if s := c.status(procRmdir, wire{}.opaque(root).str("d")); s != uint32(nfsOK) || stored("d") != nil {
 		t.Fatalf("RMDIR: %d", s)
+	}
+	// A directory's rename keeps the handles of what is below it.
+	dir, _ := c.call(procMkdir, wire{}.opaque(root).str("p").append(noAttrs)).created()
+	inner, _ := c.call(procCreate, wire{}.opaque(dir).str("f").u32(createGuarded).append(noAttrs)).created()
+	if s := c.status(procRename, wire{}.opaque(root).str("p").opaque(root).str("q")); s != uint32(nfsOK) {
+		t.Fatalf("RENAME of a directory: %d", s)
+	}
+	if s := c.status(procGetAttr, wire{}.opaque(inner)); s != uint32(nfsOK) {
+		t.Fatalf("GETATTR below the moved directory: %d", s)
+	}
+	moved, _ := c.lookup(root, "q")
+	if again, _ := c.lookup(moved, "f"); !bytes.Equal(again, inner) {
+		t.Fatal("the file below the moved directory has another handle")
 	}
 }
 
