@@ -286,17 +286,19 @@ func isDirectory(dir string) error {
 }
 
 // mountCacheDir creates a private cache directory for one mount, and
-// returns it with its lock, held until release. Without a user cache
-// directory it goes under the temporary directory, in a directory of this
-// user's own. The directory it goes in must be this user's, mode 0700 and
-// not a symlink. The directories this host's mounts left when their
-// process ended without removing them (killed or crashed) are removed
-// first.
+// returns it with its release. Without a user cache directory it goes
+// under the temporary directory, in a directory of this user's own. The
+// directory it goes in must be this user's, mode 0700 and not a symlink.
 //
-// Creating and pruning hold the root's lock, so no mount prunes a
-// directory another is still creating and locking. A filesystem without
-// flock (some network homes) keeps working: nothing is locked there, and
-// nothing is pruned.
+// On a local filesystem it first removes the directories that mounts left
+// when their process ended without removing them (killed or crashed): a
+// directory is marked with a lock file its mount's process holds a lock
+// on, and one whose lock is free is a dead mount's. Creating, marking and
+// pruning hold the root's lock, taken without waiting. When in doubt,
+// nothing is pruned: a cache root on a network filesystem (whose locks may
+// be local to each host), a root lock that is busy or unsupported, or a
+// filesystem without flock, all leave the new directory unmarked, so no
+// later mount ever takes it for a dead one.
 func mountCacheDir() (string, func(), error) {
 	base, err := os.UserCacheDir()
 	if err == nil {
@@ -311,82 +313,54 @@ func mountCacheDir() (string, func(), error) {
 	if err := checkPrivate(base); err != nil {
 		return "", nil, err
 	}
-	root, err := lockFile(filepath.Join(base, cacheLockName), unix.LOCK_EX)
+	unmarked := func() (string, func(), error) {
+		dir, err := os.MkdirTemp(base, "mount-")
+		return dir, func() {}, err
+	}
+	if !localFilesystem(base) {
+		return unmarked()
+	}
+	// The root's lock file is kept: it is the lock, not a marker.
+	root, err := os.OpenFile(filepath.Join(base, cacheLockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return "", nil, err
 	}
-	if root != nil {
-		defer root.Close()
-		pruneCacheDirs(base)
+	defer root.Close()
+	if flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		return unmarked() // another mount is creating or pruning, or no flock
 	}
+	pruneCacheDirs(base)
 	dir, err := os.MkdirTemp(base, "mount-")
 	if err != nil {
 		return "", nil, err
 	}
-	lock, err := lockCacheDir(dir)
+	lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", nil, err
 	}
-	return dir, func() {
-		if lock != nil {
-			lock.Close()
-		}
-	}, nil
+	if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		lock.Close()
+		os.Remove(lock.Name()) // left unmarked: never pruned
+		return dir, func() {}, nil
+	}
+	return dir, func() { lock.Close() }, nil
 }
 
 // cacheLockName is the lock file of the cache root, held while a mount
-// creates or prunes directories, and of each mount's cache directory, held
-// by its process while it runs and naming its host; a lock goes with its
-// process.
+// creates, marks or prunes directories, and of each marked cache
+// directory, held by its mount's process while it runs; a lock goes with
+// its process.
 const cacheLockName = "lock"
 
 // flock is unix.Flock, replaceable in tests.
 var flock = unix.Flock
 
-// lockFile opens path, made if new, with the lock how asks for, or returns
-// nil when the filesystem has no flock.
-func lockFile(path string, how int) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := flock(int(f.Fd()), how); err != nil {
-		f.Close()
-		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOLCK) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return f, nil
-}
-
-// lockCacheDir writes this host's name into dir's lock file and locks it
-// for the mount's lifetime. Where the filesystem has no flock, the lock
-// file goes, so no pruner ever takes the directory for a dead mount's.
-func lockCacheDir(dir string) (*os.File, error) {
-	path := filepath.Join(dir, cacheLockName)
-	host, _ := os.Hostname()
-	if err := os.WriteFile(path, []byte(host), 0o600); err != nil {
-		return nil, err
-	}
-	lock, err := lockFile(path, unix.LOCK_EX|unix.LOCK_NB)
-	if err == nil && lock == nil {
-		err = os.Remove(path)
-	}
-	return lock, err
-}
-
-// pruneCacheDirs removes the cache directories in base that this host's
-// mounts left: their lock file names this host and its lock is free. The
-// caller holds the root's lock. A directory with no lock file (an older
-// CLI, or one without flock) or naming another host (a home shared over
-// the network, where locks may be local to each host) stays.
+// pruneCacheDirs removes the marked cache directories in base whose lock
+// is free. The caller holds the root's lock. A directory with no lock file
+// (unmarked, or made by an older CLI) stays, and so does one whose lock
+// file the path no longer names once locked (it was replaced meanwhile).
 func pruneCacheDirs(base string) {
-	host, err := os.Hostname()
-	if err != nil {
-		return
-	}
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return
@@ -396,15 +370,26 @@ func pruneCacheDirs(base string) {
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
-		path := filepath.Join(dir, cacheLockName)
-		if owner, err := os.ReadFile(path); err != nil || string(owner) != host {
+		lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
+		if err != nil {
 			continue
 		}
-		if lock, err := lockFile(path, unix.LOCK_EX|unix.LOCK_NB); err == nil && lock != nil {
+		if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil && namesFile(lock) {
 			os.RemoveAll(dir)
-			lock.Close()
 		}
+		lock.Close()
 	}
+}
+
+// namesFile reports whether f's path still names f itself, not a
+// replacement or a symbolic link.
+func namesFile(f *os.File) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	named, err := os.Lstat(f.Name())
+	return err == nil && os.SameFile(held, named)
 }
 
 // unmount is `mountable unmount DIR`: a clean unmount, after which the

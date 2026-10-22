@@ -103,31 +103,52 @@ func TestCacheDirFallback(t *testing.T) {
 	}
 }
 
-// A new mount removes the cache directories this host's killed mounts
-// left (their lock is free), and leaves a running mount's, one made by an
-// older CLI (no lock file), and one of another host sharing the home.
-func TestStaleCacheDirsArePruned(t *testing.T) {
-	base := cacheBase(t)
-	host, err := os.Hostname()
-	if err != nil {
+// stale makes a cache directory as a killed mount leaves it: marked, its
+// lock free.
+func stale(t *testing.T, base, name string) string {
+	t.Helper()
+	dir := filepath.Join(base, name)
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	mkdir := func(name, owner string) string {
-		dir := filepath.Join(base, name)
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if owner != "" {
-			if err := os.WriteFile(filepath.Join(dir, cacheLockName), []byte(owner), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return dir
+	if err := os.WriteFile(filepath.Join(dir, cacheLockName), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	killed := mkdir("mount-killed", host)
-	running := mkdir("mount-running", host)
-	older := mkdir("mount-older-cli", "")
-	elsewhere := mkdir("mount-other-host", host+"-elsewhere")
+	return dir
+}
+
+// checkExists checks, for each path, whether it is still there.
+func checkExists(t *testing.T, want map[string]bool) {
+	t.Helper()
+	for path, wanted := range want {
+		if _, err := os.Lstat(path); (err == nil) != wanted {
+			t.Errorf("%s: exists %v, want %v", filepath.Base(path), err == nil, wanted)
+		}
+	}
+}
+
+// A new mount removes the cache directories killed mounts left (marked,
+// their lock free), and leaves a running mount's, an older CLI's
+// (unmarked), and one whose lock file is a symbolic link.
+func TestStaleCacheDirsArePruned(t *testing.T) {
+	base := cacheBase(t)
+	killed := stale(t, base, "mount-killed")
+	running := stale(t, base, "mount-running")
+	older := filepath.Join(base, "mount-older-cli")
+	if err := os.Mkdir(older, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(base, "mount-linked")
+	if err := os.Mkdir(linked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "free-lock")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(linked, cacheLockName)); err != nil {
+		t.Fatal(err)
+	}
 	held, err := os.OpenFile(filepath.Join(running, cacheLockName), os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -141,15 +162,8 @@ func TestStaleCacheDirsArePruned(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	for path, want := range map[string]bool{killed: false, running: true, older: true, elsewhere: true, dir: true} {
-		if _, err := os.Stat(path); (err == nil) != want {
-			t.Errorf("%s: exists %v, want %v", filepath.Base(path), err == nil, want)
-		}
-	}
-	// Its own lock names this host and is held while it runs.
-	if owner, err := os.ReadFile(filepath.Join(dir, cacheLockName)); err != nil || string(owner) != host {
-		t.Fatalf("lock file %q, %v", owner, err)
-	}
+	checkExists(t, map[string]bool{killed: false, running: true, older: true, linked: true, dir: true})
+	// Its own mark is held while it runs.
 	other, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -160,32 +174,80 @@ func TestStaleCacheDirsArePruned(t *testing.T) {
 	}
 }
 
-// Where the filesystem has no flock, mounting still works: nothing is
-// locked or pruned, and the directory keeps no lock file, so no later
-// mount takes it for a dead one.
-func TestCacheDirWithoutFlock(t *testing.T) {
-	base := cacheBase(t)
-	saved := flock
-	flock = func(int, int) error { return unix.ENOTSUP }
-	t.Cleanup(func() { flock = saved })
-	host, _ := os.Hostname()
-	stale := filepath.Join(base, "mount-killed")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
+// When in doubt nothing is pruned, and the new directory stays unmarked
+// so that no later mount takes it for a dead one: a cache root on a
+// network filesystem, a busy root lock, a filesystem without flock.
+func TestCacheDirsWhenInDoubt(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, base string)
+	}{
+		{"network filesystem", func(t *testing.T, _ string) {
+			saved := localFilesystem
+			localFilesystem = func(string) bool { return false }
+			t.Cleanup(func() { localFilesystem = saved })
+		}},
+		{"busy root lock", func(t *testing.T, base string) {
+			root, err := os.OpenFile(filepath.Join(base, cacheLockName), os.O_RDWR|os.O_CREATE, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { root.Close() })
+			if err := unix.Flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"no flock", func(t *testing.T, _ string) {
+			saved := flock
+			flock = func(int, int) error { return unix.ENOTSUP }
+			t.Cleanup(func() { flock = saved })
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base := cacheBase(t)
+			killed := stale(t, base, "mount-killed")
+			c.setup(t, base)
+			dir, release, err := mountCacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			checkExists(t, map[string]bool{killed: true, dir: true, filepath.Join(dir, cacheLockName): false})
+		})
 	}
-	if err := os.WriteFile(filepath.Join(stale, cacheLockName), []byte(host), 0o600); err != nil {
-		t.Fatal(err)
+}
+
+// Mounts starting at once never prune each other's new directories.
+func TestConcurrentCacheDirs(t *testing.T) {
+	cacheBase(t)
+	const n = 20
+	type result struct {
+		dir     string
+		release func()
+		err     error
 	}
-	dir, release, err := mountCacheDir()
-	if err != nil {
-		t.Fatal(err)
+	results := make(chan result, n)
+	for range n {
+		go func() {
+			dir, release, err := mountCacheDir()
+			results <- result{dir, release, err}
+		}()
 	}
-	defer release()
-	if _, err := os.Stat(filepath.Join(dir, cacheLockName)); !os.IsNotExist(err) {
-		t.Fatalf("lock file: %v", err)
+	var all []result
+	for range n { // every worker, before anything can fail the test
+		all = append(all, <-results)
 	}
-	if _, err := os.Stat(stale); err != nil {
-		t.Fatal("a directory was pruned without locks")
+	for _, r := range all {
+		if r.err == nil {
+			defer r.release()
+		}
+	}
+	for i, r := range all {
+		if r.err != nil {
+			t.Errorf("mount %d: %v", i, r.err)
+		} else if _, err := os.Stat(r.dir); err != nil {
+			t.Errorf("mount %d's directory: %v", i, err)
+		}
 	}
 }
 
@@ -205,32 +267,4 @@ func cacheBase(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return base
-}
-
-// Mounts starting at once never prune each other's new directories: the
-// root's lock covers creating, locking and pruning.
-func TestConcurrentCacheDirs(t *testing.T) {
-	cacheBase(t)
-	const n = 20
-	dirs := make([]string, n)
-	releases := make([]func(), n)
-	errs := make(chan error, n)
-	for i := range n {
-		go func() {
-			var err error
-			dirs[i], releases[i], err = mountCacheDir()
-			errs <- err
-		}()
-	}
-	for range n {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i, dir := range dirs {
-		if _, err := os.Stat(filepath.Join(dir, cacheLockName)); err != nil {
-			t.Errorf("mount %d's directory: %v", i, err)
-		}
-		releases[i]()
-	}
 }
