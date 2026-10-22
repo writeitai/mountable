@@ -23,6 +23,7 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
 
@@ -113,10 +114,11 @@ func mount(o *output, ticket, dir string) error {
 	defer signal.Stop(signals)
 
 	// Caches live in a private directory removed on exit.
-	cacheDir, err := mountCacheDir()
+	cacheDir, release, err := mountCacheDir()
 	if err != nil {
 		return err
 	}
+	defer release()
 	defer os.RemoveAll(cacheDir)
 
 	var (
@@ -283,11 +285,21 @@ func isDirectory(dir string) error {
 	return nil
 }
 
-// mountCacheDir creates a private cache directory for one mount. Without a
-// user cache directory it goes under the temporary directory, in a
-// directory of this user's own. The directory it goes in must be this
-// user's, mode 0700 and not a symlink.
-func mountCacheDir() (string, error) {
+// mountCacheDir creates a private cache directory for one mount, and
+// returns it with its release. Without a user cache directory it goes
+// under the temporary directory, in a directory of this user's own. The
+// directory it goes in must be this user's, mode 0700 and not a symlink.
+//
+// On a local filesystem it first removes the directories that mounts left
+// when their process ended without removing them (killed or crashed): a
+// directory is marked with a lock file its mount's process holds a lock
+// on, and one whose lock is free is a dead mount's. Creating, marking and
+// pruning hold the root's lock, taken without waiting. When in doubt,
+// nothing is pruned: a cache root on a network filesystem (whose locks may
+// be local to each host), a root lock that is busy or unsupported, or a
+// filesystem without flock, all leave the new directory unmarked, so no
+// later mount ever takes it for a dead one.
+func mountCacheDir() (string, func(), error) {
 	base, err := os.UserCacheDir()
 	if err == nil {
 		base = filepath.Join(base, "mountable")
@@ -295,13 +307,89 @@ func mountCacheDir() (string, error) {
 		base = filepath.Join(os.TempDir(), fmt.Sprintf("mountable-%d", os.Getuid()))
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	// base may be reused, even made by someone else in a shared /tmp.
 	if err := checkPrivate(base); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return os.MkdirTemp(base, "mount-")
+	unmarked := func() (string, func(), error) {
+		dir, err := os.MkdirTemp(base, "mount-")
+		return dir, func() {}, err
+	}
+	if !localFilesystem(base) {
+		return unmarked()
+	}
+	// The root's lock file is kept: it is the lock, not a marker.
+	root, err := os.OpenFile(filepath.Join(base, cacheLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return unmarked() // no root lock to be had: nothing is pruned
+	}
+	defer root.Close()
+	if flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		return unmarked() // another mount is creating or pruning, or no flock
+	}
+	pruneCacheDirs(base)
+	dir, err := os.MkdirTemp(base, "mount-")
+	if err != nil {
+		return "", nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", nil, err
+	}
+	if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		lock.Close()
+		os.Remove(lock.Name()) // left unmarked: never pruned
+		return dir, func() {}, nil
+	}
+	return dir, func() { lock.Close() }, nil
+}
+
+// cacheLockName is the lock file of the cache root, held while a mount
+// creates, marks or prunes directories, and of each marked cache
+// directory, held by its mount's process while it runs; a lock goes with
+// its process.
+const cacheLockName = "lock"
+
+// flock is unix.Flock, replaceable in tests.
+var flock = unix.Flock
+
+// pruneCacheDirs removes the marked cache directories in base whose lock
+// is free. The caller holds the root's lock. A directory with no lock file
+// (unmarked, or made by an older CLI) stays, and so does one whose lock
+// file the path no longer names once locked (it was replaced meanwhile).
+func pruneCacheDirs(base string) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "mount-") {
+			continue
+		}
+		dir := filepath.Join(base, e.Name())
+		lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
+		if err != nil {
+			continue
+		}
+		if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil && namesFile(lock) {
+			os.RemoveAll(dir)
+		}
+		lock.Close()
+	}
+}
+
+// namesFile reports whether f's path still names f itself, not a
+// replacement or a symbolic link.
+func namesFile(f *os.File) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	named, err := os.Lstat(f.Name())
+	return err == nil && os.SameFile(held, named)
 }
 
 // unmount is `mountable unmount DIR`: a clean unmount, after which the
