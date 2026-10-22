@@ -323,7 +323,7 @@ func mountCacheDir() (string, func(), error) {
 	// The root's lock file is kept: it is the lock, not a marker.
 	root, err := os.OpenFile(filepath.Join(base, cacheLockName), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
-		return "", nil, err
+		return unmarked() // no root lock to be had: nothing is pruned
 	}
 	defer root.Close()
 	if flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {

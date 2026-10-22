@@ -197,6 +197,11 @@ func TestCacheDirsWhenInDoubt(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"root lock unusable", func(t *testing.T, base string) {
+			if err := os.Mkdir(filepath.Join(base, cacheLockName), 0o700); err != nil { // a directory in its place
+				t.Fatal(err)
+			}
+		}},
 		{"no flock", func(t *testing.T, _ string) {
 			saved := flock
 			flock = func(int, int) error { return unix.ENOTSUP }
