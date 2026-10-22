@@ -42,7 +42,8 @@ type Engine interface {
 	NFSCloseRead(fh weedmount.FileHandleId)
 	NFSCloseWrite(fh weedmount.FileHandleId, discard bool)
 	Write(cancel <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status)
-	Fsync(cancel <-chan struct{}, in *fuse.FsyncIn) fuse.Status
+	// NFSFsync persists a write handle; NFSRetryLater keeps its writes.
+	NFSFsync(fh weedmount.FileHandleId, uid, gid uint32) fuse.Status
 	StatFs(cancel <-chan struct{}, header *fuse.InHeader, out *fuse.StatfsOut) fuse.Status
 	PathForInode(inode uint64) (util.FullPath, bool)
 	MountRoot() util.FullPath

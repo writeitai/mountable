@@ -849,3 +849,14 @@ func TestMutationLeavesTimeToRelease(t *testing.T) {
 		t.Fatalf("the mutation ends %v after the call came", end.Sub(o.received))
 	}
 }
+
+// A CREATE looks its name up to settle the file there only while this
+// export holds writes.
+func TestCreateLooksUpOnlyWhileWriting(t *testing.T) {
+	f, _, c, root := writable(t)
+	lookups := 0
+	f.afterLookup = func() { lookups++ }
+	if s := c.status(procCreate, wire{}.opaque(root).str("a.txt").u32(createGuarded).append(noAttrs)); s != uint32(nfsErrExist) || lookups != 0 {
+		t.Fatalf("CREATE: %d, %d lookups", s, lookups)
+	}
+}

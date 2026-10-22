@@ -356,7 +356,7 @@ func (f *fakeEngine) Write(_ <-chan struct{}, in *fuse.WriteIn, data []byte) (ui
 	return uint32(len(data)), fuse.OK
 }
 
-func (f *fakeEngine) Fsync(_ <-chan struct{}, in *fuse.FsyncIn) fuse.Status {
+func (f *fakeEngine) NFSFsync(fh weedmount.FileHandleId, uid, gid uint32) fuse.Status {
 	f.mu.Lock()
 	gate := f.fsyncGate
 	f.mu.Unlock()
@@ -366,7 +366,7 @@ func (f *fakeEngine) Fsync(_ <-chan struct{}, in *fuse.FsyncIn) fuse.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fsyncs++
-	f.fsyncUids = append(f.fsyncUids, in.Uid)
+	f.fsyncUids = append(f.fsyncUids, uid)
 	if f.fsyncErr != fuse.OK {
 		return f.fsyncErr
 	}

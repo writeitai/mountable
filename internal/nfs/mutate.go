@@ -308,6 +308,9 @@ func (s *service) create(o *op) reply {
 // one may truncate it, and any one may find it. Whether it may truncate
 // it is decided on the entry the engine reads under the lease (reuse).
 func (s *service) settleExisting(o *op, dir object, n string) (func(), nfsStatus) {
+	if s.writes.none() {
+		return func() {}, nfsOK // nothing written here to settle
+	}
 	if existing, status := s.child(o, dir, n); status == nfsOK {
 		return s.writes.settle(o, existing.inode)
 	}

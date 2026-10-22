@@ -75,6 +75,14 @@ func newWrites(s *service) (*writes, error) {
 	return w, nil
 }
 
+// none reports whether no writer is held: nothing accepted, or being
+// written, waits to be settled.
+func (t *writes) none() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.byInode) == 0
+}
+
 // take returns inode's writer, made if new, with its slot held, or false
 // once cancel closes first.
 func (t *writes) take(inode uint64, cancel <-chan struct{}) (*writer, bool) {
@@ -166,11 +174,10 @@ func (t *writes) flush(w *writer, cred credential) nfsStatus {
 	if w.fh == 0 || !w.dirty {
 		return nfsOK
 	}
-	h := header(w.inode, cred)
-	switch st := t.s.engine.Fsync(nil, &fuse.FsyncIn{InHeader: h, Fh: w.fh}); st {
+	switch st := t.s.engine.NFSFsync(weedmount.FileHandleId(w.fh), cred.uid, cred.gid); st {
 	case fuse.OK:
-	case fuse.Status(syscall.EAGAIN), fuse.Status(syscall.ETIMEDOUT):
-		return nfsErrJukebox // unavailable, or over the metadata rate
+	case weedmount.NFSRetryLater:
+		return nfsErrJukebox // unavailable, out of time, or over the metadata rate
 	default:
 		w.failed = statusOf(st)
 		t.closeHandle(w, true)
