@@ -1,9 +1,9 @@
 # Mountable CLI
 
 `mountable` mounts a [Mountable](https://mountable.io) filesystem, a shared
-POSIX filesystem for agents and teams, on any Linux or macOS machine or agent
-sandbox, and manages filesystems, mount tickets and sessions. It is also an
-MCP server.
+POSIX filesystem for agents and teams, on any Linux machine or agent sandbox
+and on a Mac (macOS 26, Apple Silicon), and manages filesystems, mount
+tickets and sessions. It is also an MCP server.
 
 ```sh
 npx -y mountable-cli login                          # npm
@@ -40,7 +40,7 @@ they fail with `org_required`.
 | `mountable sessions revoke SESSION_ID` | revoke a session; its mount stops |
 | `mountable mount [--ro] FS_ID DIR` | mount with your login |
 | `mountable mount --ticket-stdin DIR` | mount with a ticket read from stdin |
-| `mountable unmount DIR` | unmount; pending writes are committed |
+| `mountable unmount DIR` | unmount; on Linux, pending writes are committed |
 | `mountable mcp` | MCP server over stdio |
 | `mountable login`, `logout`, `version`, `licenses` | |
 
@@ -110,52 +110,43 @@ in an argument list.
 
 ## macOS
 
-On a Mac (macOS 26 on Apple Silicon is what the release was qualified on),
-`mountable mount` needs no macFUSE, no kernel extension and no `sudo`. The CLI
-serves the filesystem to macOS's own NFS client over a private Unix socket
-that only you can open, and mounts it on a directory you own:
+On macOS 26 (Apple Silicon) there is nothing else to install: no macFUSE,
+no kernel extension and no `sudo`. The CLI serves your filesystem to macOS's
+own NFS client, so it works like any other folder:
 
 ```sh
+FS_ID=$(mountable fs list --json | jq -r '.[0].id')   # or the ID from `mountable fs list`
 mkdir -p ~/mnt/work
-mountable mount <filesystem> ~/mnt/work        # or --ro; Ctrl-C or `mountable unmount ~/mnt/work` to stop
+mountable mount "$FS_ID" ~/mnt/work                   # add --ro for read-only
 ```
 
-The mount shows in Finder. Another local user cannot use it: the socket is
-private, and every request is checked against your user ID. A revoked or
-expired session forces the mount off within about 15 seconds.
+`mountable mount` stays running while the folder is mounted; use the folder
+from another terminal or any app, and stop with Ctrl-C or
+`mountable unmount ~/mnt/work`.
 
-Every write is persisted, data and the file's entry, before macOS is told it
-succeeded, so an acknowledged write survives a crash of the CLI. What that
-means in practice, and the other macOS limits:
+Your mount is private to your account: the CLI serves it over a socket only
+you can open and checks your user ID on every request. Revoking the session,
+or letting it expire, takes the mount away. Every write the Mac sends is
+saved by the service before macOS hears OK, so a crash of the CLI never loses
+a write macOS was told succeeded. Changes from other machines show up within
+moments.
 
-- **Write throughput is lower than on Linux:** about 7 MiB/s was measured,
-  and each write request macOS sends (up to 1 MiB) counts as one metadata
-  mutation. At the filesystem's metadata rate (1,000 a minute by default,
-  shared with all other changes) writes slow down rather than fail.
-- **File size by write pattern:** a file holds at most 9,999 chunks, and each
-  write request makes one (two if it is not aligned). That is about 9.76 GiB
-  written sequentially in 1 MiB requests, about 312 MiB in 32 KiB requests,
-  or about 9,999 appends with an `fsync` after each. Past it a write fails
-  with "file too large".
-- **A failed write is reported once per file:** macOS gives the error to
-  the first `write`, `fsync` or `close` of that file, in any process. If
-  another process (a backup tool or a file watcher, say) closes it first,
-  the writer's own `fsync` returns success for data that was not stored.
-  Writes that were acknowledged are always stored.
-- **Mapped writes:** an error writing `mmap`ed pages may not be reported by
-  `msync` or `fsync`.
-- **Forced unmounts:** when a mount is forced off (a busy unmount, a revoked
-  session, or a crashed CLI), writes macOS had not sent yet can be lost
-  without an error. A busy `mountable unmount` or Ctrl-C forces the mount off
-  at once and says so.
-- **`._` files:** NFS has no extended attributes, so macOS stores them in
-  AppleDouble `._name` files next to each file. Many tools set attributes on
-  every file they create, so expect one `._` file per file; other mounts and
-  the files API see them as ordinary files. Add `._*` to your global
-  gitignore (`git config --global core.excludesFile`).
-- **Not indexed by Spotlight**, and **locks (`flock`, `fcntl`) are local to
-  the one mount**; they do not coordinate with other Macs or Linux mounts.
-- Changes made elsewhere usually become visible within about a second.
+### Limits
+
+- Writes are write-through, at about 7 MiB/s; each MiB written uses one unit
+  of the filesystem's metadata rate.
+- Files reach about 9.76 GiB written sequentially, less when written in many
+  small append-and-`fsync` cycles.
+- A failed write is reported once per file, to the first `write`, `fsync` or
+  `close` of it.
+- Writes through `mmap` can fail without an error.
+- Other mounts are coordinated per write, not for the whole time a file is
+  open.
+- Finish writing (close or `fsync` your files) before you unmount: a forced
+  unmount of a busy mount can drop writes still in flight.
+- macOS creates `._` files on some copies; to keep them out of git, run
+  `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore`.
+- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount.
 
 ## Skill
 

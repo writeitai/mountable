@@ -29,7 +29,7 @@ in 2–4 seconds. CLI 0.4.0 has not been re-run there.
 
 ## Run it against Mountable
 
-Needs Linux or macOS, FUSE, the `mountable` CLI on `PATH`, and
+Needs Linux (with FUSE) or macOS, the `mountable` CLI on `PATH`, and
 `MOUNTABLE_API_KEY` on this machine. Sandbox mounts receive only a one-time
 ticket. The laptop step uses `mountable mount --ro` with that key.
 

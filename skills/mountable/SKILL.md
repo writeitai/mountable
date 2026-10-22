@@ -81,7 +81,7 @@ line is `{"error": …}`.
 
 **4. Sandbox: read and write** with ordinary file operations.
 
-**5. Unmount** when done, so pending writes are committed:
+**5. Unmount** when done; on Linux this commits pending writes:
 
 ```sh
 mountable unmount /mnt/work      # or send SIGTERM to the mount process
@@ -195,7 +195,8 @@ once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
 
 - Linux sandboxes need FUSE: `/dev/fuse` must exist and be usable. Providers
   without FUSE cannot mount.
-- macOS sandboxes are not supported. On a Mac, `mountable mount` works
-  without installing anything; writes are slower than on Linux and macOS
-  adds `._` files (see the CLI README).
+- macOS sandboxes are not supported. On a Mac (macOS 26, Apple Silicon),
+  `mountable mount` needs nothing else installed and no `sudo`; its writes
+  are write-through (about 7 MiB/s) and macOS adds `._` files on some
+  copies. See the CLI README's macOS section for the limits.
 - Deleting a filesystem is done in the console, not from the CLI.
