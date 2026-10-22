@@ -210,3 +210,12 @@ func TestSocketDirNeedsPrivateParents(t *testing.T) {
 		t.Fatal("a socket went under a 0755 directory")
 	}
 }
+
+// Unmounting a directory nothing is mounted on, as after macOS dropped a
+// dead mount, says so; nothing was aborted, so nothing may be lost.
+func TestUnmountOfADirectoryNotMounted(t *testing.T) {
+	err := unmount(t.TempDir())
+	if err == nil || !strings.HasSuffix(err.Error(), "is not mounted") {
+		t.Fatalf("unmount: %v", err)
+	}
+}

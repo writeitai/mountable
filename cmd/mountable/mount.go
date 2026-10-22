@@ -315,6 +315,9 @@ func unmount(dir string) error {
 	if cleared, err := clearStaleMount(dir); cleared || err != nil {
 		return err
 	}
+	if !mountedAt(dir) {
+		return fmt.Errorf("%s is not mounted", dir)
+	}
 	err = cleanUnmount(dir)
 	if err == nil {
 		return nil

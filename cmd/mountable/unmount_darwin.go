@@ -103,6 +103,14 @@ func served(socket string) bool {
 	return true
 }
 
+// mountedAt reports whether the mount table lists dir as a mount point, so
+// unmounting something that is not mounted (as after macOS dropped a dead
+// mount) says so instead of failing to abort it.
+func mountedAt(dir string) bool {
+	_, ok := mountAt(dir)
+	return ok
+}
+
 // isMountPoint reports whether the mount table lists path as a mount point,
 // so canonicalDir leaves it alone: reading its link would reach its server.
 func isMountPoint(path string) bool {
