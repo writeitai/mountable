@@ -442,8 +442,8 @@ func TestChownDropsSetIDBits(t *testing.T) {
 	}
 }
 
-// A WRITE of no bytes past the end leaves the file as it is and answers
-// FILE_SYNC.
+// A WRITE of no bytes past the end leaves the file as it is, takes no
+// write handle or lease, and answers FILE_SYNC.
 func TestEmptyWriteChangesNothing(t *testing.T) {
 	f, _, c, root := writable(t)
 	fh, _ := c.lookup(root, "a.txt")
@@ -456,10 +456,23 @@ func TestEmptyWriteChangesNothing(t *testing.T) {
 		t.Fatalf("wrote %d, committed %d", n, committed)
 	}
 	f.mu.Lock()
-	size := len(f.objects[f.root+"/a.txt"].data)
+	size, opens := len(f.objects[f.root+"/a.txt"].data), f.opens
 	f.mu.Unlock()
-	if size != len("hello world") {
-		t.Fatalf("the file is %d bytes", size)
+	if size != len("hello world") || opens != 0 {
+		t.Fatalf("the file is %d bytes; %d write handles opened", size, opens)
+	}
+}
+
+// A WRITE to a file replaced elsewhere (ESTALE from the engine) answers
+// STALE, so the client drops the handle.
+func TestWriteToAReplacedFileIsStale(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	f.mu.Lock()
+	f.writeErr = fuse.Status(syscall.ESTALE)
+	f.mu.Unlock()
+	if s, _, _, _ := c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply(); s != uint32(nfsErrStale) {
+		t.Fatalf("WRITE: %d", s)
 	}
 }
 

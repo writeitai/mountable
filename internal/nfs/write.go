@@ -234,6 +234,9 @@ func (s *service) write(o *op) reply {
 	case offset+uint64(count) > maxFileSize || offset+uint64(count) < offset:
 		return fail(nfsErrFBig)
 	}
+	if len(data) == 0 {
+		return s.written(o, obj, 0) // nothing to write: the file stays as it is
+	}
 	w, ok := s.writes.take(obj.inode, o.cancel)
 	if !ok {
 		return fail(nfsErrJukebox)
@@ -247,10 +250,15 @@ func (s *service) write(o *op) reply {
 	if status != nfsOK {
 		return fail(status)
 	}
+	return s.written(o, obj, written)
+}
+
+// written answers a WRITE persisted: FILE_SYNC, with the verifier.
+func (s *service) written(o *op, obj object, count uint32) reply {
 	e := &encoder{}
 	e.uint32(uint32(nfsOK))
 	s.putWcc(e, &obj.attr, s.now(o, obj))
-	e.uint32(written)
+	e.uint32(count)
 	e.uint32(stableFileSync)
 	e.buf = append(e.buf, s.writes.verifier[:]...)
 	return reply{body: e.buf}
@@ -271,10 +279,10 @@ func (t *writes) persist(o *op, w *writer, offset uint64, data []byte) (uint32, 
 		}
 		w.fh = uint64(fh)
 	}
-	if len(data) == 0 {
-		return 0, nfsOK // nothing to write: the file stays as it is
-	}
 	written, st := t.s.engine.NFSWrite(step, weedmount.FileHandleId(w.fh), offset, data, o.cred.uid, o.cred.gid)
+	if st == fuse.Status(syscall.ESTALE) {
+		return 0, nfsErrStale // the file was replaced or removed elsewhere
+	}
 	return written, resultOf(st)
 }
 
