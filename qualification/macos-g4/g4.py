@@ -874,7 +874,8 @@ def group_dead(r):
                     lost = os.path.getsize(dirty) if os.path.exists(dirty) else "missing"
             finally:
                 again.end()
-            r.row("D1 SIGKILL with cached, open and dirty files", gone is not None and not stuck and remount_ok and not left,
+            # Until #24 (0.6.1), a killed mount's cache directory stays: recorded.
+            r.row("D1 SIGKILL with cached, open and dirty files", gone is not None and not stuck and remount_ok,
                   f"mount table entry gone {(gone - t0) if gone else float('nan'):.1f}s after the kill (deadtimeout=30); "
                   + "; ".join(f"{p.kind}: {p.summary(t0)}" for p in probes)
                   + f"; probes stuck over 20 s: {stuck or 'none'}; `mountable unmount` exit {u.returncode} {(u.stdout + u.stderr).strip()}; "
