@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
 // Config is one export: the engine it serves and the one user it serves it
@@ -57,8 +58,9 @@ func NewServer(c Config) (*Server, error) {
 }
 
 // Flush persists every write accepted and not yet committed, and releases
-// the write handles, as a clean stop does once the mount is gone.
-func (s *Server) Flush() { s.svc.writes.flushAll() }
+// the write handles, as a clean stop does once the mount is gone. It
+// returns how many files' accepted writes could not be persisted.
+func (s *Server) Flush() int { return s.svc.writes.flushAll() }
 
 // End makes every call fail at once, before the mount is forced off: the
 // session ended, and nothing may be served from it any more. Calls being
@@ -82,6 +84,9 @@ var (
 	// not started changing anything by then answers NFS3ERR_JUKEBOX ("retry
 	// later") and changes nothing; the client's retry starts afresh.
 	prepareBudget = 10 * time.Second
+	// releaseTime is how much of it a mutation leaves the engine to let
+	// its locks go once its change is made, before the call is answered.
+	releaseTime = weedmount.NFSReleaseTime
 )
 
 type service struct {

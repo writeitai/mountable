@@ -310,7 +310,9 @@ func (e *engine) unmount() error {
 // not committed, waits for pending ones, stops serving and drops the local
 // caches.
 func (e *engine) flush() {
-	e.server.Flush()
+	if lost := e.server.Flush(); lost > 0 {
+		diagnose("writes to %d files could not be persisted", lost)
+	}
 	e.wfs.WaitForAsyncFlush()
 	e.close()
 	e.wfs.ClearCacheDir()

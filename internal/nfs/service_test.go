@@ -432,9 +432,9 @@ func TestBoundedSteps(t *testing.T) {
 
 // short sets the call deadlines for one test.
 func short(t *testing.T, deadline, prepare time.Duration) {
-	oldDeadline, oldPrepare := rpcDeadline, prepareBudget
-	rpcDeadline, prepareBudget = deadline, prepare
-	t.Cleanup(func() { rpcDeadline, prepareBudget = oldDeadline, oldPrepare })
+	oldDeadline, oldPrepare, oldRelease := rpcDeadline, prepareBudget, releaseTime
+	rpcDeadline, prepareBudget, releaseTime = deadline, prepare, 0
+	t.Cleanup(func() { rpcDeadline, prepareBudget, releaseTime = oldDeadline, oldPrepare, oldRelease })
 }
 
 // An old handle never reads the object that replaced its file, whether the

@@ -37,10 +37,11 @@ const (
 )
 
 // step is the engine's view of the call's two steps. done must be called
-// once the procedure is finished with it.
+// once the procedure is finished with it. The mutation ends in time for
+// the engine to let its locks go before the call is answered.
 func (s *service) step(o *op) (step weedmount.NFSStep, done func()) {
 	prepare, cancelPrepare := context.WithDeadline(context.Background(), o.received.Add(prepareBudget))
-	mutate, cancelMutate := context.WithDeadline(context.Background(), o.received.Add(rpcDeadline))
+	mutate, cancelMutate := context.WithDeadline(context.Background(), o.received.Add(rpcDeadline-releaseTime))
 	finished := make(chan struct{})
 	go func() {
 		select {
@@ -282,16 +283,18 @@ func (s *service) create(o *op) reply {
 	if status == nfsOK && attrs.size != nil && *attrs.size > maxFileSize {
 		status = nfsErrFBig
 	}
-	if status == nfsOK && how == createUnchecked {
-		status = s.settleExisting(o, dir, n, attrs)
+	var give func()
+	if status == nfsOK {
+		give, status = s.settleExisting(o, dir, n)
 	}
 	if status != nfsOK {
 		return s.failureWithDir(o, status, dir)
 	}
+	defer give()
 	step, done := s.step(o)
 	defer done()
 	mode := map[uint32]weedmount.NFSCreateMode{createUnchecked: weedmount.NFSUnchecked, createGuarded: weedmount.NFSGuarded, createExclusive: weedmount.NFSExclusive}[how]
-	inode, st := s.engine.NFSCreate(step, dir.inode, n, mode, attrs.engineAttrs(time.Now()), verifier, o.cred.uid, o.cred.gid, reuse(o.cred, attrs))
+	inode, st := s.engine.NFSCreate(step, dir.inode, n, mode, attrs.owned(o.cred, dir).engineAttrs(time.Now()), verifier, o.cred.uid, o.cred.gid, reuse(o.cred, attrs))
 	if st == fuse.OK && how == createExclusive {
 		// Its times hold the verifier until the SETATTR that must follow
 		// (RFC 1813 §3.3.8) replaces them.
@@ -300,17 +303,32 @@ func (s *service) create(o *op) reply {
 	return s.createdReply(o, dir, n, inode, resultOf(st))
 }
 
-// settleExisting persists the accepted writes of a file an UNCHECKED
-// CREATE may truncate, before the create's own preparation. Whether it may
-// is decided on the entry the engine reads under the file's lease (reuse).
-func (s *service) settleExisting(o *op, dir object, n string, attrs sattr) nfsStatus {
-	if attrs.size == nil {
-		return nfsOK
-	}
+// settleExisting settles the file a CREATE finds at its name, before the
+// create's own preparation, which takes the name's lease: an UNCHECKED
+// one may truncate it, and any one may find it. Whether it may truncate
+// it is decided on the entry the engine reads under the lease (reuse).
+func (s *service) settleExisting(o *op, dir object, n string) (func(), nfsStatus) {
 	if existing, status := s.child(o, dir, n); status == nfsOK {
 		return s.writes.settle(o, existing.inode)
 	}
-	return nfsOK // none known here: the engine finds out
+	return func() {}, nfsOK // none known here: the engine finds out
+}
+
+// owned is a as a create by cred in dir may set it: only root gives the
+// new object away, so another caller's owner is dropped, and its group
+// kept only when it is one of the caller's or the directory's, as knfsd
+// does.
+func (a sattr) owned(cred credential, dir object) sattr {
+	if cred.uid == 0 {
+		return a
+	}
+	if a.uid != nil && *a.uid != cred.uid {
+		a.uid = nil
+	}
+	if a.gid != nil && *a.gid != cred.gid && *a.gid != dir.attr.Gid && !slices.Contains(cred.gids, *a.gid) {
+		a.gid = nil
+	}
+	return a
 }
 
 // reuse is the check an UNCHECKED CREATE makes, under the lease, on an
@@ -348,7 +366,7 @@ func (s *service) mkdir(o *op) reply {
 	}
 	step, done := s.step(o)
 	defer done()
-	inode, st := s.engine.NFSMkdir(step, dir.inode, n, attrs.engineAttrs(time.Now()), o.cred.uid, o.cred.gid)
+	inode, st := s.engine.NFSMkdir(step, dir.inode, n, attrs.owned(o.cred, dir).engineAttrs(time.Now()), o.cred.uid, o.cred.gid)
 	return s.createdReply(o, dir, n, inode, resultOf(st))
 }
 
@@ -372,17 +390,19 @@ func (s *service) symlink(o *op) reply {
 	}
 	step, done := s.step(o)
 	defer done()
-	inode, st := s.engine.NFSSymlink(step, dir.inode, n, target, attrs.engineAttrs(time.Now()), o.cred.uid, o.cred.gid)
+	inode, st := s.engine.NFSSymlink(step, dir.inode, n, target, attrs.owned(o.cred, dir).engineAttrs(time.Now()), o.cred.uid, o.cred.gid)
 	return s.createdReply(o, dir, n, inode, resultOf(st))
 }
 
 // mknod refuses devices, FIFOs and sockets: none are served (design §4,
-// "Server limits").
+// "Server limits"). The other types are made by their own procedures
+// (RFC 1813 §3.3.11).
 func (s *service) mknod(o *op) reply {
 	d := &decoder{buf: o.args}
 	fh := d.opaque(64)
 	d.string(mountPathLen)
-	switch d.uint32() { // mknoddata3
+	ftype := d.uint32()
+	switch ftype { // mknoddata3
 	case typeChr, typeBlk:
 		decodeSattr(d)
 		d.uint32() // specdata3
@@ -399,6 +419,9 @@ func (s *service) mknod(o *op) reply {
 	dir, status := s.resolve(o, fh)
 	if status != nfsOK {
 		return s.failure(o.call, status)
+	}
+	if t := ftype; t == typeReg || t == typeDir || t == typeLnk {
+		return s.failureWithDir(o, nfsErrBadType, dir)
 	}
 	return s.failureWithDir(o, nfsErrNotSupp, dir)
 }
@@ -465,9 +488,11 @@ func (s *service) removeName(o *op, directory bool) reply {
 	if !directory {
 		// Its accepted writes are persisted first, and its write handle,
 		// with the lease, let go (design §4, "Step 1").
-		if status = s.writes.settle(o, child.inode); status != nfsOK {
+		give, status := s.writes.settle(o, child.inode)
+		if status != nfsOK {
 			return s.dirFailure(o, status, dir)
 		}
+		defer give()
 	}
 	step, done := s.step(o)
 	defer done()
@@ -542,12 +567,15 @@ func (s *service) rename(o *op) reply {
 	case targetStatus != nfsOK && targetStatus != nfsErrNoEnt:
 		return s.renameReply(o, targetStatus, from, to)
 	}
-	if status = s.writes.settle(o, source.inode); status == nfsOK && targetStatus == nfsOK {
-		status = s.writes.settle(o, target.inode)
+	settled := []uint64{source.inode}
+	if targetStatus == nfsOK {
+		settled = append(settled, target.inode)
 	}
+	give, status := s.writes.settle(o, settled...)
 	if status != nfsOK {
 		return s.renameReply(o, status, from, to)
 	}
+	defer give()
 	step, done := s.step(o)
 	defer done()
 	status = resultOf(s.engine.NFSRename(step, from.inode, fromName, to.inode, toName))
@@ -620,12 +648,14 @@ func (s *service) link(o *op) reply {
 	default:
 		status = newName(n)
 	}
+	give := func() {}
 	if status == nfsOK {
-		status = s.writes.settle(o, file.inode)
+		give, status = s.writes.settle(o, file.inode)
 	}
 	if status != nfsOK {
 		return fail(status, &dir)
 	}
+	defer give()
 	step, done := s.step(o)
 	defer done()
 	if status = resultOf(s.engine.NFSLink(step, file.inode, dir.inode, n, o.cred.uid, o.cred.gid)); status != nfsOK {
@@ -688,9 +718,11 @@ func (s *service) setAttr(o *op) reply {
 	}
 	// Accepted writes are persisted first: the change applies to the file
 	// as written (design §4, "Step 1").
-	if status = s.writes.settle(o, obj.inode); status != nfsOK {
+	give, status := s.writes.settle(o, obj.inode)
+	if status != nfsOK {
 		return fail(status)
 	}
+	defer give()
 	clearVerifier := s.exclusive.holds(obj.inode)
 	step, done := s.step(o)
 	defer done()

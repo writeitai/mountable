@@ -3,6 +3,7 @@ package nfs
 import (
 	"context"
 	"path"
+	"slices"
 	"syscall"
 	"time"
 
@@ -21,16 +22,23 @@ type writeState struct {
 	mutations        map[string]int
 	clearedVerifiers int
 	// held, while set, makes every helper's preparation wait for its
-	// context, as for a lock another mount holds.
-	held bool
-	// writeHandles are the shared write handles open; opens and releases
-	// count them, fsyncs the flushes.
-	writeHandles            map[uint64]bool
-	opens, releases, fsyncs int
-	// fsyncErr fails flushes; fsyncGate, while set, holds them until
-	// closed.
-	fsyncErr  fuse.Status
-	fsyncGate chan struct{}
+	// context, as for a lock another mount holds; prepareDelay delays its
+	// look at the locks.
+	held         bool
+	prepareDelay time.Duration
+	// writeHandles are the shared write handles open, each holding its
+	// inode's lease, which this mount's own mutations of the inode wait
+	// for as for another mount's; opens and releases count them, discards
+	// the releases dropping writes, fsyncs the flushes, fsyncUids whose.
+	writeHandles                      map[uint64]uint64
+	opens, releases, discards, fsyncs int
+	fsyncUids                         []uint32
+	// fsyncErr fails flushes; fsyncGate and writeGate, while set, hold
+	// flushes and writes until closed.
+	fsyncErr             fuse.Status
+	fsyncGate, writeGate chan struct{}
+	// madeAttrs are what the last object made was given.
+	madeAttrs weedmount.NFSAttrs
 }
 
 func (f *fakeEngine) mutated(what string) {
@@ -46,10 +54,18 @@ func (f *fakeEngine) count(what string) int {
 	return f.mutations[what]
 }
 
-// prepare is a helper's preparation: waiting while held, then Begin.
-func (f *fakeEngine) prepare(step weedmount.NFSStep) fuse.Status {
+// prepare is a helper's preparation of a change to inodes: waiting while
+// held, or while one of them is leased, then Begin.
+func (f *fakeEngine) prepare(step weedmount.NFSStep, inodes ...uint64) fuse.Status {
+	f.mu.Lock()
+	delay := f.prepareDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
 	f.mu.Lock()
 	held := f.held
+	for _, leased := range f.writeHandles {
+		held = held || slices.Contains(inodes, leased)
+	}
 	f.mu.Unlock()
 	if held {
 		<-step.Prepare.Done()
@@ -59,6 +75,13 @@ func (f *fakeEngine) prepare(step weedmount.NFSStep) fuse.Status {
 		return weedmount.NFSRetryLater
 	}
 	return fuse.OK
+}
+
+// inodeOf is the inode of name in the directory dir, or 0.
+func (f *fakeEngine) inodeOf(dir uint64, name string) uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inodes[f.paths[dir]+"/"+name]
 }
 
 // child is the path of name in the directory dir, under mu.
@@ -77,6 +100,7 @@ func (f *fakeEngine) make(p string, mode uint32, attrs weedmount.NFSAttrs) uint6
 		f.nextIno = 5000
 	}
 	f.nextIno++
+	f.madeAttrs = attrs
 	if attrs.Mode != nil {
 		mode = mode&syscall.S_IFMT | *attrs.Mode&0o7777
 	}
@@ -88,7 +112,7 @@ func (f *fakeEngine) make(p string, mode uint32, attrs weedmount.NFSAttrs) uint6
 }
 
 func (f *fakeEngine) NFSCreate(step weedmount.NFSStep, dir uint64, name string, mode weedmount.NFSCreateMode, attrs weedmount.NFSAttrs, verifier [8]byte, uid, gid uint32, reuse func(*filer_pb.Entry) fuse.Status) (uint64, fuse.Status) {
-	if st := f.prepare(step); st != fuse.OK {
+	if st := f.prepare(step, f.inodeOf(dir, name)); st != fuse.OK {
 		return 0, st
 	}
 	f.mu.Lock()
@@ -175,7 +199,7 @@ func (f *fakeEngine) NFSRmdir(step weedmount.NFSStep, dir uint64, name string) f
 }
 
 func (f *fakeEngine) removeName(step weedmount.NFSStep, dir uint64, name string, directory bool) fuse.Status {
-	if st := f.prepare(step); st != fuse.OK {
+	if st := f.prepare(step, f.inodeOf(dir, name)); st != fuse.OK {
 		return st
 	}
 	f.mu.Lock()
@@ -201,7 +225,7 @@ func (f *fakeEngine) removeName(step weedmount.NFSStep, dir uint64, name string,
 }
 
 func (f *fakeEngine) NFSRename(step weedmount.NFSStep, fromDir uint64, fromName string, toDir uint64, toName string) fuse.Status {
-	if st := f.prepare(step); st != fuse.OK {
+	if st := f.prepare(step, f.inodeOf(fromDir, fromName), f.inodeOf(toDir, toName)); st != fuse.OK {
 		return st
 	}
 	f.mu.Lock()
@@ -228,7 +252,7 @@ func (f *fakeEngine) NFSRename(step weedmount.NFSStep, fromDir uint64, fromName 
 }
 
 func (f *fakeEngine) NFSLink(step weedmount.NFSStep, source, dir uint64, name string, uid, gid uint32) fuse.Status {
-	if st := f.prepare(step); st != fuse.OK {
+	if st := f.prepare(step, source); st != fuse.OK {
 		return st
 	}
 	f.mu.Lock()
@@ -250,7 +274,7 @@ func (f *fakeEngine) NFSLink(step weedmount.NFSStep, source, dir uint64, name st
 }
 
 func (f *fakeEngine) NFSSetAttr(step weedmount.NFSStep, inode uint64, attrs weedmount.NFSAttrs, guard *time.Time, clearVerifier bool) fuse.Status {
-	if st := f.prepare(step); st != fuse.OK {
+	if st := f.prepare(step, inode); st != fuse.OK {
 		return st
 	}
 	f.mu.Lock()
@@ -287,10 +311,10 @@ func (f *fakeEngine) NFSOpenForWrite(ctx context.Context, inode uint64, uid, gid
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.writeHandles == nil {
-		f.writeHandles = map[uint64]bool{}
+		f.writeHandles = map[uint64]uint64{}
 	}
 	f.nextFh++
-	f.writeHandles[f.nextFh] = true
+	f.writeHandles[f.nextFh] = inode
 	f.opens++
 	return weedmount.FileHandleId(f.nextFh), fuse.OK
 }
@@ -300,16 +324,25 @@ func (f *fakeEngine) NFSCloseRead(weedmount.FileHandleId) {}
 func (f *fakeEngine) NFSCloseWrite(fh weedmount.FileHandleId, discard bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.writeHandles[uint64(fh)] {
+	if _, open := f.writeHandles[uint64(fh)]; open {
 		delete(f.writeHandles, uint64(fh))
 		f.releases++
+		if discard {
+			f.discards++
+		}
 	}
 }
 
 func (f *fakeEngine) Write(_ <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status) {
 	f.mu.Lock()
+	gate := f.writeGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.writeHandles[in.Fh] {
+	if _, open := f.writeHandles[in.Fh]; !open {
 		return 0, fuse.EBADF
 	}
 	o := f.objects[f.paths[in.NodeId]]
@@ -333,6 +366,7 @@ func (f *fakeEngine) Fsync(_ <-chan struct{}, in *fuse.FsyncIn) fuse.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fsyncs++
+	f.fsyncUids = append(f.fsyncUids, in.Uid)
 	if f.fsyncErr != fuse.OK {
 		return f.fsyncErr
 	}

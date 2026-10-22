@@ -2,11 +2,13 @@ package nfs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/seaweedfs/go-fuse/v2/fuse"
+	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
 )
 
 // noAttrs is a sattr3 that sets nothing.
@@ -124,6 +126,9 @@ func TestMkdirSymlinkMknod(t *testing.T) {
 	}
 	if s := c.status(procMknod, wire{}.opaque(root).str("fifo").u32(typeFifo).append(noAttrs)); s != uint32(nfsErrNotSupp) {
 		t.Fatalf("MKNOD: %d", s)
+	}
+	if s := c.status(procMknod, wire{}.opaque(root).str("file").u32(typeReg)); s != uint32(nfsErrBadType) {
+		t.Fatalf("MKNOD of a file: %d", s)
 	}
 }
 
@@ -632,5 +637,215 @@ func TestRenameDotNames(t *testing.T) {
 		if s := c.status(procRename, args); s != uint32(nfsErrInval) {
 			t.Fatalf("RENAME: %d", s)
 		}
+	}
+}
+
+// A mutation whose settling flush fails is still applied: the failure
+// stays for COMMIT, which reports it once, so no COMMIT succeeds over the
+// lost writes.
+func TestSettleLeavesItsFailureToCommit(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	f.mu.Lock()
+	f.fsyncErr = fuse.Status(syscall.EDQUOT)
+	f.mu.Unlock()
+	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsOK) {
+		t.Fatalf("SETATTR: %d", s)
+	}
+	f.mu.Lock()
+	mode := f.objects[f.root+"/a.txt"].mode & 0o7777
+	f.mu.Unlock()
+	if mode != 0o600 {
+		t.Fatalf("mode %o", mode)
+	}
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrDQuot) {
+		t.Fatalf("COMMIT: %d", s)
+	}
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) {
+		t.Fatalf("COMMIT again: %d", s)
+	}
+}
+
+// A WRITE arriving while a mutation settles the file waits for the
+// mutation, instead of taking the file's lease back from it.
+func TestWritesWaitForTheMutationSettlingThem(t *testing.T) {
+	short(t, 1500*time.Millisecond, 500*time.Millisecond)
+	f, srv, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.fsyncGate, f.prepareDelay = gate, 100*time.Millisecond
+	f.mu.Unlock()
+	setAttr := make(chan []byte, 1)
+	go func() {
+		c.send(callMessage(c.xid+1, programNFS, 3, procSetAttr, 501, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)))
+		setAttr <- c.receive()
+	}()
+	time.Sleep(50 * time.Millisecond) // settling, held at the gate
+	other := dial(t, srv.listener.Addr().String())
+	other.xid = 5000
+	other.send(callMessage(5001, programNFS, 3, procWrite, 501, wire{}.opaque(fh).u64(1).u32(1).u32(stableUnstable).str("y")))
+	time.Sleep(50 * time.Millisecond) // the WRITE waits for the writer
+	close(gate)
+	// The status follows the 24-byte accepted reply header.
+	if s := binary.BigEndian.Uint32((<-setAttr)[24:]); s != uint32(nfsOK) {
+		t.Fatalf("SETATTR: %d", s)
+	}
+	if s := binary.BigEndian.Uint32(other.receive()[24:]); s != uint32(nfsOK) {
+		t.Fatalf("WRITE: %d", s)
+	}
+}
+
+// CREATE in any mode of a name whose file this mount is writing settles
+// that file first, so the create's own lease is free.
+func TestCreateSettlesTheFileAtItsName(t *testing.T) {
+	short(t, 1500*time.Millisecond, 300*time.Millisecond)
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	if s := c.status(procCreate, wire{}.opaque(root).str("a.txt").u32(createGuarded).append(noAttrs)); s != uint32(nfsErrExist) {
+		t.Fatalf("CREATE GUARDED: %d", s)
+	}
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	if s := c.status(procCreate, wire{}.opaque(root).str("a.txt").u32(createUnchecked).append(noAttrs)); s != uint32(nfsOK) {
+		t.Fatalf("CREATE UNCHECKED: %d", s)
+	}
+	if f.fsyncsNow() != 2 {
+		t.Fatalf("%d flushes", f.fsyncsNow())
+	}
+}
+
+// A create by anyone but root gives the new object no other owner, and
+// a group only of the caller's or the directory's, as knfsd does.
+func TestCreatesKeepTheCallersOwnership(t *testing.T) {
+	f, _, c, root := writable(t)
+	owner := func(uid, gid uint32) wire {
+		return wire{}.u32(1).u32(0o4755).u32(1).u32(uid).u32(1).u32(gid).u32(0).u32(timeDontChange).u32(timeDontChange)
+	}
+	made := func() (uid, gid *uint32) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.madeAttrs.Uid, f.madeAttrs.Gid
+	}
+	c.call(procCreate, wire{}.opaque(root).str("n").u32(createGuarded).append(owner(0, 0))).created()
+	if uid, gid := made(); uid != nil || gid != nil {
+		t.Fatalf("CREATE kept %v, %v", uid, gid)
+	}
+	c.call(procMkdir, wire{}.opaque(root).str("d").append(owner(501, 20))).created()
+	if uid, gid := made(); uid == nil || *uid != 501 || gid == nil || *gid != 20 {
+		t.Fatalf("MKDIR set %v, %v", uid, gid)
+	}
+	c.callAs(0, procMkdir, wire{}.opaque(root).str("r").append(owner(7, 7))).created()
+	if uid, gid := made(); uid == nil || *uid != 7 || gid == nil || *gid != 7 {
+		t.Fatalf("root's MKDIR set %v, %v", uid, gid)
+	}
+}
+
+// A flush the gateway asks to retry later keeps the writes: COMMIT and a
+// mutation settling them answer "retry later", and a retry flushes them.
+func TestFlushToRetryLaterKeepsTheWrites(t *testing.T) {
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	f.mu.Lock()
+	f.fsyncErr = fuse.Status(syscall.EAGAIN)
+	f.mu.Unlock()
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsErrJukebox) {
+		t.Fatalf("COMMIT: %d", s)
+	}
+	if s := c.status(procSetAttr, wire{}.opaque(fh).append(modeAttrs(0o600)).u32(0)); s != uint32(nfsErrJukebox) {
+		t.Fatalf("SETATTR: %d", s)
+	}
+	f.mu.Lock()
+	f.fsyncErr = fuse.OK
+	releases := f.releases
+	f.mu.Unlock()
+	if releases != 0 {
+		t.Fatalf("%d releases", releases)
+	}
+	if s := c.status(procCommit, wire{}.opaque(fh).u64(0).u32(0)); s != uint32(nfsOK) || f.fsyncsNow() != 3 {
+		t.Fatalf("COMMIT retried: %d, %d flushes", s, f.fsyncsNow())
+	}
+}
+
+// A clean stop counts the files whose accepted writes it could not
+// persist, dropping them.
+func TestFlushOnStopCountsWhatItLost(t *testing.T) {
+	f, srv, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	f.mu.Lock()
+	f.fsyncErr = fuse.Status(syscall.EAGAIN)
+	f.mu.Unlock()
+	if lost := srv.Flush(); lost != 1 {
+		t.Fatalf("%d lost", lost)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.discards != 1 {
+		t.Fatalf("%d discards", f.discards)
+	}
+}
+
+// An idle flush is its last writer's, as a COMMIT is.
+func TestIdleFlushIsTheWritersOwn(t *testing.T) {
+	saved := writeIdle
+	writeIdle = 50 * time.Millisecond
+	defer func() { writeIdle = saved }()
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.callAs(0, procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	for deadline := time.Now().Add(5 * time.Second); f.releasesNow() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the idle handle was not released")
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.fsyncUids) != 1 || f.fsyncUids[0] != 0 {
+		t.Fatalf("flushed as %v", f.fsyncUids)
+	}
+}
+
+// An idle flush whose time came while a WRITE used the writer waits for
+// the idle time that WRITE started.
+func TestIdleTimeRestartsWithEachWrite(t *testing.T) {
+	saved := writeIdle
+	writeIdle = 300 * time.Millisecond
+	defer func() { writeIdle = saved }()
+	f, _, c, root := writable(t)
+	fh, _ := c.lookup(root, "a.txt")
+	c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("x"))
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.writeGate = gate
+	f.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.call(procWrite, wire{}.opaque(fh).u64(1).u32(1).u32(stableUnstable).str("y"))
+	}()
+	time.Sleep(400 * time.Millisecond) // the first idle time passes
+	f.mu.Lock()
+	f.writeGate = nil
+	f.mu.Unlock()
+	close(gate)
+	<-done
+	time.Sleep(100 * time.Millisecond)
+	if f.releasesNow() != 0 {
+		t.Fatal("released at once after the WRITE")
+	}
+}
+
+// A mutation's own step ends in time for the engine to let its locks go
+// before the call's deadline.
+func TestMutationLeavesTimeToRelease(t *testing.T) {
+	o := &op{call: &call{received: time.Now()}, cancel: make(chan struct{})}
+	step, done := (&service{}).step(o)
+	defer done()
+	if end, _ := step.Mutate.Deadline(); !end.Equal(o.received.Add(rpcDeadline - weedmount.NFSReleaseTime)) {
+		t.Fatalf("the mutation ends %v after the call came", end.Sub(o.received))
 	}
 }
