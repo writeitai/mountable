@@ -213,6 +213,14 @@ Kaggle, Deepnote and Hugging Face Spaces and a Marimo notebook. They keep
 datasets, feature caches and checkpoints in a Mountable folder with
 `mountable-sdk`, so the files stay when the kernel restarts.
 
+## Multi-agent coding harness
+
+[`examples/research-showcases/multi-agent-harness`](examples/research-showcases/multi-agent-harness)
+runs a planner, coder and verifier on one shared folder. A signed file-change
+webhook triggers a read-only verifier mount. Run `harness.py` offline by
+default, or use `--live` to create a filesystem with a monthly spend cap and
+rate limit.
+
 ## Licenses
 
 `mountable licenses` prints the licenses and notices of the third-party code

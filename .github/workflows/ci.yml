@@ -41,6 +41,8 @@ jobs:
         run: python3 examples/llm-providers/test_starters.py
       - name: Showcase demos keep credentials out of sandbox traces
         run: python3 examples/showcase/test_showcase.py
+      - name: Multi-agent harness verifies signed handoffs and read-only tickets
+        run: python3 examples/research-showcases/multi-agent-harness/test_harness.py
       - name: THIRD_PARTY_NOTICES matches the module graph
         run: |
           go run ./tools/notices > THIRD_PARTY_NOTICES
