@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The macOS qualification runner (roadmap G4); the steps are in CHECKLIST.md.
 
-Usage: g4.py [--cli PATH] [--results FILE] GROUP [GROUP ...]
+Usage: MOUNTABLE_ORG=ORG_ID G4_FS=FS_ID g4.py [--cli PATH] [--results FILE] GROUP [GROUP ...]
 
 Groups: env, lifecycle, killswitch, writes, renewal, behaviour, limits, dead.
 It mounts the qualification filesystem with the CLI's login, appends what it
@@ -19,8 +19,8 @@ import sys
 import threading
 import time
 
-ORG = os.environ.get("MOUNTABLE_ORG", "cdd42401-724d-43dc-a1de-ff572de80421")
-FS = os.environ.get("G4_FS", "5yjegtu5sgbgjsybmulwwh5aem")
+ORG = os.environ.get("MOUNTABLE_ORG", "")  # the organisation and the
+FS = os.environ.get("G4_FS", "")  # filesystem the qualification uses
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CLI = None  # the CLI binary, set from --cli
@@ -251,7 +251,7 @@ def group_env(r):
     r.row("CLI", None, f"{version}; built from {os.environ.get('G4_CLI_REV', rev)}")
     nfsconf = [l for l in open("/etc/nfs.conf").read().splitlines() if l.strip() and not l.startswith("#")]
     r.row("/etc/nfs.conf", None, "; ".join(nfsconf) or "comments only")
-    r.row("Service", None, f"production {os.environ.get('MOUNTABLE_API_URL', 'https://mountable.io')}, organisation {ORG}, filesystem {FS}")
+    r.row("Service", None, f"{os.environ.get('MOUNTABLE_API_URL', 'https://mountable.io')}, the qualification filesystem")
     for ro in (False, True):
         m = mounted_with(ro)
         try:
@@ -1461,6 +1461,8 @@ def main():
     p.add_argument("--second-user", help="for isolation: a second local macOS user")
     p.add_argument("groups", nargs="+", choices=sorted(GROUPS))
     a = p.parse_args()
+    if not ORG or not FS:
+        p.error("set MOUNTABLE_ORG and G4_FS: the organisation and the filesystem to qualify on")
     global SECOND_USER
     SECOND_USER = a.second_user
     CLI = a.cli

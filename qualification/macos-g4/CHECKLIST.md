@@ -121,6 +121,7 @@ a method, and can fail the post-mount check. That is a separate PR.
 
 ```sh
 go build -o /tmp/mountable ./cmd/mountable
+export MOUNTABLE_ORG=<organisation id> G4_FS=<filesystem id>
 python3 qualification/macos-g4/g4.py --cli /tmp/mountable env lifecycle killswitch writes renewal behaviour limits dead
 ```
 
