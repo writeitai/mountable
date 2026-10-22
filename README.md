@@ -206,6 +206,13 @@ and a revocation kill switch. `python3 examples/showcase/relay.py --dry-run`
 prints the sequence without calling the API. The same illustrations play at
 <https://mountable.io/showcase> and do not create a filesystem.
 
+## Notebook starters
+
+[`examples/notebooks`](examples/notebooks) has a Jupyter notebook for Colab,
+Kaggle, Deepnote and Hugging Face Spaces and a Marimo notebook. They keep
+datasets, feature caches and checkpoints in a Mountable folder with
+`mountable-sdk`, so the files stay when the kernel restarts.
+
 ## Licenses
 
 `mountable licenses` prints the licenses and notices of the third-party code

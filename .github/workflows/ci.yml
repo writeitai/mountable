@@ -95,6 +95,8 @@ jobs:
       - run: uv run --locked ruff check .
       - run: uv run --locked pyright
       - run: uv run --locked pytest
+      - name: Notebook starters run against a fake files API
+        run: uv run --locked --with marimo==0.25.2 python ../../examples/notebooks/test_notebooks.py
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
