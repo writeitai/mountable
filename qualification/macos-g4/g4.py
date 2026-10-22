@@ -150,7 +150,7 @@ class Mount:
                 break
             if self.proc.poll() is not None:
                 time.sleep(0.2)
-                raise RuntimeError(f"mount exited {self.proc.returncode}: {self.tail()}")
+                raise RuntimeError(f"mount exited {self.proc.returncode}: {self.events} {self.tail()}")
             time.sleep(0.05)
         else:
             raise RuntimeError(f"no mounted event within {timeout}s: {self.tail()}")
