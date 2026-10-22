@@ -4,8 +4,9 @@
 macOS (x64 and arm64).
 
 ```sh
-npx -y mountable-cli mount "$FS_ID" /mnt/work         # npm
-uvx mountable mount "$FS_ID" /mnt/work                # PyPI
+mkdir -p ~/mnt/work
+npx -y mountable-cli mount "$FS_ID" ~/mnt/work        # npm
+uvx mountable mount "$FS_ID" ~/mnt/work               # PyPI
 curl -fsSL https://mountable.io/install.sh | sh         # installs to ~/.local/bin
 ```
 

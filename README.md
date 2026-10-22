@@ -13,7 +13,7 @@ curl -fsSL https://mountable.io/install.sh | sh     # standalone binary
 
 The CLI is one self-contained binary: it downloads nothing at mount time and
 keeps the session's credentials in memory. Mounting needs FUSE (`/dev/fuse`)
-on Linux; on macOS it needs nothing installed and no `sudo` (see
+on Linux; on macOS it needs nothing else installed and no `sudo` (see
 [macOS](#macos)).
 
 ## Authentication
@@ -133,19 +133,25 @@ moments.
 
 ### Limits
 
-- Writes are write-through, at about 7 MiB/s; each MiB written uses one unit
-  of the filesystem's metadata rate.
+- Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
+  1 MiB, uses one unit of the filesystem's metadata rate.
 - Files reach about 9.76 GiB written sequentially, less when written in many
   small append-and-`fsync` cycles.
+- A file takes about 9,999 writes that change existing bytes or append small
+  pieces; after that, writes to it fail with "file too large". Keep
+  databases (SQLite and the like) and other files rewritten in place on local
+  disk, or copy them in and out. Saving a whole file again, as editors and
+  git do, is not affected.
 - A failed write is reported once per file, to the first `write`, `fsync` or
-  `close` of it.
+  `close` of it by any program.
 - Writes through `mmap` can fail without an error.
 - Other mounts are coordinated per write, not for the whole time a file is
   open.
 - Finish writing (close or `fsync` your files) before you unmount: a forced
   unmount of a busy mount can drop writes still in flight.
-- macOS creates `._` files on some copies; to keep them out of git, run
-  `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore`.
+- macOS creates `._` files beside most files; to keep them out of git, run
+  `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore` (or append
+  `._*` to the file `git config --global core.excludesFile` names, if set).
 - No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount.
 
 ## Skill
