@@ -10,6 +10,12 @@ OpenAI client at xAI and keep MOUNTABLE_API_KEY on the orchestrator:
 The xAI SDK accepts the same parameters through xai_sdk.chat.tool(name=...,
 description=..., parameters=TOOL["parameters"]). Handle the call with
 create_mount_session. The sandbox receives only sandbox.stdin.
+
+Before dispatching tools, use workspace.create_workspace on the backend to
+set this end user's monthly cap. Reuse a mountable-sdk filesystem handle
+to read/write without a mount. Register with workspace.register_webhook
+and authenticate raw deliveries with workspace.verify_webhook. See README.md
+for the shared lifecycle; keep provisioning and webhook secrets outside tools.
 """
 
 from __future__ import annotations
