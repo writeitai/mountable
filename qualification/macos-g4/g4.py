@@ -865,8 +865,8 @@ def group_dead(r):
             time.sleep(1)
             stuck = [p.kind for p in probes if p.proc.poll() is None and p.lines and p.lines[-1][0] < time.time() - 20]
             u = cli("unmount", m.path)
-            left = m.leftovers()
-            again = mounted_with(ro)
+            again = mounted_with(ro)  # removes what killed mounts left
+            left = [l for l in m.leftovers() if l != "mount entry"]  # the new mount is at the path
             try:
                 remount_ok = again.event("mounted") is not None
                 lost = None
@@ -1132,7 +1132,13 @@ def git_checks(base):
     steps = [("add", ["add", "G4.md"]), ("commit", ["commit", "-qm", "g4"]), ("branch", ["checkout", "-qb", "g4-branch"]),
              ("checkout", ["checkout", "-q", "-"]), ("gc", ["gc", "-q"]), ("fsck", ["fsck", "--full", "--strict"]),
              ("status", ["status", "--porcelain"])]
+    # As the README advises, `._*` is in the global excludes file.
+    excludes = os.path.join(d, ".git", "g4-global-excludes")
+    with open(excludes, "w") as f:
+        f.write("._*\n")
     for name, args in steps:
+        if name == "status":
+            args = ["-c", f"core.excludesFile={excludes}", *args]
         g = git(*args, cwd=d)
         ok = g.returncode == 0 and (name != "status" or g.stdout.strip() == "")
         yield f"git {name}", ok, f"exit {g.returncode} {(g.stdout + g.stderr).strip()[-200:] or 'clean'}"
