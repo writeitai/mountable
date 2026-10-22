@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
@@ -290,8 +289,14 @@ func isDirectory(dir string) error {
 // returns it with its lock, held until release. Without a user cache
 // directory it goes under the temporary directory, in a directory of this
 // user's own. The directory it goes in must be this user's, mode 0700 and
-// not a symlink. The directories of mounts whose process ended without
-// removing them (killed or crashed) are removed first.
+// not a symlink. The directories this host's mounts left when their
+// process ended without removing them (killed or crashed) are removed
+// first.
+//
+// Creating and pruning hold the root's lock, so no mount prunes a
+// directory another is still creating and locking. A filesystem without
+// flock (some network homes) keeps working: nothing is locked there, and
+// nothing is pruned.
 func mountCacheDir() (string, func(), error) {
 	base, err := os.UserCacheDir()
 	if err == nil {
@@ -306,36 +311,82 @@ func mountCacheDir() (string, func(), error) {
 	if err := checkPrivate(base); err != nil {
 		return "", nil, err
 	}
-	pruneCacheDirs(base)
+	root, err := lockFile(filepath.Join(base, cacheLockName), unix.LOCK_EX)
+	if err != nil {
+		return "", nil, err
+	}
+	if root != nil {
+		defer root.Close()
+		pruneCacheDirs(base)
+	}
 	dir, err := os.MkdirTemp(base, "mount-")
 	if err != nil {
 		return "", nil, err
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
-	if err == nil {
-		if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-			lock.Close()
-		}
-	}
+	lock, err := lockCacheDir(dir)
 	if err != nil {
 		os.RemoveAll(dir)
 		return "", nil, err
 	}
-	return dir, func() { lock.Close() }, nil
+	return dir, func() {
+		if lock != nil {
+			lock.Close()
+		}
+	}, nil
 }
 
-// cacheLockName is the file in a mount's cache directory its process
-// holds a lock on while it runs; the lock goes with the process.
+// cacheLockName is the lock file of the cache root, held while a mount
+// creates or prunes directories, and of each mount's cache directory, held
+// by its process while it runs and naming its host; a lock goes with its
+// process.
 const cacheLockName = "lock"
 
-// cacheGrace is how old a cache directory must be before it can be
-// removed: a younger one may be another mount's, made and not yet locked.
-const cacheGrace = 10 * time.Second
+// flock is unix.Flock, replaceable in tests.
+var flock = unix.Flock
 
-// pruneCacheDirs removes the cache directories in base whose lock is free:
-// their mount's process ended without removing them. A directory with no
-// lock (made by an older CLI) or younger than cacheGrace stays.
+// lockFile opens path, made if new, with the lock how asks for, or returns
+// nil when the filesystem has no flock.
+func lockFile(path string, how int) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := flock(int(f.Fd()), how); err != nil {
+		f.Close()
+		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOLCK) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// lockCacheDir writes this host's name into dir's lock file and locks it
+// for the mount's lifetime. Where the filesystem has no flock, the lock
+// file goes, so no pruner ever takes the directory for a dead mount's.
+func lockCacheDir(dir string) (*os.File, error) {
+	path := filepath.Join(dir, cacheLockName)
+	host, _ := os.Hostname()
+	if err := os.WriteFile(path, []byte(host), 0o600); err != nil {
+		return nil, err
+	}
+	lock, err := lockFile(path, unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil && lock == nil {
+		err = os.Remove(path)
+	}
+	return lock, err
+}
+
+// pruneCacheDirs removes the cache directories in base that this host's
+// mounts left: their lock file names this host and its lock is free. The
+// caller holds the root's lock. A directory with no lock file (an older
+// CLI, or one without flock) or naming another host (a home shared over
+// the network, where locks may be local to each host) stays.
 func pruneCacheDirs(base string) {
+	host, err := os.Hostname()
+	if err != nil {
+		return
+	}
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return
@@ -345,17 +396,14 @@ func pruneCacheDirs(base string) {
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
-		if info, err := os.Lstat(dir); err != nil || time.Since(info.ModTime()) < cacheGrace {
+		path := filepath.Join(dir, cacheLockName)
+		if owner, err := os.ReadFile(path); err != nil || string(owner) != host {
 			continue
 		}
-		lock, err := os.OpenFile(filepath.Join(dir, cacheLockName), os.O_RDWR, 0)
-		if err != nil {
-			continue
-		}
-		if unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil {
+		if lock, err := lockFile(path, unix.LOCK_EX|unix.LOCK_NB); err == nil && lock != nil {
 			os.RemoveAll(dir)
+			lock.Close()
 		}
-		lock.Close()
 	}
 }
 
