@@ -39,6 +39,8 @@ jobs:
       - run: go test ./...
       - name: Showcase demos keep credentials out of sandbox traces
         run: python3 examples/showcase/test_showcase.py
+      - name: Spend-cap and webhook showcases stay offline and signed
+        run: python3 examples/showcase/test_limits.py
       - name: Multi-agent harness verifies signed handoffs and read-only tickets
         run: python3 examples/research-showcases/multi-agent-harness/test_harness.py
       - name: THIRD_PARTY_NOTICES matches the module graph
