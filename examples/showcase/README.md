@@ -29,7 +29,7 @@ in 2–4 seconds. CLI 0.4.0 has not been re-run there.
 
 ## Run it against Mountable
 
-Needs Linux or macOS, FUSE, the `mountable` CLI on `PATH`, and
+Needs Linux (with FUSE) or macOS, the `mountable` CLI on `PATH`, and
 `MOUNTABLE_API_KEY` on this machine. Sandbox mounts receive only a one-time
 ticket. The laptop step uses `mountable mount --ro` with that key.
 
@@ -86,7 +86,7 @@ python3 examples/showcase/webhooks.py --org "$MOUNTABLE_ORG_ID" \
 `--dry-run` also checks a locally signed delivery. It creates no filesystem
 and makes no network call.
 
-A live run needs Linux, FUSE, the `mountable` CLI on `PATH`, the same API
+A live run needs the `mountable` CLI on `PATH` (on Linux, with FUSE), the same API
 key and organisation, and a public HTTPS URL on port 443 that forwards to
 `127.0.0.1:8787/hooks/mountable` on this machine. `--port` changes the local
 port. The proxy must pass the raw body and the `webhook-id`,

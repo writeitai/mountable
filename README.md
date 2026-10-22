@@ -1,9 +1,9 @@
 # Mountable CLI
 
 `mountable` mounts a [Mountable](https://mountable.io) filesystem, a shared
-POSIX filesystem for agents and teams, on any Linux or macOS machine or agent
-sandbox, and manages filesystems, mount tickets and sessions. It is also an
-MCP server.
+POSIX filesystem for agents and teams, on any Linux machine or agent sandbox
+and on a Mac (macOS 26, Apple Silicon), and manages filesystems, mount
+tickets and sessions. It is also an MCP server.
 
 ```sh
 npx -y mountable-cli login                          # npm
@@ -12,8 +12,9 @@ curl -fsSL https://mountable.io/install.sh | sh     # standalone binary
 ```
 
 The CLI is one self-contained binary: it downloads nothing at mount time and
-keeps the session's credentials in memory. Mounting needs FUSE (`/dev/fuse`
-on Linux).
+keeps the session's credentials in memory. Mounting needs FUSE (`/dev/fuse`)
+on Linux; on macOS it needs nothing else installed and no `sudo` (see
+[macOS](#macos)).
 
 ## Authentication
 
@@ -39,7 +40,7 @@ they fail with `org_required`.
 | `mountable sessions revoke SESSION_ID` | revoke a session; its mount stops |
 | `mountable mount [--ro] FS_ID DIR` | mount with your login |
 | `mountable mount --ticket-stdin DIR` | mount with a ticket read from stdin |
-| `mountable unmount DIR` | unmount; pending writes are committed |
+| `mountable unmount DIR` | unmount; on Linux, pending writes are committed |
 | `mountable mcp` | MCP server over stdio |
 | `mountable login`, `logout`, `version`, `licenses` | |
 
@@ -106,6 +107,52 @@ mountable unmount /mnt/work
 Any existing, writable directory works as the mount point; `mount` checks it
 before it uses the ticket. The ticket is read from stdin, so it never appears
 in an argument list.
+
+## macOS
+
+On macOS 26 (Apple Silicon) there is nothing else to install: no macFUSE,
+no kernel extension and no `sudo`. The CLI serves your filesystem to macOS's
+own NFS client, so it works like any other folder:
+
+```sh
+FS_ID=$(mountable fs list --json | jq -r '.[0].id')   # or the ID from `mountable fs list`
+mkdir -p ~/mnt/work
+mountable mount "$FS_ID" ~/mnt/work                   # add --ro for read-only
+```
+
+`mountable mount` stays running while the folder is mounted; use the folder
+from another terminal or any app, and stop with Ctrl-C or
+`mountable unmount ~/mnt/work`.
+
+Your mount is private to your account: the CLI serves it over a socket only
+you can open and checks your user ID on every request. Revoking the session,
+or letting it expire, takes the mount away. Every write the Mac sends is
+saved by the service before macOS hears OK, so a crash of the CLI never loses
+a write macOS was told succeeded. Changes from other machines show up within
+moments.
+
+### Limits
+
+- Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
+  1 MiB, uses one unit of the filesystem's metadata rate.
+- Files reach about 9.76 GiB written sequentially, less when written in many
+  small append-and-`fsync` cycles.
+- A file takes about 9,999 writes that change existing bytes or append small
+  pieces; after that, writes to it fail with "file too large". Keep
+  databases (SQLite and the like) and other files rewritten in place on local
+  disk, or copy them in and out. Editors save by writing a fresh file (or
+  truncating first), so they are unaffected.
+- A failed write is reported once per file, to the first `write`, `fsync` or
+  `close` of it by any program.
+- Writes through `mmap` can fail without an error.
+- Other mounts are coordinated per write, not for the whole time a file is
+  open.
+- Finish writing (close or `fsync` your files) before you unmount: a forced
+  unmount of a busy mount can drop writes still in flight.
+- macOS creates `._` files beside most files; to keep them out of git, run
+  `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore` (or append
+  `._*` to the file `git config --global core.excludesFile` names, if set).
+- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount.
 
 ## Skill
 
