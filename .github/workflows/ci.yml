@@ -37,8 +37,6 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
-      - name: LLM provider starters keep the API key out of the sandbox
-        run: python3 examples/llm-providers/test_starters.py
       - name: Showcase demos keep credentials out of sandbox traces
         run: python3 examples/showcase/test_showcase.py
       - name: Multi-agent harness verifies signed handoffs and read-only tickets
@@ -97,6 +95,8 @@ jobs:
       - run: uv run --locked ruff check .
       - run: uv run --locked pyright
       - run: uv run --locked pytest
+      - name: LLM provider starters use capped workspaces and signed webhooks
+        run: uv run --locked python -m unittest discover -s ../../examples/llm-providers -p 'test_*.py'
       - name: Notebook starters run against a fake files API
         run: uv run --locked --with marimo==0.25.2 python ../../examples/notebooks/test_notebooks.py
       - name: Tests on the oldest supported Python

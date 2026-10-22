@@ -8,6 +8,12 @@ Registration, on the orchestrator only:
 Responses API tool object is TOOL. Handle a function_call by calling
 create_mount_session and returning json.dumps of its result. Do not pass
 MOUNTABLE_API_KEY into the sandbox process.
+
+Before dispatching tools, use workspace.create_workspace on the backend to
+set this end user's monthly cap. Reuse a mountable-sdk filesystem handle
+to read/write without a mount. Register with workspace.register_webhook
+and authenticate raw deliveries with workspace.verify_webhook. See README.md
+for the shared lifecycle; keep provisioning and webhook secrets outside tools.
 """
 
 from __future__ import annotations
