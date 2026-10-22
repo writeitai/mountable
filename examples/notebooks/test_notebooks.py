@@ -12,16 +12,20 @@ import io
 import json
 import os
 import sys
+import shutil
+import tempfile
 import threading
 import unittest
 import zlib
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
 API_KEY = "mtbl_notebooktestsecret"
+TICKET = "mtbltk_notebookticket"
 FS = "fs_notebooks"
 PREFIX = f"/api/v1/filesystems/{FS}/"
 UTM = "utm_source=data-science-and-ml-workspaces&utm_medium=notebook&utm_content="
@@ -59,18 +63,18 @@ class FakeAPI:
                 if self.command == "POST" and path == "/api/v1/mount-sessions":
                     assert auth == f"Bearer {API_KEY}", auth
                     request = json.loads(body)
-                    assert request["credential"] == "token", request
-                    return self._json(
-                        201,
-                        {
-                            "id": "s1",
-                            "filesystem_id": FS,
-                            "mode": request["mode"],
-                            "state": "active",
-                            "expires_at": "2999-01-01T00:00:00Z",
-                            "token": "mtblst_notebooktoken",
-                        },
-                    )
+                    session = {
+                        "id": "s1",
+                        "filesystem_id": FS,
+                        "mode": request["mode"],
+                        "state": "active",
+                        "expires_at": "2999-01-01T00:00:00Z",
+                    }
+                    if request.get("credential") == "token":
+                        session["token"] = "mtblst_notebooktoken"
+                    else:
+                        session.update(state="requested", ticket=TICKET)
+                    return self._json(201, session)
                 assert auth == "Bearer mtblst_notebooktoken", auth
                 kind, _, rest = path.removeprefix(PREFIX).partition("/")
                 name = "/" + unquote(rest)
@@ -110,6 +114,20 @@ class FakeAPI:
         self._server.server_close()
 
 
+FAKE_CLI = """#!{python}
+import json, os, sys
+dir = sys.argv[-1]
+os.makedirs(os.path.join(dir, "checkpoints"))
+with open(os.path.join(dir, "checkpoints", "latest.json"), "w") as f:
+    json.dump({{"epoch": 30}}, f)
+call = {{"argv": sys.argv, "stdin": sys.stdin.read(),
+        "api_key_in_env": "MOUNTABLE_API_KEY" in os.environ}}
+with open(os.path.join(dir, "..", "call.json"), "w") as f:
+    json.dump(call, f)
+print(json.dumps({{"event": "mounted", "path": dir}}), flush=True)
+"""
+
+
 def etag(data: bytes) -> str:
     return f'"{zlib.crc32(data):08x}"'
 
@@ -124,8 +142,11 @@ def info(name: str, data: bytes) -> dict[str, object]:
     }
 
 
-def run_quickstart() -> str:
-    """Executes the notebook's code cells like a fresh kernel; returns stdout."""
+def run_quickstart(mount: bool = False) -> str:
+    """Executes the notebook's code cells like a fresh kernel; returns stdout.
+
+    The cell tagged "mount" needs FUSE and the CLI; it only runs with mount.
+    """
     notebook = json.loads((HERE / "mountable_quickstart.ipynb").read_text())
     namespace: dict[str, object] = {"__name__": "__main__"}
     out = io.StringIO()
@@ -137,9 +158,8 @@ def run_quickstart() -> str:
             code = compile(
                 source if not source.startswith("%") else "", "<cell>", "exec"
             )
-            if "mount" in cell["metadata"].get("tags", []):
-                continue  # needs FUSE and the CLI; compiled above
-            exec(code, namespace)
+            if mount or "mount" not in cell["metadata"].get("tags", []):
+                exec(code, namespace)
     return out.getvalue()
 
 
@@ -178,12 +198,36 @@ class Notebooks(unittest.TestCase):
         )
         self.assertNotIn(API_KEY, first + second)
 
+    def test_mount_cell_hands_the_cli_only_the_ticket(self) -> None:
+        """A fake CLI stands in for FUSE: it records what it got and fills DIR."""
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home)
+        cli = home / "bin" / "mountable"
+        cli.parent.mkdir()
+        cli.write_text(FAKE_CLI.format(python=sys.executable))
+        cli.chmod(0o755)
+        exists = os.path.exists
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(home)}),
+            mock.patch("os.path.exists", lambda p: p == "/dev/fuse" or exists(p)),
+            mock.patch("subprocess.run"),  # pip install mountable
+            mock.patch("sysconfig.get_path", return_value=str(cli.parent)),
+        ):
+            out = run_quickstart(mount=True)
+        self.assertIn("['checkpoints']\n30\n", out)
+        call = json.loads((home / "call.json").read_text())
+        self.assertEqual(call["argv"][1:4], ["mount", "--ticket-stdin", "--json"])
+        self.assertEqual(call["stdin"], TICKET + "\n")
+        self.assertFalse(call["api_key_in_env"])
+
     def test_marimo_saves_an_artifact_and_creates_no_webhook_unasked(self) -> None:
         sys.path.insert(0, str(HERE))
         self.addCleanup(sys.path.remove, str(HERE))
         from mountable_marimo import app
 
-        app.run()
+        outputs, _ = app.run()
+        shown = " ".join(str(getattr(o, "text", "")) for o in outputs)
+        self.assertIn("MOUNTABLE_WEBHOOK_URL", shown)
         summary = json.loads(self.api.files["/artifacts/weather.summary.json"])
         self.assertEqual(summary["dataset"], "/datasets/weather.csv")
         self.assertEqual(summary["rows"], 5)

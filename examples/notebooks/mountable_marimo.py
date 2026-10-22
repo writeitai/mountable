@@ -116,8 +116,7 @@ def _(fs, json, mo, picked, rows, summary):
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     ## Start the next job when an artifact lands
 
     A webhook calls your job's HTTPS endpoint with a signed
@@ -127,8 +126,12 @@ def _(mo):
     `mountable orgs list`) and `MOUNTABLE_WEBHOOK_URL`, then create it
     once. Your endpoint verifies each message as shown in the
     [webhooks guide](https://mountable.io/docs/webhooks?utm_source=data-science-and-ml-workspaces&utm_medium=notebook&utm_content=nb-02-marimo#verify-the-signature).
-    """
-    )
+    """)
+    return
+
+
+@app.cell
+def _(mo):
     create = mo.ui.run_button(label="Create the webhook")
     create
     return (create,)
