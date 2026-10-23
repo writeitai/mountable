@@ -17,8 +17,10 @@ jobs:
     name: Test and package
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # Owner policy: all jobs use the shared self-hosted pool.
-    runs-on: [self-hosted, writeitai-pool]
+    # GitHub-hosted by default (free for this public repository; the shared
+    # writeitai-pool does not serve it). The repository variable CI_RUNNER (a
+    # JSON array of labels) moves jobs to the self-hosted slot during outages.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -77,7 +79,7 @@ jobs:
     name: Python SDK
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, writeitai-pool]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10
     defaults:
       run:
@@ -117,7 +119,7 @@ jobs:
     name: TypeScript SDK
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, writeitai-pool]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 10
     defaults:
       run:
