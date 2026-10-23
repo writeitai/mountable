@@ -20,7 +20,7 @@ from pydantic_workspace import build_agent
 
 
 @contextmanager
-def filesystem_api(*, status=200, code="", content=b"saved note"):
+def filesystem_api(*, status=200, code="", content=b"saved note", timeout=False):
     requests = []
 
     def serve(request):
@@ -30,6 +30,8 @@ def filesystem_api(*, status=200, code="", content=b"saved note"):
                 201,
                 json={"token": "mtblst_fake", "expires_at": "2099-01-01T00:00:00Z"},
             )
+        if timeout and request.method == "PUT":
+            raise httpx.ReadTimeout("fake response lost after write", request=request)
         if status >= 400:
             return httpx.Response(status, json={"detail": {"code": code}})
         if request.method == "GET":
@@ -116,6 +118,17 @@ def test_failed_write_is_reported_without_retry(status, code):
             model_for("create_note", {"name": "summary.md", "text": "hello"}, [])
         )
         assert code in agent.run_sync("Save", deps=filesystem).output
+    assert len([r for r in requests if r.method == "PUT"]) == 1
+
+
+def test_create_timeout_reports_unknown_outcome_without_repeating_write():
+    with filesystem_api(timeout=True) as (filesystem, requests):
+        agent = build_agent(
+            model_for("create_note", {"name": "summary.md", "text": "hello"}, [])
+        )
+        output = agent.run_sync("Save", deps=filesystem).output
+    assert "Outcome unknown" in output
+    assert "Read it before" in output
     assert len([r for r in requests if r.method == "PUT"]) == 1
 
 

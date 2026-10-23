@@ -51,6 +51,9 @@ filesystem ID and an authorized key.
 The cap error is returned to the agent as an error, not silently retried. Your
 application should also enforce its own overall model-call and retry budget.
 Read-only reviewers should receive a read-only limited key and handle.
+A `network_error` on create has an unknown outcome; read the note before
+creating it again. A read downloads the file before checking its size, so set
+the filesystem's storage quota for your workload as well as a spending cap.
 
 ## Mem0: keep a file copy of one user's memory records
 

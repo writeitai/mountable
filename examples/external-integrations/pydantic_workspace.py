@@ -54,6 +54,11 @@ def build_agent(model: Model | str) -> Agent[Filesystem, str]:
         except ValueError:
             return "Error: use a Markdown filename such as summary.md."
         except MountableError as error:
+            if error.status is None:
+                return (
+                    f"Outcome unknown ({error.code}): {name} may have been created. "
+                    "Read it before creating it again."
+                )
             return f"Mountable refused the create: {error.code}"
 
     return agent

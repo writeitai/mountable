@@ -71,6 +71,7 @@ if __name__ == "__main__":
         with Mountable() as client:
             filesystem = client.filesystem(os.environ["MOUNTABLE_FILESYSTEM_ID"])
             path = f"mem0-exports/{uuid4().hex}.json"
+            print(f"Export destination: {path}", flush=True)
             count = archive_user_memories(
                 memory, filesystem, os.environ["MEM0_USER_ID"], path
             )
