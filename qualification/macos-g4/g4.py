@@ -1471,6 +1471,118 @@ def group_pjdfstest(r):
         m.end()
 
 
+# --- folding near the chunk cap (D47, 0.6.1) --------------------------------
+
+
+FOLD_PROBE = r"""
+import hashlib, os, random, sqlite3, sys
+how, path, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rng = random.Random(47)
+if how == "rewrite":  # distinct small ranges rewritten in place, each fsynced
+    size = 4 << 20
+    data = bytearray(rng.randbytes(size))
+    with open(path, "wb") as f:
+        f.write(data)
+    fd = os.open(path, os.O_WRONLY)
+    for i, slot in enumerate(rng.sample(range(size // 16), n)):
+        rec = rng.randbytes(8)
+        os.pwrite(fd, rec, slot * 16)
+        os.fsync(fd)
+        data[slot * 16:slot * 16 + 8] = rec
+    os.close(fd)
+elif how == "append":  # reflog-like lines appended, each fsynced
+    data = bytearray()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND, 0o644)
+    for i in range(n):
+        line = (f"{i:08d} " + "x" * 190 + "\n").encode()
+        os.write(fd, line)
+        os.fsync(fd)
+        data += line
+    os.close(fd)
+elif how == "sqlite":  # random rows updated in small transactions
+    for leftover in (path, path + "-journal"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA synchronous=FULL")
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)")
+    db.executemany("INSERT INTO t VALUES (?, ?)", ((i, rng.randbytes(100)) for i in range(20000)))
+    db.commit()
+    for _ in range(n // 25):
+        db.executemany("UPDATE t SET v = ? WHERE id = ?", ((rng.randbytes(100), rng.randrange(20000)) for _ in range(25)))
+        db.commit()
+    data = b"".join(v for (v,) in db.execute("SELECT v FROM t ORDER BY id"))
+    db.close()
+print(hashlib.sha256(data).hexdigest())
+"""
+
+FOLD_CHECK = r"""
+import hashlib, sqlite3, sys
+how, path = sys.argv[1], sys.argv[2]
+if how == "sqlite":
+    db = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+    ok = db.execute("PRAGMA integrity_check").fetchone()[0]
+    data = b"".join(v for (v,) in db.execute("SELECT v FROM t ORDER BY id"))
+    print(hashlib.sha256(data).hexdigest(), ok)
+else:
+    print(hashlib.sha256(open(path, "rb").read()).hexdigest(), "ok")
+"""
+
+
+def group_fold(r):
+    """F rows: files that v0.6.0 refuses at the 9,999-chunk cap keep
+    working (D47): in-place rewrites, appends with fsync, SQLite and git."""
+    r.section("Folding near the chunk cap")
+    n = int(os.environ.get("G4_FOLD_WRITES", "12000"))
+    cases = (("F1 rewrites in place", "rewrite", n), ("F2 appends with fsync", "append", n),
+             ("F3 SQLite random updates", "sqlite", int(os.environ.get("G4_FOLD_UPDATES", "50000"))))
+    for step, how, count in cases:
+        m = mounted_with(False)
+        rel = f"g4-fold-{how}"
+        try:
+            t0 = now()
+            p = run([sys.executable, "-c", FOLD_PROBE, how, os.path.join(m.path, rel), str(count)])
+            took = now() - t0
+        finally:
+            m.end()
+        if p.returncode != 0:
+            r.row(step, False, f"exit {p.returncode} after {took:.0f}s: {p.stderr.strip()[-300:]}")
+            continue
+        want = p.stdout.strip()
+        m = mounted_with(True)
+        try:
+            c = run([sys.executable, "-c", FOLD_CHECK, how, os.path.join(m.path, rel)])
+        finally:
+            m.end()
+        got = c.stdout.split()
+        ok = c.returncode == 0 and got == [want, "ok"]
+        r.row(step, ok, f"{count} operations in {took:.0f}s; a fresh read-only mount reads {' '.join(got) or c.stderr.strip()[-200:]}"
+              f"{'' if ok else ', expected ' + want}")
+    commits = int(os.environ.get("G4_FOLD_COMMITS", "100"))
+    m = mounted_with(False)
+    repo = os.path.join(m.path, "g4-fold-git")
+    try:
+        t0 = now()
+        run(["rm", "-rf", repo])
+        bad = [x for x in (git("init", "-q", repo, cwd=m.path),) if x.returncode]
+        for i in range(commits):
+            if bad:
+                break
+            with open(os.path.join(repo, "log.txt"), "a") as f:
+                f.write(f"commit {i}\n")
+            for x in (git("add", "log.txt", cwd=repo), git("commit", "-qm", f"c{i}", cwd=repo)):
+                if x.returncode:
+                    bad.append(x)
+        fsck = git("fsck", "--strict", cwd=repo)
+        count = git("rev-list", "--count", "HEAD", cwd=repo)
+        took = now() - t0
+    finally:
+        m.end()
+    ok = not bad and fsck.returncode == 0 and count.stdout.strip() == str(commits)
+    r.row("F4 git commit churn", ok, f"{commits} commits in {took:.0f}s, fsck exit {fsck.returncode}, {count.stdout.strip()} in HEAD"
+          f"{'' if not bad else '; ' + (bad[0].stdout + bad[0].stderr).strip()[-200:]}")
+
+
 GROUPS = {
     "env": group_env,
     "lifecycle": group_lifecycle,
@@ -1483,6 +1595,7 @@ GROUPS = {
     "isolation": group_isolation,
     "sleep": group_sleep,
     "pjdfstest": group_pjdfstest,
+    "fold": group_fold,
 }
 
 
