@@ -96,8 +96,9 @@ mountable sessions revoke SESSION_ID --json
 
 A revoked session's mount stops working within seconds.
 
-Other commands: `mountable orgs list`, `mountable fs usage FS_ID` (stored
-bytes and files against quotas, 30-day traffic).
+Other commands: `mountable orgs list`, `mountable fs get FS_ID` (the
+filesystem and its limits), `mountable fs usage FS_ID` (stored bytes and
+files against quotas, 30-day traffic).
 
 ## Errors
 
@@ -120,11 +121,16 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 | `ticket_already_used` | Use a new `--idempotency-key` for another mount. |
 | `ticket_invalid` | The ticket was used or expired; create a new one. |
 | `idempotency_conflict` | An identical request is in progress; retry shortly with the same key. |
+| `key_limited_to_filesystem` | A key limited to one filesystem cannot create filesystems or change limits; use an organisation-wide key. |
+| `precondition_failed` | The file changed (or exists, with `--if-none-match`); the error's `current_etag` is its ETag, `null` when nothing exists. Read it again before writing. |
+| `bad_path` | Drop `.` and `..` segments from the path. |
 | `network_error`, `outcome_unknown` | Retry reads; for `ticket create`, retry with the error's `idempotency_key`. |
 
 ## Retries
 
-- **Reads** (`orgs list`, `fs list`, `fs usage`, `sessions list`) are safe to
+- The CLI never retries on its own.
+- **Reads** (`orgs list`, `fs list`, `fs get`, `fs usage`, `sessions list`,
+  `files read`, `files list`, `files changes`, `webhooks list`) are safe to
   retry.
 - **`ticket create`**: always pass a caller-known `--idempotency-key` (without
   one, the CLI prints a generated key to stderr before sending). After a
@@ -140,6 +146,15 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 - **`fs create`** has no idempotency key and names need not be unique. After
   an unknown outcome, run `fs list` and look for the name before creating
   again. Never retry blindly.
+- **`fs update`** sets the values given; repeating it changes nothing more.
+- **`webhooks create`** is not idempotent: after an unknown outcome, run
+  `webhooks list` before creating again. **`webhooks rotate-secret`** issues a
+  new secret each time; after an unknown outcome, rotate again and keep the
+  secret it prints. **`webhooks delete`** after a lost answer answers
+  `not_found`. **`webhooks enable`** is safe to repeat.
+- **`files write`** and **`files delete`** with `--if-match` or
+  `--if-none-match` can fail with `precondition_failed` on a repeat because
+  the first attempt succeeded: compare `current_etag` with what you wrote.
 - **`sessions revoke`** is idempotent.
 - **HTTP 429** (`rate_limited`): wait `retry_after` seconds.
 
@@ -154,37 +169,68 @@ takes an optional `max_duration_seconds`.
 
 ## Files without mounting
 
-A backend that only reads and writes files can skip mounting and use the
-SDKs: conditional writes with ETags, listings, and a change feed (take a
-cursor first, then list, then follow changes). Install them as
-`mountable-sdk` (`pip install mountable-sdk`, `npm install mountable-sdk`).
+A backend that only reads and writes files can skip mounting. The CLI does it
+with the login or the API key, through a token session per command that it
+revokes at the end:
+
+```sh
+printf 'hello' | mountable files write FS_ID notes/a.md --json     # → {"path": "/notes/a.md", "etag": …, …}
+mountable files write FS_ID notes/a.md --from a.md --if-match ETAG --json
+mountable files read FS_ID notes/a.md                              # bytes on stdout
+mountable files read FS_ID notes/a.md --to a.md --json             # all or nothing
+mountable files list FS_ID notes --limit 100 --json                # → {"entries": […], "next": …}
+mountable files delete FS_ID notes/a.md --if-match ETAG --json
+mountable files changes FS_ID --json                               # → {"events": [], "cursor": …}
+mountable files changes FS_ID --cursor CURSOR --wait 25 --json
+```
+
+`--if-none-match` writes only if nothing exists at the path. `files read`
+takes `--json` only with `--to`; to stdout, a download that breaks off fails
+the command and leaves incomplete bytes, so prefer `--to`. To stay in sync:
+take a cursor first, then list, then follow changes from it
+(`cursor_expired` means start again).
+
+The SDKs do the same from code, with conditional writes, listings and the
+change feed. Install them as `mountable-sdk` (`pip install mountable-sdk`,
+`npm install mountable-sdk`).
 
 ## Limits per end user
 
 Give each end user of your app a filesystem with its own monthly spend cap and
-change rate, set through the REST API when you create it (the CLI, MCP server
-and SDKs cannot set limits yet; `ORG_ID` is in `mountable orgs list`). curl
-reads the key from stdin, never from an argument:
+change rate when you create it (the MCP server cannot set limits):
 
 ```sh
-printf 'header = "Authorization: Bearer %s"\n' "$MOUNTABLE_API_KEY" |
-  curl -q -sS --fail-with-body --config - -H "Content-Type: application/json" \
-    "https://mountable.io/api/v1/orgs/$ORG_ID/filesystems" \
-    -d '{"name": "user-42", "spending_cap_cents": 500, "mutations_per_minute": 120}'
+mountable fs create user-42 --spending-cap-cents 500 --mutations-per-minute 120 --json
+mountable fs update FS_ID --spending-cap-cents 1000 --json     # only the flags given change
+mountable fs update FS_ID --spending-cap-cents none --json     # removes the cap
+mountable fs get FS_ID --json
 ```
 
-`PATCH` the filesystem's URL to change a limit; `null` removes a cap. Past the
-cap, its mounts and the files API (`402 filesystem_spending_cap_reached`)
-refuse billable work; other end users keep working. A key limited to one
-filesystem cannot raise its own limits. See
+`--mutations-per-minute none` restores the default rate. `--byte-quota` (1 GiB
+to 100 GiB) and `--entry-quota` (10,000 to 1,000,000) can be changed but not
+removed; the API checks every range (`invalid_request`). Past the cap, its
+mounts and the files API (`402 filesystem_spending_cap_reached`) refuse
+billable work; other end users keep working. Creating filesystems and
+changing limits need a key whose creator is an owner or admin; a key limited
+to one filesystem cannot (`key_limited_to_filesystem`). See
 https://mountable.io/docs/end-user-limits
 
 ## Webhooks when files change
 
-Create one with the same curl call, sending
-`{"url": "https://example.com/hooks/mountable", "path_prefix": "/"}` to
-`…/filesystems/$FS_ID/webhooks` with a key that can write the filesystem. The
-response shows the signing `secret` (`whsec_…`) once; store it like the key.
+Create one with a key that can write the filesystem (every webhook command
+needs read-write access):
+
+```sh
+mountable webhooks create FS_ID https://example.com/hooks/mountable --path-prefix / --json
+# → {"id": WEBHOOK_ID, "secret": "whsec_…", …}
+mountable webhooks list FS_ID --json              # state, last_failure, failing_since
+mountable webhooks rotate-secret FS_ID WEBHOOK_ID --json
+mountable webhooks enable FS_ID WEBHOOK_ID --json # after it was disabled
+mountable webhooks delete FS_ID WEBHOOK_ID --json
+```
+
+The signing `secret` appears once, in the result of `create` or
+`rotate-secret` (without `--json`, alone on stdout); store it like the key.
 Every change, from mounts or the files API, then arrives as a `files.changed`
 message signed per Standard Webhooks. Verify the signature on the raw body,
 answer `2xx` within 10 seconds, apply a message only if its `data.cursor`,

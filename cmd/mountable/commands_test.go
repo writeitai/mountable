@@ -668,6 +668,8 @@ func TestRedact(t *testing.T) {
 		"odd mtblat_a..b.c-d_e":         "odd mtblat_[redacted]",
 		"jwt mtblat_.payload.signature": "jwt mtblat_[redacted]",
 		"refresh mtblrt_... refused":    "refresh mtblrt_[redacted] refused",
+		"secret " + webhookSecret + ".": "secret whsec_[redacted].",
+		"(whsec_a+b/c=), then":          "(whsec_[redacted]), then",
 		"nothing secret here":           "nothing secret here",
 	} {
 		if got := redact(in); got != want {
@@ -850,5 +852,271 @@ func TestMountChecksTheDirectoryBeforeUsingTheTicket(t *testing.T) {
 	}
 	if calls := api.called(); len(calls) != 0 {
 		t.Fatalf("the ticket was used: %v", calls)
+	}
+}
+
+const limitedFS = `{"id":"fsone","name":"user-42","byte_quota":10737418240,"entry_quota":100000,` +
+	`"spending_cap_cents":500,"mutations_per_minute":null,"created_at":"2026-10-01T00:00:00Z"}`
+
+// fs create and fs update send only the limits given; update's none sends
+// null for the spending cap and the mutation rate.
+func TestFilesystemLimits(t *testing.T) {
+	useAPIKey(t)
+	fsPath := "/api/v1/orgs/" + orgA + "/filesystems"
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST " + fsPath:             reply(201, limitedFS),
+		"PATCH " + fsPath + "/fsone": reply(200, limitedFS),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	cases := []struct {
+		args []string
+		want map[string]any
+	}{
+		{[]string{"fs", "create", "user-42"}, map[string]any{"name": "user-42"}},
+		{[]string{"fs", "create", "user-42", "--spending-cap-cents", "500", "--mutations-per-minute", "120", "--byte-quota", "10737418240", "--entry-quota", "100000"},
+			map[string]any{"name": "user-42", "spending_cap_cents": float64(500), "mutations_per_minute": float64(120), "byte_quota": float64(10737418240), "entry_quota": float64(100000)}},
+		{[]string{"fs", "update", "fsone", "--spending-cap-cents", "0"}, map[string]any{"spending_cap_cents": float64(0)}},
+		{[]string{"fs", "update", "fsone", "--spending-cap-cents", "none", "--mutations-per-minute", "none", "--entry-quota", "20000"},
+			map[string]any{"spending_cap_cents": nil, "mutations_per_minute": nil, "entry_quota": float64(20000)}},
+	}
+	for i, tc := range cases {
+		r := runCLI(t, append(tc.args, "--json")...)
+		if r.code != 0 || strings.TrimSpace(r.stdout) != limitedFS {
+			t.Fatalf("%v = %d %q %q", tc.args, r.code, r.stdout, r.stderr)
+		}
+		if got := api.json[i]; fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("%v sent %v, want %v", tc.args, got, tc.want)
+		}
+	}
+	r := runCLI(t, "fs", "update", "fsone", "--byte-quota", "2147483648")
+	if r.code != 0 || !strings.Contains(r.stdout, "spending cap          500 cents\n") || !strings.Contains(r.stdout, "mutations per minute  none\n") {
+		t.Fatalf("fs update = %d %q", r.code, r.stdout)
+	}
+}
+
+func TestFilesystemGet(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET /api/v1/orgs/" + orgA + "/filesystems/fsone": reply(200, limitedFS),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	r := runCLI(t, "fs", "get", "fsone", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != limitedFS || r.stderr != "" {
+		t.Fatalf("fs get --json = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	r = runCLI(t, "fs", "get", "fsone")
+	want := "id                    fsone\n" +
+		"name                  user-42\n" +
+		"created               2026-10-01T00:00:00Z\n" +
+		"spending cap          500 cents\n" +
+		"mutations per minute  none\n" +
+		"byte quota            10.0 GiB\n" +
+		"entry quota           100000\n"
+	if r.code != 0 || r.stdout != want {
+		t.Fatalf("fs get = %d %q", r.code, r.stdout)
+	}
+}
+
+// Bad limit values, none for a quota or on create, and an update without
+// a limit are usage errors, refused before any request.
+func TestFilesystemLimitUsageErrors(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	for _, args := range [][]string{
+		{"fs", "update", "fsone"},
+		{"fs", "update", "fsone", "--org", orgA},
+		{"fs", "update", "fsone", "--byte-quota", "none"},
+		{"fs", "update", "fsone", "--entry-quota", "none"},
+		{"fs", "update", "fsone", "--spending-cap-cents", "-1"},
+		{"fs", "update", "fsone", "--mutations-per-minute", "1.5"},
+		{"fs", "update", "fsone", "--spending-cap-cents", "+5"},
+		{"fs", "update", "--spending-cap-cents", "5"},
+		{"fs", "create", "x", "--spending-cap-cents", "none"},
+		{"fs", "create", "x", "--byte-quota", "10GiB"},
+		{"fs", "get"},
+	} {
+		r := runCLI(t, args...)
+		if r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, "usage: mountable fs") {
+			t.Errorf("%v = %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+	}
+	r := runCLI(t, "fs", "update", "fsone", "--json")
+	if e := jsonError(t, r); r.code != 2 || e.Code != "usage" || !strings.Contains(e.Message, "--spending-cap-cents N|none") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("usage errors called the API: %v", calls)
+	}
+}
+
+// The API checks ranges and permissions; its errors reach the caller with
+// their code.
+func TestFilesystemLimitErrorsPropagate(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply http.HandlerFunc
+		code  string
+		hint  string
+	}{
+		{"limited key", reply(403, `{"detail":{"code":"key_limited_to_filesystem","message":"this key is limited to one filesystem"}}`), "key_limited_to_filesystem", "use a key for the whole organisation"},
+		{"not an admin", reply(403, `{"detail":{"code":"forbidden"}}`), "forbidden", "ask an owner or admin"},
+		{"range", reply(422, `{"detail":[{"loc":["body","mutations_per_minute"],"msg":"Input should be less than or equal to 1000","type":"x"}]}`), "invalid_request", "check the command's arguments"},
+		{"quota null", reply(422, `{"detail":{"code":"quota_required","message":"byte_quota cannot be removed"}}`), "quota_required", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useAPIKey(t)
+			newFakeAPI(t, map[string]http.HandlerFunc{
+				"PATCH /api/v1/orgs/" + orgA + "/filesystems/fsone": tc.reply,
+				"POST /api/v1/orgs/" + orgA + "/filesystems":        tc.reply,
+			})
+			t.Setenv("MOUNTABLE_ORG", orgA)
+			for _, args := range [][]string{
+				{"fs", "update", "fsone", "--mutations-per-minute", "5000", "--json"},
+				{"fs", "create", "x", "--mutations-per-minute", "5000", "--json"},
+			} {
+				r := runCLI(t, args...)
+				e := jsonError(t, r)
+				if r.code != 1 || e.Code != tc.code || e.Message == "" || !strings.Contains(e.Hint, tc.hint) {
+					t.Fatalf("%v: got %d %+v", args, r.code, e)
+				}
+			}
+		})
+	}
+}
+
+const (
+	webhookSecret = "whsec_c2VjcmV0K2tleS9iYXNlNjQ="
+	webhook       = `{"id":"wh1","filesystem_id":"fsone","url":"https://example.com/hooks","path_prefix":"/docs",` +
+		`"state":"active","disabled_reason":null,"created_by":"key:k","created_at":"2026-10-01T00:00:00Z",` +
+		`"last_success_at":null,"last_failure_at":null,"last_failure":null,"failing_since":null}`
+	webhookCreated = `{"id":"wh1","filesystem_id":"fsone","url":"https://example.com/hooks","path_prefix":"/docs",` +
+		`"state":"active","disabled_reason":null,"created_by":"key:k","created_at":"2026-10-01T00:00:00Z",` +
+		`"last_success_at":null,"last_failure_at":null,"last_failure":null,"failing_since":null,"secret":"` + webhookSecret + `"}`
+)
+
+func TestWebhookCommands(t *testing.T) {
+	useAPIKey(t)
+	hooks := "/api/v1/orgs/" + orgA + "/filesystems/fsone/webhooks"
+	failing := strings.Replace(webhook, `"last_failure":null`, `"last_failure":"HTTP 500"`, 1)
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST " + hooks:                        reply(201, webhookCreated),
+		"GET " + hooks:                         reply(200, "["+webhook+","+strings.Replace(failing, `"wh1"`, `"wh2"`, 1)+"]"),
+		"DELETE " + hooks + "/wh1":             reply(204, ""),
+		"POST " + hooks + "/wh1:rotate-secret": reply(200, webhookCreated),
+		"POST " + hooks + "/wh1:enable":        reply(200, webhook),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+
+	r := runCLI(t, "webhooks", "create", "fsone", "https://example.com/hooks", "--path-prefix", "/docs", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != webhookCreated || r.stderr != "" {
+		t.Fatalf("webhooks create --json = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if got := api.json[0]; fmt.Sprint(got) != fmt.Sprint(map[string]any{"url": "https://example.com/hooks", "path_prefix": "/docs"}) {
+		t.Errorf("create body = %v", got)
+	}
+	r = runCLI(t, "webhooks", "create", "fsone", "https://example.com/hooks")
+	if r.code != 0 || r.stdout != webhookSecret+"\n" || !strings.Contains(r.stderr, "wh1") || !strings.Contains(r.stderr, "only once") || strings.Contains(r.stderr, "whsec") {
+		t.Fatalf("webhooks create = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if _, sent := api.json[1]["path_prefix"]; sent {
+		t.Errorf("sent path_prefix without --path-prefix: %v", api.json[1])
+	}
+
+	r = runCLI(t, "webhooks", "rotate-secret", "fsone", "wh1")
+	if r.code != 0 || r.stdout != webhookSecret+"\n" || !strings.Contains(r.stderr, "wh1") || strings.Contains(r.stderr, "whsec") {
+		t.Fatalf("webhooks rotate-secret = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	r = runCLI(t, "webhooks", "rotate-secret", "fsone", "wh1", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != webhookCreated {
+		t.Fatalf("webhooks rotate-secret --json = %d %q", r.code, r.stdout)
+	}
+
+	r = runCLI(t, "webhooks", "list", "fsone", "--json")
+	if r.code != 0 || !strings.HasPrefix(r.stdout, "["+webhook) {
+		t.Fatalf("webhooks list --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "list", "fsone")
+	want := "ID   STATE   PATH-PREFIX  URL                        LAST-FAILURE\n" +
+		"wh1  active  /docs        https://example.com/hooks  -\n" +
+		"wh2  active  /docs        https://example.com/hooks  HTTP 500\n"
+	if r.code != 0 || r.stdout != want {
+		t.Fatalf("webhooks list = %d %q", r.code, r.stdout)
+	}
+
+	r = runCLI(t, "webhooks", "enable", "fsone", "wh1", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != webhook {
+		t.Fatalf("webhooks enable --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "enable", "fsone", "wh1")
+	if r.code != 0 || r.stdout != "wh1 active\n" {
+		t.Fatalf("webhooks enable = %d %q", r.code, r.stdout)
+	}
+
+	r = runCLI(t, "webhooks", "delete", "fsone", "wh1", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != `{"deleted":true,"id":"wh1"}` {
+		t.Fatalf("webhooks delete --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "delete", "fsone", "wh1")
+	if r.code != 0 || r.stdout != "deleted wh1\n" {
+		t.Fatalf("webhooks delete = %d %q", r.code, r.stdout)
+	}
+	if calls := api.called(); calls[len(calls)-1] != "DELETE "+hooks+"/wh1" {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestWebhookUsageErrors(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	for _, args := range [][]string{
+		{"webhooks"},
+		{"webhooks", "create", "fsone"},
+		{"webhooks", "list"},
+		{"webhooks", "delete", "fsone"},
+		{"webhooks", "rotate-secret", "fsone"},
+		{"webhooks", "enable", "fsone", "wh1", "extra"},
+	} {
+		r := runCLI(t, args...)
+		if r.code != 2 || r.stdout != "" || r.stderr == "" {
+			t.Errorf("%v = %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("usage errors called the API: %v", calls)
+	}
+}
+
+// Every webhook call needs read-write access; the API's refusal reaches
+// the caller, and a secret the API echoes in an error is redacted.
+func TestWebhookErrors(t *testing.T) {
+	useAPIKey(t)
+	hooks := "/api/v1/orgs/" + orgA + "/filesystems/fsone/webhooks"
+	noGrant := reply(403, `{"detail":{"code":"no_grant"}}`)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET " + hooks:                         noGrant,
+		"POST " + hooks + "/wh1:enable":        noGrant,
+		"POST " + hooks:                        reply(422, `{"detail":[{"loc":["body","url"],"msg":"bad url, secret `+webhookSecret+` kept","type":"x"}]}`),
+		"POST " + hooks + "/wh1:rotate-secret": reply(409, `{"detail":{"code":"conflict","message":"rotating `+webhookSecret+` failed"}}`),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	for _, args := range [][]string{{"webhooks", "list", "fsone", "--json"}, {"webhooks", "enable", "fsone", "wh1", "--json"}} {
+		r := runCLI(t, args...)
+		if e := jsonError(t, r); r.code != 1 || e.Code != "no_grant" {
+			t.Fatalf("%v: got %d %+v", args, r.code, e)
+		}
+	}
+	for _, args := range [][]string{
+		{"webhooks", "create", "fsone", "http://x", "--json"},
+		{"webhooks", "create", "fsone", "http://x"},
+		{"webhooks", "rotate-secret", "fsone", "wh1", "--json"},
+		{"webhooks", "rotate-secret", "fsone", "wh1"},
+	} {
+		r := runCLI(t, args...)
+		out := r.stdout + r.stderr
+		if r.code != 1 || strings.Contains(out, "c2VjcmV0") || !strings.Contains(out, "whsec_[redacted]") {
+			t.Fatalf("%v: %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
 	}
 }
