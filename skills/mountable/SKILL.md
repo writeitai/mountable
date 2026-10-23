@@ -199,6 +199,6 @@ once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
   `mountable mount` needs nothing else installed and no `sudo`; its writes
   are write-through (about 7 MiB/s), and macOS adds `._` files beside most
   files. Databases such as SQLite work there; locks are local to one mount,
-  so open a database from one machine at a time. See the CLI README's macOS
+  so open a database through one mount at a time, even on the same machine. See the CLI README's macOS
   section for the limits.
 - Deleting a filesystem is done in the console, not from the CLI.
