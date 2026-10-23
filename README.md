@@ -245,6 +245,13 @@ Code, Gemini ADK, and xAI Grok. The orchestrator holds `MOUNTABLE_API_KEY`
 and the sandbox receives the one-time ticket on stdin. The guide is
 <https://mountable.io/docs/integrations>.
 
+## Framework and memory examples
+
+[`examples/external-integrations`](examples/external-integrations) has Pydantic
+AI tools for persistent Markdown notes and a paginated Mem0 record export.
+Both use the Files API through the SDK. Their offline tests exercise the real
+frameworks and SDKs without paid cloud or model calls.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox

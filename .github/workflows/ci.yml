@@ -17,9 +17,8 @@ jobs:
     name: Test and package
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # GitHub-hosted by default; the repository variable CI_RUNNER (a JSON
-    # array of labels) moves jobs to the self-hosted slot during outages.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    # Owner policy: all jobs use the shared self-hosted pool.
+    runs-on: [self-hosted, writeitai-pool]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -78,7 +77,7 @@ jobs:
     name: Python SDK
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: [self-hosted, writeitai-pool]
     timeout-minutes: 10
     defaults:
       run:
@@ -101,6 +100,15 @@ jobs:
         run: uv run --locked python -m unittest discover -s ../../examples/llm-providers -p 'test_*.py'
       - name: Notebook starters run against a fake files API
         run: uv run --locked --with marimo==0.25.2 python ../../examples/notebooks/test_notebooks.py
+      - name: Framework and memory examples exercise real SDKs over fake HTTP
+        working-directory: examples/external-integrations
+        env:
+          MEM0_TELEMETRY: "false"
+          MEM0_DIR: ${{ runner.temp }}/mem0
+        run: |
+          uv run --locked --python 3.12 ruff format --check .
+          uv run --locked --python 3.12 ruff check .
+          uv run --locked --python 3.12 pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
@@ -109,7 +117,7 @@ jobs:
     name: TypeScript SDK
     # Never run fork pull requests: CI may use a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    runs-on: [self-hosted, writeitai-pool]
     timeout-minutes: 10
     defaults:
       run:
