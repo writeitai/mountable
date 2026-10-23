@@ -18,11 +18,25 @@ const usage = `usage:
   mountable logout
   mountable orgs list
   mountable fs list [--org ORG_ID]
-  mountable fs create NAME [--org ORG_ID]
+  mountable fs create NAME [--spending-cap-cents N] [--mutations-per-minute N]
+                       [--byte-quota BYTES] [--entry-quota N] [--org ORG_ID]
+  mountable fs get FS_ID [--org ORG_ID]    the filesystem and its limits
+  mountable fs update FS_ID [--spending-cap-cents N|none] [--mutations-per-minute N|none]
+                       [--byte-quota BYTES] [--entry-quota N] [--org ORG_ID]
   mountable fs usage FS_ID [--org ORG_ID]
   mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration DURATION]
   mountable sessions list FS_ID [--org ORG_ID]
   mountable sessions revoke SESSION_ID
+  mountable files write FS_ID PATH [--from FILE] [--if-match ETAG] [--if-none-match]
+  mountable files read FS_ID PATH [--to FILE]
+  mountable files delete FS_ID PATH [--if-match ETAG]
+  mountable files list FS_ID [PATH] [--after NAME] [--limit N]
+  mountable files changes FS_ID [--cursor CURSOR] [--wait SECONDS]
+  mountable webhooks create FS_ID URL [--path-prefix PREFIX] [--org ORG_ID]
+  mountable webhooks list FS_ID [--org ORG_ID]
+  mountable webhooks delete FS_ID WEBHOOK_ID [--org ORG_ID]
+  mountable webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]
+  mountable webhooks enable FS_ID WEBHOOK_ID [--org ORG_ID]
   mountable mount [--ro] FS_ID DIR         mount with your login
   mountable mount --ticket-stdin DIR       mount with a ticket read from stdin
   mountable unmount DIR
@@ -31,8 +45,16 @@ const usage = `usage:
   mountable licenses                       third-party licenses and notices
 
 Every command takes --json: one JSON document on stdout (JSON lines for
-mount; {"usage": …} for help), diagnostics on stderr. The exception is mcp,
-whose stdout is the MCP protocol. Nothing prompts.
+mount; {"usage": …} for help), diagnostics on stderr. The exceptions are
+mcp, whose stdout is the MCP protocol, and files read, which needs --to
+with --json. Nothing prompts.
+
+Limits (fs create, fs update): the API checks the ranges. With fs update,
+none removes the spending cap (cents a month) or restores the default
+mutation rate; it needs at least one limit.
+
+The files commands work without mounting, through a token session that
+ends with the command. files read writes to stdout without --to.
 
 Exit codes: 0 success, 1 error (API, network, mount or credentials),
 2 wrong usage.
@@ -125,15 +147,19 @@ func dispatch(o *output, command string, args []string) error {
 		}
 		return usageError("orgs list")
 	case "fs":
-		switch name, rest := sub("list", "create", "usage"); name {
+		switch name, rest := sub("list", "create", "get", "update", "usage"); name {
 		case "list":
 			return fsList(o, rest)
 		case "create":
 			return fsCreate(o, rest)
+		case "get":
+			return fsGet(o, rest)
+		case "update":
+			return fsUpdate(o, rest)
 		case "usage":
 			return fsUsage(o, rest)
 		}
-		return usageError("fs list | fs create NAME | fs usage FS_ID")
+		return usageError("fs list | fs create NAME | fs get FS_ID | fs update FS_ID | fs usage FS_ID")
 	case "ticket":
 		if name, rest := sub("create"); name != "" {
 			return ticketCreate(o, rest)
@@ -147,6 +173,34 @@ func dispatch(o *output, command string, args []string) error {
 			return sessionsRevoke(o, rest)
 		}
 		return usageError("sessions list FS_ID | sessions revoke SESSION_ID")
+	case "files":
+		switch name, rest := sub("write", "read", "delete", "list", "changes"); name {
+		case "write":
+			return filesWrite(o, rest)
+		case "read":
+			return filesRead(o, rest)
+		case "delete":
+			return filesDelete(o, rest)
+		case "list":
+			return filesList(o, rest)
+		case "changes":
+			return filesChanges(o, rest)
+		}
+		return usageError("files write | files read | files delete | files list | files changes")
+	case "webhooks":
+		switch name, rest := sub("create", "list", "delete", "rotate-secret", "enable"); name {
+		case "create":
+			return webhooksCreate(o, rest)
+		case "list":
+			return webhooksList(o, rest)
+		case "delete":
+			return webhooksDelete(o, rest)
+		case "rotate-secret":
+			return webhooksRotateSecret(o, rest)
+		case "enable":
+			return webhooksEnable(o, rest)
+		}
+		return usageError("webhooks create | webhooks list | webhooks delete | webhooks rotate-secret | webhooks enable")
 	}
 	return usageError("COMMAND; run `mountable help`")
 }

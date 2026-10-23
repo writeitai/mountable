@@ -27,6 +27,9 @@ type cliError struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// Session is the existing session behind ticket_already_used.
 	Session json.RawMessage `json:"session,omitempty"`
+	// CurrentETag is the file's ETag behind precondition_failed: a string,
+	// or null when nothing exists at the path.
+	CurrentETag json.RawMessage `json:"current_etag,omitempty"`
 }
 
 func (e *cliError) Error() string { return e.Message }
@@ -46,21 +49,24 @@ func usageError(usage string) *cliError {
 // explanations gives each known code its message (when the API sends only
 // the code) and its next step.
 var explanations = map[string]struct{ message, hint string }{
-	"unauthenticated":      {"not signed in, or the credentials were refused", "run `mountable login` or set `MOUNTABLE_API_KEY`"},
-	"login_ended":          {"the login behind this request has ended", "run `mountable login` or set `MOUNTABLE_API_KEY`"},
-	"payment_required":     {"the organisation needs a payment method", ""},
-	"org_required":         {"several organisations are available", "pass `--org` (see `mountable orgs list`)"},
-	"not_found":            {"not found, or not visible to these credentials", "check the ID with `mountable fs list`"},
-	"no_grant":             {"these credentials have no grant for this filesystem in this mode", "ask an owner or admin for a grant, or use `--ro`"},
-	"forbidden":            {"these credentials may not do this", "ask an owner or admin of the organisation"},
-	"api_key_forbidden":    {"an API key may not do this", "use a person's login (`mountable login`) or the console"},
-	"rate_limited":         {"too many requests", "wait `retry_after` seconds, then retry"},
-	"idempotency_conflict": {"an identical request is in progress", "wait a moment, then retry with the same idempotency key"},
-	"ticket_already_used":  {"the ticket for this idempotency key was already used", "use a new `--idempotency-key` for another mount"},
-	"ticket_invalid":       {"the ticket is unknown, already used or expired", "create a new one with `mountable ticket create FS_ID`"},
-	"session_not_active":   {"the mount session has ended", "create a new ticket with `mountable ticket create FS_ID`"},
-	"invalid_request":      {"the API rejected the request", "check the command's arguments"},
-	"network_error":        {"the API could not be reached", "check the network and MOUNTABLE_API_URL; reads and revoking sessions are safe to retry"},
+	"unauthenticated":           {"not signed in, or the credentials were refused", "run `mountable login` or set `MOUNTABLE_API_KEY`"},
+	"login_ended":               {"the login behind this request has ended", "run `mountable login` or set `MOUNTABLE_API_KEY`"},
+	"payment_required":          {"the organisation needs a payment method", ""},
+	"org_required":              {"several organisations are available", "pass `--org` (see `mountable orgs list`)"},
+	"not_found":                 {"not found, or not visible to these credentials", "check the ID with `mountable fs list`"},
+	"no_grant":                  {"these credentials have no grant for this filesystem in this mode", "ask an owner or admin for a grant, or use `--ro`"},
+	"forbidden":                 {"these credentials may not do this", "ask an owner or admin of the organisation"},
+	"api_key_forbidden":         {"an API key may not do this", "use a person's login (`mountable login`) or the console"},
+	"rate_limited":              {"too many requests", "wait `retry_after` seconds, then retry"},
+	"idempotency_conflict":      {"an identical request is in progress", "wait a moment, then retry with the same idempotency key"},
+	"ticket_already_used":       {"the ticket for this idempotency key was already used", "use a new `--idempotency-key` for another mount"},
+	"ticket_invalid":            {"the ticket is unknown, already used or expired", "create a new one with `mountable ticket create FS_ID`"},
+	"session_not_active":        {"the mount session has ended", "create a new ticket with `mountable ticket create FS_ID`"},
+	"invalid_request":           {"the API rejected the request", "check the command's arguments"},
+	"bad_path":                  {"the path is not valid", "use a path without `.` or `..` segments"},
+	"precondition_failed":       {"the file's ETag does not match", "read the file again, then retry with its current ETag"},
+	"key_limited_to_filesystem": {"an API key limited to one filesystem may not do this", "use a key for the whole organisation, or a person's login"},
+	"network_error":             {"the API could not be reached", "check the network and MOUNTABLE_API_URL; reads and revoking sessions are safe to retry"},
 }
 
 // toCLIError turns any error into the reported form, with credentials
@@ -74,7 +80,7 @@ func toCLIError(err error) *cliError {
 		copied := *e
 		e = &copied
 	case errors.As(err, &api):
-		e = &cliError{Code: api.Code, Message: api.Message, RetryAfter: api.RetryAfter}
+		e = &cliError{Code: api.Code, Message: api.Message, RetryAfter: api.RetryAfter, CurrentETag: api.CurrentETag}
 		if e.Code == "" {
 			e.Code = "api_error"
 			e.Message = fmt.Sprintf("the API answered HTTP %d", api.Status)
@@ -82,6 +88,14 @@ func toCLIError(err error) *cliError {
 		}
 		if e.Code == "payment_required" {
 			e.Hint = api.URL
+		}
+		if e.Code == "precondition_failed" && api.CurrentETag != nil {
+			var etag *string
+			_ = json.Unmarshal(api.CurrentETag, &etag)
+			e.Hint = "nothing exists at this path"
+			if etag != nil {
+				e.Hint = fmt.Sprintf("the current ETag is %s; read the file again, then retry with it", *etag)
+			}
 		}
 	case errors.As(err, &network):
 		e = &cliError{Code: "network_error", Message: err.Error()}
@@ -104,6 +118,7 @@ func toCLIError(err error) *cliError {
 	e.Hint = redact(e.Hint)
 	e.IdempotencyKey = redact(e.IdempotencyKey)
 	e.Session = redactJSON(e.Session)
+	e.CurrentETag = redactJSON(e.CurrentETag)
 	return e
 }
 
@@ -149,12 +164,17 @@ func redactValue(v any) any {
 // tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
 // An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so
 // a secret runs up to the first character outside [A-Za-z0-9_.-]; a dot
-// right after a secret is redacted with it.
-var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
+// right after a secret is redacted with it. Webhook signing secrets are
+// whsec_ and Base64.
+var (
+	secretPattern        = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
+	webhookSecretPattern = regexp.MustCompile(`whsec_[A-Za-z0-9+/=]+`)
+)
 
 // redact removes anything shaped like a Mountable secret from s.
 func redact(s string) string {
-	return secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+	s = secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+	return webhookSecretPattern.ReplaceAllString(s, "whsec_[redacted]")
 }
 
 // diagnostics is where diagnostics outside a command's output go: stderr
