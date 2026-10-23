@@ -27,7 +27,7 @@ already admitted may finish, and the CLI aborts the mount within about 20
 seconds. An E2B production check on CLI 0.3.0 (2026-10-07) saw the mount stop
 in 2–4 seconds. CLI 0.4.0 has not been re-run there.
 
-## Run it against Mountable
+## Run it against mountable.io
 
 Needs Linux (with FUSE) or macOS, the `mountable` CLI on `PATH`, and
 `MOUNTABLE_API_KEY` on this machine. Sandbox mounts receive only a one-time
@@ -50,7 +50,7 @@ revoke them (`mountable sessions list`, `mountable sessions revoke`).
 
 ## One user hits a monthly spend cap
 
-Mountable lets your backend set a monthly spend cap on each end user's
+mountable.io lets your backend set a monthly spend cap on each end user's
 filesystem. When that user reaches the cap, their billable work stops with
 `402 filesystem_spending_cap_reached`. Other users keep reading and writing.
 
@@ -93,7 +93,7 @@ port. The proxy must pass the raw body and the `webhook-id`,
 `webhook-timestamp`, and `webhook-signature` headers unchanged. The receiver
 listens on loopback only.
 
-The demo creates one filesystem with a 100-cent monthly cap. Mountable's
+The demo creates one filesystem with a 100-cent monthly cap. mountable.io's
 first message is a `files.resync`. The script applies that message, then
 mounts the filesystem and creates `notes/draft.txt`, writes it again, and
 renames it to `notes/report.txt`. Those writes are billed.

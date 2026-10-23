@@ -1,7 +1,7 @@
-# Mountable SDK for Python
+# mountable.io SDK for Python
 
 Read, write, delete, list and follow the files of a
-[Mountable](https://mountable.io) filesystem over HTTPS from a backend,
+[mountable.io](https://mountable.io) filesystem over HTTPS from a backend,
 without mounting it, and create one-time mount tickets for sandboxes.
 
 ```sh

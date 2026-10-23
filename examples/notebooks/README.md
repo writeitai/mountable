@@ -1,6 +1,6 @@
 # Notebook starters
 
-Two notebooks that keep their files in a Mountable folder, so datasets,
+Two notebooks that keep their files in a mountable.io folder, so datasets,
 feature caches and checkpoints stay when the kernel restarts or the session
 times out. Both use `mountable-sdk` and read `MOUNTABLE_API_KEY` and
 `MOUNTABLE_FS_ID` from the platform's secrets or the environment.
@@ -17,7 +17,7 @@ secrets) and Jupyter on your own machine.
 ## Test without a filesystem
 
 The test runs both notebooks against a local fake of the files API; nothing
-reaches Mountable:
+reaches mountable.io:
 
 ```sh
 (cd sdk/python && uv run --locked --with marimo==0.25.2 python ../../examples/notebooks/test_notebooks.py)

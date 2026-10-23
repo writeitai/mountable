@@ -1,6 +1,6 @@
-# Mountable CLI
+# mountable.io CLI
 
-`mountable` mounts a [Mountable](https://mountable.io) filesystem, a shared
+`mountable` mounts a [mountable.io](https://mountable.io) filesystem, a shared
 POSIX filesystem for agents and teams, on any Linux machine or agent sandbox
 and on a Mac (macOS 26, Apple Silicon), and manages filesystems, mount
 tickets and sessions. It is also an MCP server.
@@ -264,7 +264,7 @@ prints the sequence without calling the API. The same illustrations play at
 
 [`examples/notebooks`](examples/notebooks) has a Jupyter notebook for Colab,
 Kaggle, Deepnote and Hugging Face Spaces and a Marimo notebook. They keep
-datasets, feature caches and checkpoints in a Mountable folder with
+datasets, feature caches and checkpoints in a mountable.io folder with
 `mountable-sdk`, so the files stay when the kernel restarts.
 
 ## Multi-agent coding harness
@@ -298,7 +298,7 @@ packaging/build.sh 0.0.0    # binaries, release archives, npm tarball and wheel 
 
 Releases are cut by pushing a tag `vX.Y.Z` (CLI) or `sdk-vX.Y.Z` (SDKs); see
 [`packaging/README.md`](packaging/README.md).
-The Mountable service itself is operated by WriteIt.ai s.r.o.; this repository
+The mountable.io service itself is operated by WriteIt.ai s.r.o.; this repository
 contains the open-source client only.
 
 ## License
