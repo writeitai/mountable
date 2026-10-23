@@ -5,23 +5,31 @@ import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { Mountable, MountableError } from "../src/index.ts";
+import { Mountable, MountableError, Webhook } from "../src/index.ts";
 import {
   API_KEY,
   CHANGES,
   error,
   FILES,
+  FILESYSTEMS,
   FS,
   fileInfo,
+  filesystemView,
   LIST,
+  ME,
   MockAPI,
+  me,
   type Reply,
   type Request,
   reply,
   SESSIONS,
+  WEBHOOK_SECRET,
+  WEBHOOKS,
+  webhookView,
 } from "./mock-api.ts";
 
 const MODIFIED = new Date("2026-10-17T12:00:00.123Z");
+const CREATED = new Date("2026-10-01T09:30:00Z");
 const READ_REPLY = reply(200, "abc", { ETag: '"e1"', "Last-Modified": "Sat, 17 Oct 2026 12:00:00 GMT" });
 
 let api: MockAPI;
@@ -30,6 +38,7 @@ let client: Mountable;
 beforeEach(async () => {
   api = new MockAPI();
   await api.start();
+  delete process.env.MOUNTABLE_ORG;
   client = new Mountable({ apiKey: API_KEY, baseUrl: api.url });
 });
 
@@ -568,6 +577,319 @@ test("C32 a redirect is an error", async () => {
   assert.equal((await rejects(fs.read("a.md"))).status, 307);
   assert.equal((await rejects(client.createMountTicket(FS))).status, 303);
   assert.ok(!api.requests.some((r) => r.path.includes("elsewhere")));
+});
+
+// --- management ------------------------------------------------------------
+
+test("C33 the organisation is resolved once", async (t) => {
+  api.route("GET", FILESYSTEMS, reply(200, []));
+  await Promise.all([client.listFilesystems(), client.listFilesystems()]); // concurrent first calls share one /me
+  await client.listFilesystems();
+  assert.deepEqual(api.calls(), [`GET ${ME}`, `GET ${FILESYSTEMS}`, `GET ${FILESYSTEMS}`, `GET ${FILESYSTEMS}`]);
+  assert.equal(api.requests[0].headers.authorization, `Bearer ${API_KEY}`);
+  t.after(() => {
+    delete process.env.MOUNTABLE_ORG;
+  });
+  process.env.MOUNTABLE_ORG = "org_env";
+  api.route("GET", "/api/v1/orgs/org_env/filesystems", reply(200, []));
+  api.route("GET", "/api/v1/orgs/org_arg/filesystems", reply(200, []));
+  await new Mountable({ apiKey: API_KEY, baseUrl: api.url }).listFilesystems();
+  await new Mountable({ apiKey: API_KEY, baseUrl: api.url, orgId: "org_arg" }).listFilesystems();
+  assert.deepEqual(api.calls().slice(4), ["GET /api/v1/orgs/org_env/filesystems", "GET /api/v1/orgs/org_arg/filesystems"]);
+});
+
+test("C34 no organisation raises org_required", async () => {
+  api.route("GET", ME, reply(200, me({ api_key: null })));
+  let e = await rejects(client.listFilesystems());
+  assert.deepEqual([e.status, e.code], [null, "org_required"]);
+  assert.deepEqual(api.calls(), [`GET ${ME}`]);
+  api.route("GET", ME, error(401, "unauthenticated"));
+  e = await rejects(client.getFilesystem(FS));
+  assert.deepEqual([e.status, e.code], [401, "unauthenticated"]);
+});
+
+test("C35 list and get filesystems", async () => {
+  const capped = filesystemView({ id: "fs_two", spending_cap_cents: 500, mutations_per_minute: 60 });
+  api.route("GET", FILESYSTEMS, reply(200, [filesystemView(), capped]));
+  api.route("GET", `${FILESYSTEMS}/${FS}`, reply(200, filesystemView()));
+  const [first, second] = await client.listFilesystems();
+  const expected = {
+    id: FS,
+    name: "notes",
+    byteQuota: 2 ** 30,
+    entryQuota: 10_000,
+    spendingCapCents: null,
+    mutationsPerMinute: null,
+    createdAt: CREATED,
+  };
+  assert.deepEqual(first, expected);
+  assert.deepEqual([second.id, second.spendingCapCents, second.mutationsPerMinute], ["fs_two", 500, 60]);
+  assert.deepEqual(await client.getFilesystem(FS), expected);
+  assert.deepEqual(api.calls().slice(1), [`GET ${FILESYSTEMS}`, `GET ${FILESYSTEMS}/${FS}`]);
+  assert.deepEqual(new Set(api.requests.map((r) => r.headers.authorization)), new Set([`Bearer ${API_KEY}`]));
+  assert.deepEqual(api.sessions(), []);
+});
+
+test("C36 createFilesystem sends only the limits given", async () => {
+  api.route("POST", FILESYSTEMS, (r) => reply(201, filesystemView(r.json())));
+  assert.equal((await client.createFilesystem("notes")).name, "notes");
+  const info = await client.createFilesystem("capped", { spendingCapCents: 0, byteQuota: 2 ** 32 });
+  assert.deepEqual([info.spendingCapCents, info.byteQuota], [0, 2 ** 32]);
+  await client.createFilesystem("all", { spendingCapCents: 1, mutationsPerMinute: 2, byteQuota: 3, entryQuota: 4 });
+  assert.deepEqual(
+    api.operations().map((r) => [r.method, r.json()]),
+    [
+      ["POST", { name: "notes" }],
+      ["POST", { name: "capped", spending_cap_cents: 0, byte_quota: 2 ** 32 }],
+      ["POST", { name: "all", spending_cap_cents: 1, mutations_per_minute: 2, byte_quota: 3, entry_quota: 4 }],
+    ],
+  );
+});
+
+test("C37 updateFilesystem sends only the fields passed", async () => {
+  api.route("PATCH", `${FILESYSTEMS}/${FS}`, (r) => reply(200, filesystemView(r.json())));
+  let info = await client.updateFilesystem(FS, { spendingCapCents: null, entryQuota: 20_000 });
+  assert.equal(info.spendingCapCents, null);
+  assert.equal(info.entryQuota, 20_000);
+  await client.updateFilesystem(FS, { mutationsPerMinute: null });
+  info = await client.updateFilesystem(FS, { spendingCapCents: 1000, mutationsPerMinute: 120, byteQuota: 2 ** 31 });
+  assert.deepEqual(info, {
+    id: FS,
+    name: "notes",
+    byteQuota: 2 ** 31,
+    entryQuota: 10_000,
+    spendingCapCents: 1000,
+    mutationsPerMinute: 120,
+    createdAt: CREATED,
+  });
+  assert.deepEqual(
+    api.operations().map((r) => [r.method, r.json()]),
+    [
+      ["PATCH", { spending_cap_cents: null, entry_quota: 20_000 }],
+      ["PATCH", { mutations_per_minute: null }],
+      ["PATCH", { spending_cap_cents: 1000, mutations_per_minute: 120, byte_quota: 2 ** 31 }],
+    ],
+  );
+});
+
+const USAGE = {
+  retained_bytes: 10,
+  byte_quota: 2 ** 30,
+  entries: 2,
+  entry_quota: 10_000,
+  bytes_read_30d: 30,
+  bytes_written_30d: 40,
+  reserved_cents: 0,
+  currency: null,
+};
+
+test("C38 filesystemUsage", async () => {
+  api.route("GET", `${FILESYSTEMS}/${FS}/usage`, reply(200, USAGE));
+  assert.deepEqual(await client.filesystemUsage(FS), {
+    retainedBytes: 10,
+    byteQuota: 2 ** 30,
+    entries: 2,
+    entryQuota: 10_000,
+    bytesRead30d: 30,
+    bytesWritten30d: 40,
+    reservedCents: 0,
+    currency: null,
+  });
+  assert.equal(api.calls().at(-1), `GET ${FILESYSTEMS}/${FS}/usage`);
+});
+
+test("C39 list and revoke mount sessions", async () => {
+  const session = {
+    id: "s9",
+    filesystem_id: FS,
+    mode: "ro",
+    credential: "token",
+    state: "active",
+    created_by: "api key test",
+    expires_at: "2026-10-17T13:00:00Z",
+    created_at: "2026-10-17T12:00:00Z",
+  };
+  api.route("GET", `${FILESYSTEMS}/${FS}/mount-sessions`, reply(200, [session]));
+  api.route("DELETE", `${SESSIONS}/s9`, reply(204));
+  assert.equal(await client.revokeMountSession("s9"), undefined);
+  assert.deepEqual(await client.listMountSessions(FS), [
+    {
+      id: "s9",
+      filesystemId: FS,
+      mode: "ro",
+      credential: "token",
+      state: "active",
+      createdBy: "api key test",
+      expiresAt: new Date("2026-10-17T13:00:00Z"),
+      createdAt: new Date("2026-10-17T12:00:00Z"),
+    },
+  ]);
+  assert.deepEqual(api.calls(), [`DELETE ${SESSIONS}/s9`, `GET ${ME}`, `GET ${FILESYSTEMS}/${FS}/mount-sessions`]);
+});
+
+test("C40 create and list webhooks", async () => {
+  api.route("POST", WEBHOOKS, (r) => reply(201, webhookView({ secret: WEBHOOK_SECRET, ...r.json() })));
+  let hook = await client.createWebhook(FS, "https://example.test/hook");
+  assert.ok(hook instanceof Webhook);
+  assert.deepEqual(
+    [hook.id, hook.filesystemId, hook.url, hook.pathPrefix, hook.state, hook.disabledReason, hook.createdBy, hook.createdAt],
+    ["wh_one", FS, "https://example.test/hook", "/", "active", null, "api key test", CREATED],
+  );
+  assert.deepEqual([hook.lastSuccessAt, hook.lastFailureAt, hook.lastFailure, hook.failingSince], [null, null, null, null]);
+  assert.equal(hook.secret, WEBHOOK_SECRET);
+  hook = await client.createWebhook(FS, "https://example.test/t", { pathPrefix: "/tickets" });
+  assert.equal(hook.pathPrefix, "/tickets");
+  assert.deepEqual(
+    api.operations().map((r) => r.json()),
+    [{ url: "https://example.test/hook" }, { url: "https://example.test/t", path_prefix: "/tickets" }],
+  );
+  const failing = webhookView({
+    id: "wh_two",
+    state: "disabled",
+    disabled_reason: "failing",
+    last_success_at: "2026-10-02T00:00:00Z",
+    last_failure_at: "2026-10-03T00:00:00Z",
+    last_failure: "HTTP 500",
+    failing_since: "2026-10-02T12:00:00Z",
+  });
+  api.route("GET", WEBHOOKS, reply(200, [webhookView(), failing]));
+  const [first, second] = await client.listWebhooks(FS);
+  assert.equal(first.secret, null);
+  assert.equal(first.lastFailureAt, null);
+  assert.deepEqual([second.state, second.disabledReason, second.lastFailure], ["disabled", "failing", "HTTP 500"]);
+  assert.deepEqual(second.lastSuccessAt, new Date("2026-10-02T00:00:00Z"));
+  assert.deepEqual(second.lastFailureAt, new Date("2026-10-03T00:00:00Z"));
+  assert.deepEqual(second.failingSince, new Date("2026-10-02T12:00:00Z"));
+  assert.equal(second.secret, null);
+});
+
+test("C41 delete, rotate and enable webhooks", async () => {
+  const hook = `${WEBHOOKS}/wh_one`;
+  const rotated = "whsec_bmV3c2VjcmV0";
+  api.route("DELETE", hook, reply(204));
+  api.route("POST", `${hook}:rotate-secret`, reply(200, webhookView({ secret: rotated })));
+  api.route("POST", `${hook}:enable`, reply(200, webhookView()));
+  assert.equal(await client.deleteWebhook(FS, "wh_one"), undefined);
+  assert.equal((await client.rotateWebhookSecret(FS, "wh_one")).secret, rotated);
+  const enabled = await client.enableWebhook(FS, "wh_one");
+  assert.equal(enabled.state, "active");
+  assert.equal(enabled.secret, null);
+  assert.deepEqual(
+    api.operations().map((r) => `${r.method} ${r.path}`),
+    [`DELETE ${hook}`, `POST ${hook}:rotate-secret`, `POST ${hook}:enable`],
+  );
+});
+
+test("C42 IDs are encoded as path segments", async () => {
+  const fs = "/api/v1/orgs/org%2F1/filesystems/a%20b%2F%C5%BE";
+  api.route("GET", fs, reply(200, filesystemView()));
+  api.route("POST", `${fs}/webhooks/wh%3F1:enable`, reply(200, webhookView()));
+  api.route("DELETE", `${SESSIONS}/s%231`, reply(204));
+  const c = new Mountable({ apiKey: API_KEY, baseUrl: api.url, orgId: "org/1" });
+  await c.getFilesystem("a b/ž");
+  await c.enableWebhook("a b/ž", "wh?1");
+  await c.revokeMountSession("s#1");
+  assert.deepEqual(api.calls(), [`GET ${fs}`, `POST ${fs}/webhooks/wh%3F1:enable`, `DELETE ${SESSIONS}/s%231`]);
+});
+
+test("C43 webhook secrets are hidden", async () => {
+  api.route("POST", WEBHOOKS, reply(201, webhookView({ secret: WEBHOOK_SECRET })));
+  const hook = await client.createWebhook(FS, "https://example.test/hook");
+  assert.equal(hook.secret, WEBHOOK_SECRET);
+  for (const shown of [String(hook), inspect(hook), JSON.stringify(hook), JSON.stringify({ ...hook })]) {
+    assert.ok(!shown.includes("whsec_"), shown);
+  }
+  const echo = `refused ${WEBHOOK_SECRET}`;
+  api.route("POST", `${WEBHOOKS}/wh_one:rotate-secret`, error(409, "conflict", { message: echo }));
+  const e = await rejects(client.rotateWebhookSecret(FS, "wh_one"));
+  assert.equal(e.code, "conflict");
+  for (const shown of [String(e), inspect(e), e.message, e.stack ?? "", JSON.stringify(e)]) {
+    assert.ok(!shown.includes(WEBHOOK_SECRET.slice(6)), shown);
+  }
+  assert.ok(e.message.includes("whsec_[redacted]"));
+});
+
+test("C44 repeatable management calls are retried once", async () => {
+  const fs = `${FILESYSTEMS}/${FS}`;
+  const routes: [string, string, Reply][] = [
+    ["GET", ME, reply(200, me())],
+    ["GET", FILESYSTEMS, reply(200, [])],
+    ["GET", fs, reply(200, filesystemView())],
+    ["GET", `${fs}/usage`, reply(200, USAGE)],
+    ["GET", `${fs}/mount-sessions`, reply(200, [])],
+    ["GET", WEBHOOKS, reply(200, [])],
+    ["DELETE", `${SESSIONS}/s9`, reply(204)],
+    ["POST", `${WEBHOOKS}/wh_one:enable`, reply(200, webhookView())],
+  ];
+  for (const [method, path, answer] of routes) {
+    api.route(method, path, failFirst(1, "drop", answer));
+  }
+  await client.listFilesystems();
+  await client.getFilesystem(FS);
+  await client.filesystemUsage(FS);
+  await client.listMountSessions(FS);
+  await client.listWebhooks(FS);
+  await client.revokeMountSession("s9");
+  await client.enableWebhook(FS, "wh_one");
+  const calls = api.calls();
+  assert.deepEqual(
+    routes.map(([method, path]) => calls.filter((c) => c === `${method} ${path}`).length),
+    routes.map(() => 2),
+  );
+  api.route("GET", FILESYSTEMS, failFirst(2, "drop", reply(200, [])));
+  assert.equal((await rejects(client.listFilesystems())).code, "network_error");
+  assert.equal(api.calls().filter((c) => c === `GET ${FILESYSTEMS}`).length, 4);
+});
+
+test("C45 management writes are never retried", async () => {
+  const fs = `${FILESYSTEMS}/${FS}`;
+  const hook = `${WEBHOOKS}/wh_one`;
+  const routes: [string, string, Reply][] = [
+    ["POST", FILESYSTEMS, reply(201, filesystemView())],
+    ["PATCH", fs, reply(200, filesystemView())],
+    ["POST", WEBHOOKS, reply(201, webhookView({ secret: WEBHOOK_SECRET }))],
+    ["POST", `${hook}:rotate-secret`, reply(200, webhookView({ secret: "whsec_x" }))],
+    ["DELETE", hook, reply(204)],
+  ];
+  for (const [method, path, answer] of routes) {
+    api.route(method, path, failFirst(1, "drop", answer));
+  }
+  const calls = [
+    () => client.createFilesystem("notes"),
+    () => client.updateFilesystem(FS, { entryQuota: 20_000 }),
+    () => client.createWebhook(FS, "https://example.test/hook"),
+    () => client.rotateWebhookSecret(FS, "wh_one"),
+    () => client.deleteWebhook(FS, "wh_one"),
+  ];
+  for (const call of calls) {
+    assert.equal((await rejects(call)).code, "network_error");
+  }
+  assert.deepEqual(
+    api.operations().map((r) => `${r.method} ${r.path}`),
+    routes.map(([method, path]) => `${method} ${path}`),
+  );
+});
+
+test("C46 management errors propagate", async () => {
+  const fs = `${FILESYSTEMS}/${FS}`;
+  const invalid = { detail: [{ loc: ["body", "spending_cap_cents"], msg: "too low" }] };
+  api.route("POST", FILESYSTEMS, error(403, "key_limited_to_filesystem"));
+  api.route("PATCH", fs, (r) =>
+    r.json().spending_cap_cents === -1 ? reply(422, invalid) : error(403, "key_limited_to_filesystem"),
+  );
+  api.route("GET", WEBHOOKS, error(403, "forbidden", { message: "needs read-write" }));
+  api.route("DELETE", `${WEBHOOKS}/wh_gone`, error(404, "not_found"));
+  let e = await rejects(client.createFilesystem("notes"));
+  assert.deepEqual([e.status, e.code], [403, "key_limited_to_filesystem"]);
+  e = await rejects(client.updateFilesystem(FS, { byteQuota: 2 ** 31 }));
+  assert.deepEqual([e.status, e.code], [403, "key_limited_to_filesystem"]);
+  e = await rejects(client.updateFilesystem(FS, { spendingCapCents: -1 }));
+  assert.deepEqual([e.status, e.code], [422, "invalid_request"]);
+  assert.ok(e.message.includes("spending_cap_cents"));
+  e = await rejects(client.listWebhooks(FS));
+  assert.deepEqual([e.status, e.code, e.message], [403, "forbidden", "needs read-write"]);
+  e = await rejects(client.deleteWebhook(FS, "wh_gone"));
+  assert.deepEqual([e.status, e.code], [404, "not_found"]);
 });
 
 // --- parity ----------------------------------------------------------------

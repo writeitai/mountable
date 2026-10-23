@@ -1,4 +1,4 @@
-"""The Mountable SDK: the files API and mount tickets over HTTPS."""
+"""The Mountable SDK: the files API, mount tickets and management over HTTPS."""
 
 from mountable_sdk._client import (
     Change,
@@ -6,10 +6,14 @@ from mountable_sdk._client import (
     File,
     FileInfo,
     Filesystem,
+    FilesystemInfo,
+    FilesystemUsage,
     ListPage,
     Mountable,
     MountableError,
+    MountSession,
     MountTicket,
+    Webhook,
 )
 
 __all__ = [
@@ -18,8 +22,12 @@ __all__ = [
     "File",
     "FileInfo",
     "Filesystem",
+    "FilesystemInfo",
+    "FilesystemUsage",
     "ListPage",
+    "MountSession",
     "MountTicket",
     "Mountable",
     "MountableError",
+    "Webhook",
 ]

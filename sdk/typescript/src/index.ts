@@ -1,5 +1,5 @@
-// The Mountable files API and mount tickets over HTTPS. The behaviour is the
-// contract in sdk/contract.md, shared with the Python SDK.
+// The Mountable files API, mount tickets and management over HTTPS. The
+// behaviour is the contract in sdk/contract.md, shared with the Python SDK.
 
 const DEFAULT_BASE_URL = "https://mountable.io";
 // Milliseconds a request may take; a change-feed poll may take its wait longer.
@@ -68,11 +68,84 @@ export class MountTicket {
   }
 }
 
+export interface FilesystemInfo {
+  id: string;
+  name: string;
+  byteQuota: number;
+  entryQuota: number;
+  spendingCapCents: number | null;
+  mutationsPerMinute: number | null;
+  createdAt: Date;
+}
+
+export interface FilesystemUsage {
+  retainedBytes: number;
+  byteQuota: number;
+  entries: number;
+  entryQuota: number;
+  bytesRead30d: number;
+  bytesWritten30d: number;
+  reservedCents: number;
+  currency: string | null;
+}
+
+export interface MountSession {
+  id: string;
+  filesystemId: string;
+  mode: Mode;
+  credential: string;
+  state: string;
+  createdBy: string;
+  expiresAt: Date;
+  createdAt: Date;
+}
+
+/** A webhook. Its signing secret is read from `.secret` and is not shown when the object is printed. */
+export class Webhook {
+  readonly id: string;
+  readonly filesystemId: string;
+  readonly url: string;
+  readonly pathPrefix: string;
+  readonly state: string;
+  readonly disabledReason: string | null;
+  readonly createdBy: string;
+  readonly createdAt: Date;
+  readonly lastSuccessAt: Date | null;
+  readonly lastFailureAt: Date | null;
+  readonly lastFailure: string | null;
+  readonly failingSince: Date | null;
+  readonly #secret: string | null;
+
+  /** @internal */
+  constructor(raw: any) {
+    this.id = raw.id;
+    this.filesystemId = raw.filesystem_id;
+    this.url = raw.url;
+    this.pathPrefix = raw.path_prefix;
+    this.state = raw.state;
+    this.disabledReason = raw.disabled_reason ?? null;
+    this.createdBy = raw.created_by;
+    this.createdAt = new Date(raw.created_at);
+    this.lastSuccessAt = optionalDate(raw.last_success_at);
+    this.lastFailureAt = optionalDate(raw.last_failure_at);
+    this.lastFailure = raw.last_failure ?? null;
+    this.failingSince = optionalDate(raw.failing_since);
+    this.#secret = raw.secret ?? null;
+  }
+
+  /** The signing secret; null except from createWebhook and rotateWebhookSecret. */
+  get secret(): string | null {
+    return this.#secret;
+  }
+}
+
 export interface MountableOptions {
   /** Defaults to MOUNTABLE_API_KEY. */
   apiKey?: string;
   /** Defaults to MOUNTABLE_API_URL, then https://mountable.io. */
   baseUrl?: string;
+  /** Defaults to MOUNTABLE_ORG, then the API key's organisation. */
+  orgId?: string;
 }
 
 export interface CreateMountTicketOptions {
@@ -80,6 +153,29 @@ export interface CreateMountTicketOptions {
   maxDurationSeconds?: number;
   /** Reuse it to retry after an unknown outcome; random when omitted. */
   idempotencyKey?: string;
+}
+
+/** Limits not given take the API's defaults. */
+export interface CreateFilesystemOptions {
+  spendingCapCents?: number;
+  mutationsPerMinute?: number;
+  byteQuota?: number;
+  entryQuota?: number;
+}
+
+/** Only the limits passed change. */
+export interface UpdateFilesystemOptions {
+  /** null removes the spending cap. */
+  spendingCapCents?: number | null;
+  /** null restores the platform's default rate. */
+  mutationsPerMinute?: number | null;
+  byteQuota?: number;
+  entryQuota?: number;
+}
+
+export interface CreateWebhookOptions {
+  /** Defaults to "/" in the API. */
+  pathPrefix?: string;
 }
 
 export interface WriteOptions {
@@ -128,8 +224,9 @@ export interface Filesystem {
 }
 
 // Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-// tokens (mtblst_), tickets (mtbltk_) and login tokens.
-const SECRET = /(mtbl[a-z]*)_[A-Za-z0-9_.-]+/g;
+// tokens (mtblst_), tickets (mtbltk_) and login tokens; except webhook signing
+// secrets: whsec_ and Base64.
+const SECRET = /(mtbl[a-z]*|whsec)_[A-Za-z0-9_.+/=-]+/g;
 
 function redact(text: string): string {
   return text.replace(SECRET, "$1_[redacted]");
@@ -187,6 +284,8 @@ export class Mountable {
   readonly baseUrl: string;
   // Private fields stay out of console.log and util.inspect.
   readonly #apiKey: string;
+  // Read from GET /api/v1/me on the first organisation call when unset.
+  #org: Promise<string> | null;
 
   constructor(options: MountableOptions = {}) {
     const apiKey = options.apiKey || env("MOUNTABLE_API_KEY");
@@ -195,6 +294,8 @@ export class Mountable {
     }
     this.#apiKey = apiKey;
     this.baseUrl = (options.baseUrl || env("MOUNTABLE_API_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
+    const orgId = options.orgId || env("MOUNTABLE_ORG");
+    this.#org = orgId ? Promise.resolve(orgId) : null;
   }
 
   /** A handle on one filesystem. It sends nothing until it is used. */
@@ -218,6 +319,135 @@ export class Mountable {
       body.max_duration_seconds = options.maxDurationSeconds;
     }
     return new MountTicket(await this.#postSession(body));
+  }
+
+  async listFilesystems(): Promise<FilesystemInfo[]> {
+    const response = await this.#call("GET", await this.#orgPath("/filesystems"), true);
+    return json(response).map(filesystemInfo);
+  }
+
+  /** Creates a filesystem. Never retried: a retry after an unknown outcome could create two. */
+  async createFilesystem(name: string, options: CreateFilesystemOptions = {}): Promise<FilesystemInfo> {
+    const body = { name, ...limits(options) };
+    return filesystemInfo(json(await this.#call("POST", await this.#orgPath("/filesystems"), false, body)));
+  }
+
+  async getFilesystem(fsId: string): Promise<FilesystemInfo> {
+    return filesystemInfo(json(await this.#call("GET", await this.#fsPath(fsId), true)));
+  }
+
+  /** Changes the limits passed; null removes the spending cap or the mutation rate. Never retried. */
+  async updateFilesystem(fsId: string, options: UpdateFilesystemOptions): Promise<FilesystemInfo> {
+    return filesystemInfo(json(await this.#call("PATCH", await this.#fsPath(fsId), false, limits(options))));
+  }
+
+  async filesystemUsage(fsId: string): Promise<FilesystemUsage> {
+    const raw = json(await this.#call("GET", await this.#fsPath(fsId, "/usage"), true));
+    return {
+      retainedBytes: raw.retained_bytes,
+      byteQuota: raw.byte_quota,
+      entries: raw.entries,
+      entryQuota: raw.entry_quota,
+      bytesRead30d: raw.bytes_read_30d,
+      bytesWritten30d: raw.bytes_written_30d,
+      reservedCents: raw.reserved_cents,
+      currency: raw.currency ?? null,
+    };
+  }
+
+  /** The filesystem's live sessions; an API key sees only its own. */
+  async listMountSessions(fsId: string): Promise<MountSession[]> {
+    const response = await this.#call("GET", await this.#fsPath(fsId, "/mount-sessions"), true);
+    return json(response).map((raw: any) => ({
+      id: raw.id,
+      filesystemId: raw.filesystem_id,
+      mode: raw.mode,
+      credential: raw.credential,
+      state: raw.state,
+      createdBy: raw.created_by,
+      expiresAt: new Date(raw.expires_at),
+      createdAt: new Date(raw.created_at),
+    }));
+  }
+
+  /** Ends a session; revoking an ended one succeeds too. */
+  async revokeMountSession(sessionId: string): Promise<void> {
+    await this.#call("DELETE", `/api/v1/mount-sessions/${encodeSegment(sessionId)}`, true);
+  }
+
+  /** Creates a webhook; its signing secret is in `.secret`, only here. Never retried. */
+  async createWebhook(fsId: string, url: string, options: CreateWebhookOptions = {}): Promise<Webhook> {
+    const body: Record<string, unknown> = { url };
+    if (options.pathPrefix !== undefined) {
+      body.path_prefix = options.pathPrefix;
+    }
+    return new Webhook(json(await this.#call("POST", await this.#fsPath(fsId, "/webhooks"), false, body)));
+  }
+
+  async listWebhooks(fsId: string): Promise<Webhook[]> {
+    const response = await this.#call("GET", await this.#fsPath(fsId, "/webhooks"), true);
+    return json(response).map((raw: any) => new Webhook(raw));
+  }
+
+  /** Never retried: a retry after a lost answer would find nothing. */
+  async deleteWebhook(fsId: string, webhookId: string): Promise<void> {
+    await this.#call("DELETE", await this.#webhookPath(fsId, webhookId), false);
+  }
+
+  /** A new signing secret, in `.secret`. Never retried. */
+  async rotateWebhookSecret(fsId: string, webhookId: string): Promise<Webhook> {
+    const path = `${await this.#webhookPath(fsId, webhookId)}:rotate-secret`;
+    return new Webhook(json(await this.#call("POST", path, false)));
+  }
+
+  async enableWebhook(fsId: string, webhookId: string): Promise<Webhook> {
+    const path = `${await this.#webhookPath(fsId, webhookId)}:enable`;
+    return new Webhook(json(await this.#call("POST", path, true)));
+  }
+
+  async #orgPath(path: string): Promise<string> {
+    // Concurrent first calls share one GET /api/v1/me; a failed one is not kept.
+    this.#org ??= this.#readOrg().catch((error) => {
+      this.#org = null;
+      throw error;
+    });
+    return `/api/v1/orgs/${encodeSegment(await this.#org)}${path}`;
+  }
+
+  async #readOrg(): Promise<string> {
+    const me = json(await this.#call("GET", "/api/v1/me", true));
+    const orgId = me.api_key?.org_id;
+    if (typeof orgId !== "string" || !orgId) {
+      throw new MountableError(null, "org_required", "pass orgId or set MOUNTABLE_ORG");
+    }
+    return orgId;
+  }
+
+  #fsPath(fsId: string, path = ""): Promise<string> {
+    return this.#orgPath(`/filesystems/${encodeSegment(fsId)}${path}`);
+  }
+
+  #webhookPath(fsId: string, webhookId: string): Promise<string> {
+    return this.#fsPath(fsId, `/webhooks/${encodeSegment(webhookId)}`);
+  }
+
+  /** Sends one call with the API key; a repeatable one is sent once more after a network error. */
+  async #call(method: string, path: string, retry: boolean, body?: unknown): Promise<Answer> {
+    const options: SendOptions =
+      body === undefined ? {} : { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } };
+    let response: Answer;
+    try {
+      response = await this.#send(method, path, this.#apiKey, options);
+    } catch (error) {
+      if (!retry) {
+        throw error;
+      }
+      response = await this.#send(method, path, this.#apiKey, options);
+    }
+    if (!isSuccess(response)) {
+      throw apiError(response);
+    }
+    return response;
   }
 
   async #postSession(body: Record<string, unknown>): Promise<any> {
@@ -495,6 +725,33 @@ function describe(error: unknown): string {
     return `${error.message}${cause}`;
   }
   return String(error);
+}
+
+/** The limits given, under the API's names. */
+function limits(options: UpdateFilesystemOptions): Record<string, unknown> {
+  const fields = {
+    spending_cap_cents: options.spendingCapCents,
+    mutations_per_minute: options.mutationsPerMinute,
+    byte_quota: options.byteQuota,
+    entry_quota: options.entryQuota,
+  };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+function filesystemInfo(raw: any): FilesystemInfo {
+  return {
+    id: raw.id,
+    name: raw.name,
+    byteQuota: raw.byte_quota,
+    entryQuota: raw.entry_quota,
+    spendingCapCents: raw.spending_cap_cents ?? null,
+    mutationsPerMinute: raw.mutations_per_minute ?? null,
+    createdAt: new Date(raw.created_at),
+  };
+}
+
+function optionalDate(value: string | null | undefined): Date | null {
+  return value ? new Date(value) : null;
 }
 
 function fileInfo(raw: any): FileInfo {

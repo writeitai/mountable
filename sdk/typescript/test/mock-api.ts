@@ -9,6 +9,11 @@ export const FILES = `/api/v1/filesystems/${FS}/files`;
 export const LIST = `/api/v1/filesystems/${FS}/list`;
 export const CHANGES = `/api/v1/filesystems/${FS}/changes`;
 export const SESSIONS = "/api/v1/mount-sessions";
+export const ME = "/api/v1/me";
+export const ORG = "org_one";
+export const FILESYSTEMS = `/api/v1/orgs/${ORG}/filesystems`;
+export const WEBHOOKS = `${FILESYSTEMS}/${FS}/webhooks`;
+export const WEBHOOK_SECRET = "whsec_c2VjcmV0K2tleQ+/=";
 
 export interface Request {
   method: string;
@@ -52,10 +57,54 @@ export function fileInfo(path: string, overrides: Record<string, unknown> = {}):
   };
 }
 
+/** GET /api/v1/me for the test API key, which belongs to ORG. */
+export function me(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "u1",
+    email: "dev@example.test",
+    name: "Dev",
+    organisations: [{ id: ORG, name: "One" }],
+    api_key: { id: "k1", org_id: ORG },
+    ...overrides,
+  };
+}
+
+export function filesystemView(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: FS,
+    name: "notes",
+    byte_quota: 2 ** 30,
+    entry_quota: 10_000,
+    spending_cap_cents: null,
+    mutations_per_minute: null,
+    created_at: "2026-10-01T09:30:00Z",
+    ...overrides,
+  };
+}
+
+export function webhookView(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "wh_one",
+    filesystem_id: FS,
+    url: "https://example.test/hook",
+    path_prefix: "/",
+    state: "active",
+    disabled_reason: null,
+    created_by: "api key test",
+    created_at: "2026-10-01T09:30:00Z",
+    last_success_at: null,
+    last_failure_at: null,
+    last_failure: null,
+    failing_since: null,
+    ...overrides,
+  };
+}
+
 /**
  * Answers "METHOD /path" routes and records every request. Token sessions
  * are issued by default: mtblst_token1secret, then mtblst_token2secret, …,
- * each expiring after sessionLifetimeMs.
+ * each expiring after sessionLifetimeMs. GET /api/v1/me answers me() by
+ * default.
  */
 export class MockAPI {
   routes = new Map<string, Handler>();
@@ -147,6 +196,9 @@ export class MockAPI {
     if (request.method === "POST" && request.path === SESSIONS) {
       return this.issueSession(request);
     }
+    if (request.method === "GET" && request.path === ME) {
+      return reply(200, me());
+    }
     return error(404, "not_found");
   }
 
@@ -179,9 +231,9 @@ export class MockAPI {
     return this.requests.map((r) => `${r.method} ${r.path}`);
   }
 
-  /** The requests other than session creation. */
+  /** The requests other than session creation and GET /api/v1/me. */
   operations(): Request[] {
-    return this.requests.filter((r) => r.path !== SESSIONS);
+    return this.requests.filter((r) => r.path !== SESSIONS && r.path !== ME);
   }
 
   sessions(): Request[] {

@@ -11,22 +11,40 @@ from typing import Any
 import httpx
 import pytest
 
-from mountable_sdk import File, FileInfo, Mountable, MountableError, _client
+from mountable_sdk import (
+    File,
+    FileInfo,
+    FilesystemInfo,
+    FilesystemUsage,
+    Mountable,
+    MountableError,
+    MountSession,
+    Webhook,
+    _client,
+)
 from tests.mock_api import (
     API_KEY,
     CHANGES,
     FILES,
+    FILESYSTEMS,
     FS,
     LIST,
+    ME,
     SESSIONS,
+    WEBHOOK_SECRET,
+    WEBHOOKS,
     MockAPI,
     Reply,
     Request,
     error,
     file_info,
+    filesystem_view,
+    me,
+    webhook_view,
 )
 
 MODIFIED = datetime(2026, 10, 17, 12, 0, 0, 123456, tzinfo=timezone.utc)
+CREATED = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -37,7 +55,8 @@ def api() -> Iterator[MockAPI]:
 
 
 @pytest.fixture
-def client(api: MockAPI) -> Iterator[Mountable]:
+def client(api: MockAPI, monkeypatch: pytest.MonkeyPatch) -> Iterator[Mountable]:
+    monkeypatch.delenv("MOUNTABLE_ORG", raising=False)
     with Mountable(api_key=API_KEY, base_url=api.url) as c:
         yield c
 
@@ -650,6 +669,351 @@ def test_c32_a_redirect_is_an_error(api: MockAPI, client: Mountable):
     assert raises(lambda: fs.read("a.md")).status == 307
     assert raises(lambda: client.create_mount_ticket(FS)).status == 303
     assert not any("elsewhere" in r.path for r in api.requests)
+
+
+# --- management ------------------------------------------------------------
+
+
+def test_c33_the_organisation_is_resolved_once(
+    api: MockAPI, client: Mountable, monkeypatch: pytest.MonkeyPatch
+):
+    api.route("GET", FILESYSTEMS, Reply(200, []))
+    client.list_filesystems()
+    client.list_filesystems()
+    assert api.calls() == [f"GET {ME}", f"GET {FILESYSTEMS}", f"GET {FILESYSTEMS}"]
+    assert api.requests[0].headers["authorization"] == f"Bearer {API_KEY}"
+    monkeypatch.setenv("MOUNTABLE_ORG", "org_env")
+    api.route("GET", "/api/v1/orgs/org_env/filesystems", Reply(200, []))
+    api.route("GET", "/api/v1/orgs/org_arg/filesystems", Reply(200, []))
+    with Mountable(api_key=API_KEY, base_url=api.url) as c:
+        c.list_filesystems()
+    with Mountable(api_key=API_KEY, base_url=api.url, org_id="org_arg") as c:
+        c.list_filesystems()
+    assert api.calls()[3:] == [
+        "GET /api/v1/orgs/org_env/filesystems",
+        "GET /api/v1/orgs/org_arg/filesystems",
+    ]
+
+
+def test_c34_no_organisation_raises_org_required(api: MockAPI, client: Mountable):
+    api.route("GET", ME, Reply(200, me(api_key=None)))
+    e = raises(client.list_filesystems)
+    assert (e.status, e.code) == (None, "org_required")
+    assert api.calls() == [f"GET {ME}"]
+    api.route("GET", ME, error(401, "unauthenticated"))
+    e = raises(lambda: client.get_filesystem(FS))
+    assert (e.status, e.code) == (401, "unauthenticated")
+
+
+def test_c35_list_and_get_filesystems(api: MockAPI, client: Mountable):
+    capped = filesystem_view(
+        id="fs_two", spending_cap_cents=500, mutations_per_minute=60
+    )
+    api.route("GET", FILESYSTEMS, Reply(200, [filesystem_view(), capped]))
+    api.route("GET", f"{FILESYSTEMS}/{FS}", Reply(200, filesystem_view()))
+    first, second = client.list_filesystems()
+    assert first == FilesystemInfo(FS, "notes", 2**30, 10_000, None, None, CREATED)
+    assert (second.id, second.spending_cap_cents, second.mutations_per_minute) == (
+        "fs_two",
+        500,
+        60,
+    )
+    assert client.get_filesystem(FS) == first
+    assert api.calls()[1:] == [f"GET {FILESYSTEMS}", f"GET {FILESYSTEMS}/{FS}"]
+    assert {r.headers["authorization"] for r in api.requests} == {f"Bearer {API_KEY}"}
+    assert api.sessions() == []
+
+
+def test_c36_create_filesystem_sends_only_the_limits_given(
+    api: MockAPI, client: Mountable
+):
+    api.route("POST", FILESYSTEMS, lambda r: Reply(201, filesystem_view(**r.json())))
+    assert client.create_filesystem("notes").name == "notes"
+    info = client.create_filesystem("capped", spending_cap_cents=0, byte_quota=2**32)
+    assert (info.spending_cap_cents, info.byte_quota) == (0, 2**32)
+    client.create_filesystem(
+        "all", spending_cap_cents=1, mutations_per_minute=2, byte_quota=3, entry_quota=4
+    )
+    assert [(r.method, r.json()) for r in api.operations()] == [
+        ("POST", {"name": "notes"}),
+        ("POST", {"name": "capped", "spending_cap_cents": 0, "byte_quota": 2**32}),
+        (
+            "POST",
+            {
+                "name": "all",
+                "spending_cap_cents": 1,
+                "mutations_per_minute": 2,
+                "byte_quota": 3,
+                "entry_quota": 4,
+            },
+        ),
+    ]
+
+
+def test_c37_update_filesystem_sends_only_the_fields_passed(
+    api: MockAPI, client: Mountable
+):
+    api.route(
+        "PATCH",
+        f"{FILESYSTEMS}/{FS}",
+        lambda r: Reply(200, filesystem_view(**r.json())),
+    )
+    info = client.update_filesystem(FS, spending_cap_cents=None, entry_quota=20_000)
+    assert info.spending_cap_cents is None and info.entry_quota == 20_000
+    client.update_filesystem(FS, mutations_per_minute=None)
+    info = client.update_filesystem(
+        FS, spending_cap_cents=1000, mutations_per_minute=120, byte_quota=2**31
+    )
+    assert info == FilesystemInfo(FS, "notes", 2**31, 10_000, 1000, 120, CREATED)
+    assert [(r.method, r.json()) for r in api.operations()] == [
+        ("PATCH", {"spending_cap_cents": None, "entry_quota": 20_000}),
+        ("PATCH", {"mutations_per_minute": None}),
+        (
+            "PATCH",
+            {
+                "spending_cap_cents": 1000,
+                "mutations_per_minute": 120,
+                "byte_quota": 2**31,
+            },
+        ),
+    ]
+
+
+USAGE: dict[str, Any] = {
+    "retained_bytes": 10,
+    "byte_quota": 2**30,
+    "entries": 2,
+    "entry_quota": 10_000,
+    "bytes_read_30d": 30,
+    "bytes_written_30d": 40,
+    "reserved_cents": 0,
+    "currency": None,
+}
+
+
+def test_c38_filesystem_usage(api: MockAPI, client: Mountable):
+    api.route("GET", f"{FILESYSTEMS}/{FS}/usage", Reply(200, USAGE))
+    assert client.filesystem_usage(FS) == FilesystemUsage(
+        10, 2**30, 2, 10_000, 30, 40, 0, None
+    )
+    assert api.calls()[-1] == f"GET {FILESYSTEMS}/{FS}/usage"
+
+
+def test_c39_list_and_revoke_mount_sessions(api: MockAPI, client: Mountable):
+    session = {
+        "id": "s9",
+        "filesystem_id": FS,
+        "mode": "ro",
+        "credential": "token",
+        "state": "active",
+        "created_by": "api key test",
+        "expires_at": "2026-10-17T13:00:00Z",
+        "created_at": "2026-10-17T12:00:00Z",
+    }
+    api.route("GET", f"{FILESYSTEMS}/{FS}/mount-sessions", Reply(200, [session]))
+    api.route("DELETE", f"{SESSIONS}/s9", Reply(204))
+    assert client.revoke_mount_session("s9") is None
+    assert client.list_mount_sessions(FS) == [
+        MountSession(
+            "s9",
+            FS,
+            "ro",
+            "token",
+            "active",
+            "api key test",
+            datetime(2026, 10, 17, 13, tzinfo=timezone.utc),
+            datetime(2026, 10, 17, 12, tzinfo=timezone.utc),
+        )
+    ]
+    assert api.calls() == [
+        f"DELETE {SESSIONS}/s9",
+        f"GET {ME}",
+        f"GET {FILESYSTEMS}/{FS}/mount-sessions",
+    ]
+
+
+def test_c40_create_and_list_webhooks(api: MockAPI, client: Mountable):
+    api.route(
+        "POST",
+        WEBHOOKS,
+        lambda r: Reply(201, webhook_view(secret=WEBHOOK_SECRET, **r.json())),
+    )
+    hook = client.create_webhook(FS, "https://example.test/hook")
+    assert hook == Webhook(
+        "wh_one",
+        FS,
+        "https://example.test/hook",
+        "/",
+        "active",
+        None,
+        "api key test",
+        CREATED,
+        None,
+        None,
+        None,
+        None,
+        WEBHOOK_SECRET,
+    )
+    hook = client.create_webhook(FS, "https://example.test/t", path_prefix="/tickets")
+    assert hook.path_prefix == "/tickets"
+    assert [r.json() for r in api.operations()] == [
+        {"url": "https://example.test/hook"},
+        {"url": "https://example.test/t", "path_prefix": "/tickets"},
+    ]
+    failing = webhook_view(
+        id="wh_two",
+        state="disabled",
+        disabled_reason="failing",
+        last_success_at="2026-10-02T00:00:00Z",
+        last_failure_at="2026-10-03T00:00:00Z",
+        last_failure="HTTP 500",
+        failing_since="2026-10-02T12:00:00Z",
+    )
+    api.route("GET", WEBHOOKS, Reply(200, [webhook_view(), failing]))
+    first, second = client.list_webhooks(FS)
+    assert first.secret is None and first.last_failure_at is None
+    assert (second.state, second.disabled_reason, second.last_failure) == (
+        "disabled",
+        "failing",
+        "HTTP 500",
+    )
+    assert second.last_success_at == datetime(2026, 10, 2, tzinfo=timezone.utc)
+    assert second.last_failure_at == datetime(2026, 10, 3, tzinfo=timezone.utc)
+    assert second.failing_since == datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+    assert second.secret is None
+
+
+def test_c41_delete_rotate_and_enable_webhooks(api: MockAPI, client: Mountable):
+    hook = f"{WEBHOOKS}/wh_one"
+    rotated = "whsec_bmV3c2VjcmV0"
+    api.route("DELETE", hook, Reply(204))
+    api.route("POST", f"{hook}:rotate-secret", Reply(200, webhook_view(secret=rotated)))
+    api.route("POST", f"{hook}:enable", Reply(200, webhook_view()))
+    assert client.delete_webhook(FS, "wh_one") is None
+    assert client.rotate_webhook_secret(FS, "wh_one").secret == rotated
+    enabled = client.enable_webhook(FS, "wh_one")
+    assert enabled.state == "active" and enabled.secret is None
+    assert [f"{r.method} {r.path}" for r in api.operations()] == [
+        f"DELETE {hook}",
+        f"POST {hook}:rotate-secret",
+        f"POST {hook}:enable",
+    ]
+
+
+def test_c42_ids_are_encoded_as_path_segments(api: MockAPI):
+    fs = "/api/v1/orgs/org%2F1/filesystems/a%20b%2F%C5%BE"
+    api.route("GET", fs, Reply(200, filesystem_view()))
+    api.route("POST", f"{fs}/webhooks/wh%3F1:enable", Reply(200, webhook_view()))
+    api.route("DELETE", f"{SESSIONS}/s%231", Reply(204))
+    with Mountable(api_key=API_KEY, base_url=api.url, org_id="org/1") as c:
+        c.get_filesystem("a b/ž")
+        c.enable_webhook("a b/ž", "wh?1")
+        c.revoke_mount_session("s#1")
+    assert api.calls() == [
+        f"GET {fs}",
+        f"POST {fs}/webhooks/wh%3F1:enable",
+        f"DELETE {SESSIONS}/s%231",
+    ]
+
+
+def test_c43_webhook_secrets_are_hidden(api: MockAPI, client: Mountable):
+    api.route("POST", WEBHOOKS, Reply(201, webhook_view(secret=WEBHOOK_SECRET)))
+    hook = client.create_webhook(FS, "https://example.test/hook")
+    assert hook.secret == WEBHOOK_SECRET
+    for text in (str(hook), repr(hook)):
+        assert "whsec_" not in text
+    echo = f"refused {WEBHOOK_SECRET}"
+    api.route(
+        "POST", f"{WEBHOOKS}/wh_one:rotate-secret", error(409, "conflict", message=echo)
+    )
+    e = raises(lambda: client.rotate_webhook_secret(FS, "wh_one"))
+    assert e.code == "conflict"
+    for text in (str(e), repr(e), e.message):
+        assert WEBHOOK_SECRET[6:] not in text and "whsec_[redacted]" in text
+
+
+def test_c44_repeatable_management_calls_are_retried_once(
+    api: MockAPI, client: Mountable
+):
+    fs = f"{FILESYSTEMS}/{FS}"
+    routes = [
+        ("GET", ME, Reply(200, me())),
+        ("GET", FILESYSTEMS, Reply(200, [])),
+        ("GET", fs, Reply(200, filesystem_view())),
+        ("GET", f"{fs}/usage", Reply(200, USAGE)),
+        ("GET", f"{fs}/mount-sessions", Reply(200, [])),
+        ("GET", WEBHOOKS, Reply(200, [])),
+        ("DELETE", f"{SESSIONS}/s9", Reply(204)),
+        ("POST", f"{WEBHOOKS}/wh_one:enable", Reply(200, webhook_view())),
+    ]
+    for method, path, reply in routes:
+        api.route(method, path, fail_first(1, "drop", reply))
+    client.list_filesystems()
+    client.get_filesystem(FS)
+    client.filesystem_usage(FS)
+    client.list_mount_sessions(FS)
+    client.list_webhooks(FS)
+    client.revoke_mount_session("s9")
+    client.enable_webhook(FS, "wh_one")
+    calls = api.calls()
+    assert [calls.count(f"{method} {path}") for method, path, _ in routes] == [2] * 8
+    api.route("GET", FILESYSTEMS, fail_first(2, "drop", Reply(200, [])))
+    assert raises(client.list_filesystems).code == "network_error"
+    assert api.calls().count(f"GET {FILESYSTEMS}") == 4
+
+
+def test_c45_management_writes_are_never_retried(api: MockAPI, client: Mountable):
+    fs = f"{FILESYSTEMS}/{FS}"
+    hook = f"{WEBHOOKS}/wh_one"
+    routes = [
+        ("POST", FILESYSTEMS, Reply(201, filesystem_view())),
+        ("PATCH", fs, Reply(200, filesystem_view())),
+        ("POST", WEBHOOKS, Reply(201, webhook_view(secret=WEBHOOK_SECRET))),
+        ("POST", f"{hook}:rotate-secret", Reply(200, webhook_view(secret="whsec_x"))),
+        ("DELETE", hook, Reply(204)),
+    ]
+    for method, path, reply in routes:
+        api.route(method, path, fail_first(1, "drop", reply))
+    calls: list[Any] = [
+        lambda: client.create_filesystem("notes"),
+        lambda: client.update_filesystem(FS, entry_quota=20_000),
+        lambda: client.create_webhook(FS, "https://example.test/hook"),
+        lambda: client.rotate_webhook_secret(FS, "wh_one"),
+        lambda: client.delete_webhook(FS, "wh_one"),
+    ]
+    for call in calls:
+        assert raises(call).code == "network_error"
+    assert [f"{r.method} {r.path}" for r in api.operations()] == [
+        f"{method} {path}" for method, path, _ in routes
+    ]
+
+
+def test_c46_management_errors_propagate(api: MockAPI, client: Mountable):
+    fs = f"{FILESYSTEMS}/{FS}"
+    invalid = {"detail": [{"loc": ["body", "spending_cap_cents"], "msg": "too low"}]}
+    api.route("POST", FILESYSTEMS, error(403, "key_limited_to_filesystem"))
+    api.route(
+        "PATCH",
+        fs,
+        lambda r: (
+            Reply(422, invalid)
+            if r.json().get("spending_cap_cents") == -1
+            else error(403, "key_limited_to_filesystem")
+        ),
+    )
+    api.route("GET", WEBHOOKS, error(403, "forbidden", message="needs read-write"))
+    api.route("DELETE", f"{WEBHOOKS}/wh_gone", error(404, "not_found"))
+    e = raises(lambda: client.create_filesystem("notes"))
+    assert (e.status, e.code) == (403, "key_limited_to_filesystem")
+    e = raises(lambda: client.update_filesystem(FS, byte_quota=2**31))
+    assert (e.status, e.code) == (403, "key_limited_to_filesystem")
+    e = raises(lambda: client.update_filesystem(FS, spending_cap_cents=-1))
+    assert (e.status, e.code) == (422, "invalid_request")
+    assert "spending_cap_cents" in e.message
+    e = raises(lambda: client.list_webhooks(FS))
+    assert (e.status, e.code, e.message) == (403, "forbidden", "needs read-write")
+    e = raises(lambda: client.delete_webhook(FS, "wh_gone"))
+    assert (e.status, e.code) == (404, "not_found")
 
 
 # --- parity ----------------------------------------------------------------

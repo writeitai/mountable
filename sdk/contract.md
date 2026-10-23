@@ -8,8 +8,10 @@ HTTP server and fail when a case listed here has no test. A change to one
 SDK's public behaviour lands in the other, and here, in the same pull request.
 
 The API the SDKs wrap is the files API (`/api/v1/filesystems/{fs}/files/{path}`,
-`/list/{path}`, `/changes`) and `POST /api/v1/mount-sessions`. Names below are
-Python's; TypeScript uses the same names in camelCase and returns promises.
+`/list/{path}`, `/changes`), `POST /api/v1/mount-sessions` and the management
+calls (`/api/v1/orgs/{org}/filesystems/…`, `DELETE /api/v1/mount-sessions/{id}`).
+Names below are Python's; TypeScript uses the same names in camelCase and
+returns promises.
 
 ## Operations
 
@@ -82,3 +84,25 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | ID | Case |
 | --- | --- |
 | C32 | Only a `2xx` answer is a success. A `3xx` answer is not followed and raises `MountableError` with its status (`api_error` without a code), for file operations and session creation alike. |
+
+## Management
+
+Management calls send the API key, not a token session. Below, `…` is
+`/api/v1/orgs/{org_id}`.
+
+| ID | Case |
+| --- | --- |
+| C33 | `org_id` defaults to `MOUNTABLE_ORG`, then to the API key's organisation (`api_key.org_id` of `GET /api/v1/me`), read once on the first organisation call and kept; in TypeScript, concurrent first calls share one request. The argument wins. |
+| C34 | When `/me` has no `api_key.org_id`, an organisation call raises `org_required` (`status` `None`) and sends nothing more. An error from `/me` raises as it is. |
+| C35 | `list_filesystems` sends `GET …/filesystems` and `get_filesystem` sends `GET …/filesystems/{fs_id}`, both with `Authorization: Bearer <API key>` and no token session; they return `FilesystemInfo` (`spending_cap_cents` and `mutations_per_minute` `None` when null, `created_at` parsed). |
+| C36 | `create_filesystem(name, …)` sends `POST …/filesystems` with `name` and only the limits given (`0` is given), and returns the answer's `FilesystemInfo`. |
+| C37 | `update_filesystem(fs_id, …)` sends `PATCH …/filesystems/{fs_id}` with only the fields passed; `None` for `spending_cap_cents` or `mutations_per_minute` sends JSON `null`. It returns the answer's `FilesystemInfo`. |
+| C38 | `filesystem_usage` sends `GET …/filesystems/{fs_id}/usage` and returns `FilesystemUsage` (`currency` `None` when null). |
+| C39 | `list_mount_sessions` sends `GET …/filesystems/{fs_id}/mount-sessions` and returns `MountSession`s with parsed datetimes. `revoke_mount_session` sends `DELETE /api/v1/mount-sessions/{session_id}`, which needs no organisation, and returns nothing. |
+| C40 | `create_webhook(fs_id, url)` sends `POST …/filesystems/{fs_id}/webhooks` with `url`, and `path_prefix` only when given, and returns a `Webhook` with the signing secret in `.secret`. `list_webhooks` sends `GET` there and returns `Webhook`s: `secret` `None`, nullable fields `None`, datetimes parsed. |
+| C41 | `delete_webhook` sends `DELETE …/webhooks/{webhook_id}` and returns nothing; `rotate_webhook_secret` sends `POST …/webhooks/{webhook_id}:rotate-secret` and returns the `Webhook` with the new `.secret`; `enable_webhook` sends `POST …/webhooks/{webhook_id}:enable` and returns the `Webhook`. |
+| C42 | Organisation, filesystem, session and webhook IDs are percent-encoded as path segments. |
+| C43 | A `Webhook` does not show its secret when printed or inspected. A `whsec_` secret the API echoes in an error never appears in its message or `repr`. |
+| C44 | `/me`, `list_filesystems`, `get_filesystem`, `filesystem_usage`, `list_mount_sessions`, `list_webhooks`, `revoke_mount_session` and `enable_webhook` are sent once more after a network failure; a second failure raises `network_error`. |
+| C45 | `create_filesystem`, `update_filesystem`, `create_webhook`, `rotate_webhook_secret` and `delete_webhook` are never sent again after a network failure. |
+| C46 | API errors raise `MountableError` with their status and code, for example `403 key_limited_to_filesystem` from `create_filesystem` and `update_filesystem`, `422` validation details (`invalid_request`) from `update_filesystem`, a `403` from `list_webhooks` and `404 not_found` from `delete_webhook`. |
