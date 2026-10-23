@@ -197,7 +197,8 @@ once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
   without FUSE cannot mount.
 - macOS sandboxes are not supported. On a Mac (macOS 26, Apple Silicon),
   `mountable mount` needs nothing else installed and no `sudo`; its writes
-  are write-through (about 7 MiB/s), macOS adds `._` files beside most
-  files, and databases or files rewritten in place belong on local disk.
-  See the CLI README's macOS section for the limits.
+  are write-through (about 7 MiB/s), and macOS adds `._` files beside most
+  files. Databases such as SQLite work there; locks are local to one mount,
+  so open a database through one mount at a time, even on the same machine. See the CLI README's macOS
+  section for the limits.
 - Deleting a filesystem is done in the console, not from the CLI.

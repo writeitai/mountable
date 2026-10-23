@@ -128,31 +128,48 @@ Your mount is private to your account: the CLI serves it over a socket only
 you can open and checks your user ID on every request. Revoking the session,
 or letting it expire, takes the mount away. Every write the Mac sends is
 saved by the service before macOS hears OK, so a crash of the CLI never loses
-a write macOS was told succeeded. Changes from other machines show up within
-moments.
+a write macOS was told succeeded. Changes made on another Mac or a Linux
+machine show up here in under a second, and the other way round.
 
 ### Limits
 
 - Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
   1 MiB, uses one unit of the filesystem's metadata rate.
-- Files reach about 9.76 GiB written sequentially, less when written in many
-  small append-and-`fsync` cycles.
-- A file takes about 9,999 writes that change existing bytes or append small
-  pieces; after that, writes to it fail with "file too large". Keep
-  databases (SQLite and the like) and other files rewritten in place on local
-  disk, or copy them in and out. Editors save by writing a fresh file (or
-  truncating first), so they are unaffected.
+- Databases, logs and files patched in place work in the mount. SQLite works
+  in its default rollback-journal mode (WAL falls back to it on the mount),
+  `integrity_check` clean, and a 10,500-page-write run stayed clean. Each
+  transaction creates and deletes its journal file, which counts toward the
+  metadata rate, so expect up to a few hundred transactions a minute. `git`:
+  100 commits, `git fsck` clean. A file the service stores in more than about
+  8,000 pieces, such as a log appended and `fsync`ed record by record or a
+  file rewritten in small patches, keeps taking writes past the 9,999-piece
+  limit: each write there also merges earlier pieces into one. Checked with
+  10,500 appends and 10,500 in-place rewrites, every byte read back.
+- Merging is best effort. It pauses while the filesystem is above 80% of its
+  storage quota, after one mount has merged a tenth of the quota in a day,
+  or when the service is too slow to answer in time; a file that then
+  reaches 9,999 pieces fails with "file too large". Merged data counts
+  toward storage, downloads and spending caps like any other data.
+- Near that limit a file writes more slowly: small patches went from about 330
+  writes a minute to about 75. A file written start to end runs at about a
+  third of the usual speed past about 7.8 GiB, and reaches about 15 GiB in a
+  day at the default quota, about 19.5 GiB at most.
 - A failed write is reported once per file, to the first `write`, `fsync` or
-  `close` of it by any program.
+  `close` of it by any program: if another program, such as a Finder
+  preview, closes the file first, your `fsync` returns success for data that
+  was not stored. Open the file with `O_SYNC` to get each write's error.
 - Writes through `mmap` can fail without an error.
 - Other mounts are coordinated per write, not for the whole time a file is
   open.
 - Finish writing (close or `fsync` your files) before you unmount: a forced
-  unmount of a busy mount can drop writes still in flight.
+  unmount of a busy mount, a revoked or expired session, or a crash of the
+  CLI drops writes macOS has not sent yet, and an `fsync` running at that
+  moment can still return success.
 - macOS creates `._` files beside most files; to keep them out of git, run
   `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore` (or append
   `._*` to the file `git config --global core.excludesFile` names, if set).
-- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount.
+- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount:
+  open a database through one mount at a time, even on the same machine.
 
 ## Skill
 
