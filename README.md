@@ -128,20 +128,24 @@ Your mount is private to your account: the CLI serves it over a socket only
 you can open and checks your user ID on every request. Revoking the session,
 or letting it expire, takes the mount away. Every write the Mac sends is
 saved by the service before macOS hears OK, so a crash of the CLI never loses
-a write macOS was told succeeded. Changes from other machines show up within
-moments.
+a write macOS was told succeeded. Changes from other machines, Mac or Linux,
+show up in under a second.
 
 ### Limits
 
 - Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
   1 MiB, uses one unit of the filesystem's metadata rate.
-- Files reach about 9.76 GiB written sequentially, less when written in many
-  small append-and-`fsync` cycles.
-- A file takes about 9,999 writes that change existing bytes or append small
-  pieces; after that, writes to it fail with "file too large". Keep
-  databases (SQLite and the like) and other files rewritten in place on local
-  disk, or copy them in and out. Editors save by writing a fresh file (or
-  truncating first), so they are unaffected.
+- Databases, logs and files patched in place work in the mount. SQLite,
+  append-and-`fsync` logs, byte-level rewrites and `git` all keep going past
+  the service's 9,999-piece file limit: as a file nears it, each write also
+  merges earlier pieces. Checked on macOS with 10,500 writes each (SQLite
+  with `integrity_check`, appends, in-place rewrites) and 100 `git` commits
+  with `git fsck`.
+- Merging is best effort. It pauses while the filesystem is above 80% of its
+  storage quota, or after one mount has merged a tenth of the quota in a day;
+  a file that needs it then fails with "file too large".
+- Near that limit a file writes more slowly, about 75 writes a minute: one
+  with many small changes, or one written start to end past about 7.8 GiB.
 - A failed write is reported once per file, to the first `write`, `fsync` or
   `close` of it by any program.
 - Writes through `mmap` can fail without an error.
@@ -152,7 +156,8 @@ moments.
 - macOS creates `._` files beside most files; to keep them out of git, run
   `mkdir -p ~/.config/git && echo '._*' >> ~/.config/git/ignore` (or append
   `._*` to the file `git config --global core.excludesFile` names, if set).
-- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount.
+- No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount:
+  open a database from one machine at a time.
 
 ## Skill
 
