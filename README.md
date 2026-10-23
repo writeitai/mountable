@@ -135,9 +135,9 @@ machine show up here in under a second, and the other way round.
 
 - Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
   1 MiB, uses one unit of the filesystem's metadata rate.
-- Databases, logs and files patched in place work in the mount. SQLite (10,500
-  writes, `integrity_check` clean) and `git` (100 commits, `git fsck` clean)
-  run as on local disk. A file the service stores in more than about 8,000
+- Databases, logs and files patched in place work in the mount. SQLite runs
+  with a rollback journal (it keeps WAL off on the mount): 10,500 page writes,
+  `integrity_check` clean. `git`: 100 commits, `git fsck` clean. A file the service stores in more than about 8,000
   pieces, such as a log appended and `fsync`ed record by record or a file
   rewritten in small patches, keeps taking writes past the 9,999-piece
   limit: each write there also merges earlier pieces into one. Checked with
@@ -148,7 +148,9 @@ machine show up here in under a second, and the other way round.
   reaches 9,999 pieces fails with "file too large". Merged data counts
   toward storage, downloads and spending caps like any other data.
 - Near that limit a file writes more slowly: about 75 writes a minute for
-  small patches. A file written start to end slows down past about 7.8 GiB.
+  small patches. A file written start to end runs at about a third of the
+  usual speed past about 7.8 GiB, and reaches about 15 GiB in a day at the
+  default quota, about 19.5 GiB at most.
 - A failed write is reported once per file, to the first `write`, `fsync` or
   `close` of it by any program: if another program, such as a Finder
   preview, closes the file first, your `fsync` returns success for data that
