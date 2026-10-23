@@ -1,6 +1,6 @@
 # One shared folder for a planner, coder and verifier
 
-Mountable is a persistent filesystem for AI agents. This runnable example
+mountable.io is a persistent filesystem for AI agents. This runnable example
 gives a planner, a coder and a verifier the same folder. The planner writes
 a plan and a failing adder. The coder fixes it. A signed file-change webhook
 starts a verifier with a read-only mount, which checks the diff and runs tests.
@@ -8,7 +8,7 @@ starts a verifier with a read-only mount, which checks the diff and runs tests.
 The three stages are small, deterministic Python functions, so you can run
 the whole handoff without model credentials. Use them as the storage and
 permission pattern when connecting your own coding agents. This example implements the shared-workspace handoff between the three
-stages. Mountable maintains it under Apache-2.0.
+stages. mountable.io maintains it under Apache-2.0.
 
 ## Run the offline example
 
@@ -27,7 +27,7 @@ network request or charge.
 
 ## Before and after
 
-| Step | Separate disposable folders | One Mountable filesystem per coding run |
+| Step | Separate disposable folders | One mountable.io filesystem per coding run |
 | --- | --- | --- |
 | Planner → coder | Export the plan and repository, then import them in the next worker | Write the plan and repository into the shared folder through the SDK |
 | Coder → verifier | Export the modified tree and arrange a notification | Write the fix and a completion marker. A signed webhook triggers verification |
@@ -39,10 +39,10 @@ the read-only verifier. These are local stage processes. When you move them
 into separate sandboxes, pass the verifier only its one-time ticket on stdin.
 Keep the reusable API key on your orchestrator.
 
-## Run against Mountable
+## Run against mountable.io
 
 Use a Linux machine with `/dev/fuse`, FUSE mount permissions, Python 3.10+
-and the Mountable CLI 0.5.0 or later. Install the Python SDK:
+and the mountable.io CLI 0.5.0 or later. Install the Python SDK:
 
 ```sh
 python3 -m pip install mountable-sdk==0.1.0 mountable==0.5.0
@@ -82,14 +82,14 @@ ticket, starts `mountable mount --ro --ticket-stdin --json`, and waits for
 `mounted`. It checks the source hash and prints the patch. It runs tests without writing
 bytecode and checks that a workspace write is refused. The API key
 stays out of the mount and test environments. Read-only permissions protect
-the Mountable workspace. Use a separate sandbox to isolate arbitrary code
+the mountable.io workspace. Use a separate sandbox to isolate arbitrary code
 from the rest of a machine.
 
 ## Finish the run
 
 The command unmounts the verifier, revokes its session and removes its webhook
 on success or failure. It prints the new filesystem ID immediately after
-creation. **Delete that filesystem in the Mountable console when finished.**
+creation. **Delete that filesystem in the mountable.io console when finished.**
 API keys cannot delete a filesystem. Stored files continue to count toward
 usage until deletion. Disconnecting a worker does not stop storage billing.
 The cap reserves this month's peak storage and downloads, so deletion does

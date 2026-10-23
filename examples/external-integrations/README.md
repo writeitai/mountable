@@ -1,7 +1,7 @@
 # Persistent agent notes and Mem0 record exports
 
-These examples use the Mountable Files API through the Python SDK. No mount,
-FUSE or administrator access is needed. Mountable is a paid hosted service;
+These examples use the mountable.io Files API through the Python SDK. No mount,
+FUSE or administrator access is needed. mountable.io is a paid hosted service;
 the examples need a saved payment method and an existing filesystem for live
 use. They do not create accounts, filesystems, API keys or spending limits.
 
@@ -44,7 +44,7 @@ with Mountable() as client:
 For a model call, install the appropriate Pydantic AI provider extra in your
 own application, such as `pydantic-ai-slim[openai]==2.60.0`, and supply that
 provider's key. `PYDANTIC_AI_MODEL` selects the model when running the script
-directly. Provider usage has its own bill; Mountable's filesystem cap does not
+directly. Provider usage has its own bill; mountable.io's filesystem cap does not
 cap model spending. A subsequent process can read the same note with the same
 filesystem ID and an authorized key.
 
@@ -59,7 +59,7 @@ the filesystem's storage quota for your workload as well as a spending cap.
 
 `mem0_snapshot.py` calls the hosted Mem0 client's paginated `get_all` API with
 an explicit user filter. It collects the returned records, then writes one
-new JSON file to Mountable. A later worker can read that file through the SDK.
+new JSON file to mountable.io. A later worker can read that file through the SDK.
 This complements Mem0's retrieval; it does not change Mem0's storage backend.
 
 Set `MEM0_API_KEY`, `MEM0_USER_ID`, `MOUNTABLE_API_KEY` and
@@ -89,11 +89,11 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The tests call real Pydantic AI 2.60.0, Mem0 2.2.1 and Mountable SDK 0.1.0
+The tests call real Pydantic AI 2.60.0, Mem0 2.2.1 and mountable.io SDK 0.1.0
 over fake HTTP transports. They cover tool dispatch, filesystem binding,
 path rejection, UTF-8 reads, create-only writes, spending-cap refusal,
 paginated exports and failures before an export is written. They make no paid
 cloud or model calls. This is not evidence of a live Mem0 or sandbox deployment.
 
-These are community examples maintained by Mountable, not upstream-approved
+These are community examples maintained by mountable.io, not upstream-approved
 integrations. Upstream requests follow each project's contribution process.
