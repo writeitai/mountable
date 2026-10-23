@@ -140,9 +140,9 @@ machine show up here in under a second, and the other way round.
   `integrity_check` clean, and a 10,500-page-write run stayed clean. Each
   transaction creates and deletes its journal file, which counts toward the
   metadata rate, so expect up to a few hundred transactions a minute. `git`:
-  100 commits, `git fsck` clean. A file the service stores in more than about 8,000
-  pieces, such as a log appended and `fsync`ed record by record or a file
-  rewritten in small patches, keeps taking writes past the 9,999-piece
+  100 commits, `git fsck` clean. A file the service stores in more than about
+  8,000 pieces, such as a log appended and `fsync`ed record by record or a
+  file rewritten in small patches, keeps taking writes past the 9,999-piece
   limit: each write there also merges earlier pieces into one. Checked with
   10,500 appends and 10,500 in-place rewrites, every byte read back.
 - Merging is best effort. It pauses while the filesystem is above 80% of its
@@ -150,10 +150,10 @@ machine show up here in under a second, and the other way round.
   or when the service is too slow to answer in time; a file that then
   reaches 9,999 pieces fails with "file too large". Merged data counts
   toward storage, downloads and spending caps like any other data.
-- Near that limit a file writes more slowly: small patches went from about
-  330 writes a minute to about 75. A file written start to end runs at about a third of the
-  usual speed past about 7.8 GiB, and reaches about 15 GiB in a day at the
-  default quota, about 19.5 GiB at most.
+- Near that limit a file writes more slowly: small patches went from about 330
+  writes a minute to about 75. A file written start to end runs at about a
+  third of the usual speed past about 7.8 GiB, and reaches about 15 GiB in a
+  day at the default quota, about 19.5 GiB at most.
 - A failed write is reported once per file, to the first `write`, `fsync` or
   `close` of it by any program: if another program, such as a Finder
   preview, closes the file first, your `fsync` returns success for data that
