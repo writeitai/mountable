@@ -135,9 +135,12 @@ machine show up here in under a second, and the other way round.
 
 - Writes are write-through, at about 7 MiB/s; each write macOS sends, up to
   1 MiB, uses one unit of the filesystem's metadata rate.
-- Databases, logs and files patched in place work in the mount. SQLite runs
-  with a rollback journal (it keeps WAL off on the mount): 10,500 page writes,
-  `integrity_check` clean. `git`: 100 commits, `git fsck` clean. A file the service stores in more than about 8,000
+- Databases, logs and files patched in place work in the mount. SQLite works
+  in its default rollback-journal mode (WAL falls back to it on the mount),
+  `integrity_check` clean, and a 10,500-page-write run stayed clean. Each
+  transaction creates and deletes its journal file, which counts toward the
+  metadata rate, so expect up to a few hundred transactions a minute. `git`:
+  100 commits, `git fsck` clean. A file the service stores in more than about 8,000
   pieces, such as a log appended and `fsync`ed record by record or a file
   rewritten in small patches, keeps taking writes past the 9,999-piece
   limit: each write there also merges earlier pieces into one. Checked with
@@ -147,8 +150,8 @@ machine show up here in under a second, and the other way round.
   or when the service is too slow to answer in time; a file that then
   reaches 9,999 pieces fails with "file too large". Merged data counts
   toward storage, downloads and spending caps like any other data.
-- Near that limit a file writes more slowly: about 75 writes a minute for
-  small patches. A file written start to end runs at about a third of the
+- Near that limit a file writes more slowly: small patches went from about
+  330 writes a minute to about 75. A file written start to end runs at about a third of the
   usual speed past about 7.8 GiB, and reaches about 15 GiB in a day at the
   default quota, about 19.5 GiB at most.
 - A failed write is reported once per file, to the first `write`, `fsync` or
