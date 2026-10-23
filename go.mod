@@ -67,4 +67,4 @@ require (
 	google.golang.org/grpc/security/advancedtls v1.0.0 // indirect
 )
 
-replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261023115830-37367c93a36f
+replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261023120803-50c50e113d71
