@@ -619,7 +619,7 @@ export async function verifyWebhook(
       return headers.get(name) ?? "";
     }
     const found = Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
-    return Array.isArray(found) ? found.join(", ") : (found ?? "");
+    return Array.isArray(found) ? found.join(" ") : (found ?? "");
   };
   const id = header("webhook-id");
   const timestamp = header("webhook-timestamp");
@@ -638,8 +638,9 @@ export async function verifyWebhook(
   const { subtle } = await webCrypto();
   const hmacKey = await subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   let matched = false;
+  // Signatures are separated by spaces; a repeated header is joined with ", ".
   for (const signature of header("webhook-signature").split(/\s+/)) {
-    const given = signature.startsWith("v1,") ? fromBase64(signature.slice(3)) : null;
+    const given = signature.startsWith("v1,") ? fromBase64(signature.slice(3).replace(/,$/, "")) : null;
     // subtle.verify compares in constant time.
     if (given && (await subtle.verify("HMAC", hmacKey, given, signed))) {
       matched = true;

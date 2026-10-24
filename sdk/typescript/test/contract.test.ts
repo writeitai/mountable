@@ -812,6 +812,20 @@ test("C39 verifyWebhook accepts a signed delivery", async (t) => {
   // A string body, Headers, and a rotation's two signatures with ours second.
   const rotation = new Headers(signedHeaders(`v1,${"A".repeat(43)}= ${VECTOR.signature}`));
   assert.deepEqual(await verifyWebhook(VECTOR.secret, rotation, VECTOR.body), message);
+  // Ours first: in one header, in a repeated header (Headers joins it with
+  // ", "), and as Node's array of values in either order.
+  const other = `v1,${"A".repeat(43)}=`;
+  const repeated = new Headers(signedHeaders(VECTOR.signature));
+  repeated.append("webhook-signature", other);
+  const variants: Parameters<typeof verifyWebhook>[1][] = [
+    signedHeaders(`${VECTOR.signature} ${other}`),
+    repeated,
+    { ...signedHeaders(), "webhook-signature": [VECTOR.signature, other] },
+    { ...signedHeaders(), "webhook-signature": [other, VECTOR.signature] },
+  ];
+  for (const headers of variants) {
+    assert.equal((await verifyWebhook(VECTOR.secret, headers, VECTOR.body)).cursor, "48213");
+  }
 });
 
 test("C40 verifyWebhook refuses anything else", async (t) => {

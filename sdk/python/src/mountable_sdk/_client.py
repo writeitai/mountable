@@ -621,8 +621,9 @@ def verify_webhook(
     data = body.encode() if isinstance(body, str) else body
     signed = f"{msg_id}.{timestamp}.".encode() + data
     expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest())
+    # Signatures are separated by spaces; a repeated header is joined with ", ".
     if not any(
-        hmac.compare_digest(signature[3:].encode(), expected)
+        hmac.compare_digest(signature[3:].removesuffix(",").encode(), expected)
         for signature in lower.get("webhook-signature", "").split()
         if signature.startswith("v1,")
     ):

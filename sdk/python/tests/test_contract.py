@@ -892,6 +892,10 @@ def test_c39_verify_webhook_accepts_a_signed_delivery():
     rotation = "v1," + "A" * 43 + "= " + VECTOR["signature"]
     again = verify_webhook(VECTOR["secret"], signed_headers(rotation), VECTOR["body"])
     assert again == message
+    # Ours first, and a repeated header joined with ", ".
+    other = "v1," + "A" * 43 + "="
+    for joined in (f"{VECTOR['signature']} {other}", f"{VECTOR['signature']}, {other}"):
+        assert verify_webhook(VECTOR["secret"], signed_headers(joined), VECTOR["body"])
 
 
 @pytest.mark.usefixtures("at_vector_time")
