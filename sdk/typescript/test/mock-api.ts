@@ -9,6 +9,9 @@ export const FILES = `/api/v1/filesystems/${FS}/files`;
 export const LIST = `/api/v1/filesystems/${FS}/list`;
 export const CHANGES = `/api/v1/filesystems/${FS}/changes`;
 export const SESSIONS = "/api/v1/mount-sessions";
+export const ME = "/api/v1/me";
+export const ORG = "11111111-1111-1111-1111-111111111111";
+export const WEBHOOKS = `/api/v1/orgs/${ORG}/filesystems/${FS}/webhooks`;
 
 export interface Request {
   method: string;
@@ -49,6 +52,31 @@ export function fileInfo(path: string, overrides: Record<string, unknown> = {}):
     etag: '"e1"',
     modified_at: "2026-10-17T12:00:00.123456789Z",
     ...overrides,
+  };
+}
+
+/** GET /api/v1/me for an API key of org. */
+export function me(org: string = ORG): Record<string, unknown> {
+  return { id: "m1", email: "a@example.com", name: "A", organisations: [], api_key: { id: "k1", org_id: org } };
+}
+
+/** A webhook as the API shows it; create and rotate add its secret. */
+export function webhook(secret?: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "33333333-3333-3333-3333-333333333333",
+    filesystem_id: FS,
+    url: "https://example.com/hooks",
+    path_prefix: "/tickets",
+    state: "active",
+    disabled_reason: null,
+    created_by: "api key backend",
+    created_at: "2026-10-20T12:00:00Z",
+    last_success_at: null,
+    last_failure_at: null,
+    last_failure: null,
+    failing_since: null,
+    ...overrides,
+    ...(secret === undefined ? {} : { secret }),
   };
 }
 
@@ -146,6 +174,9 @@ export class MockAPI {
     }
     if (request.method === "POST" && request.path === SESSIONS) {
       return this.issueSession(request);
+    }
+    if (request.method === "GET" && request.path === ME) {
+      return reply(200, me());
     }
     return error(404, "not_found");
   }

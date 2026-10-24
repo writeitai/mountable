@@ -1,4 +1,4 @@
-"""The Mountable SDK: the files API and mount tickets over HTTPS."""
+"""The Mountable SDK: the files API, mount tickets and webhooks over HTTPS."""
 
 from mountable_sdk._client import (
     Change,
@@ -10,6 +10,9 @@ from mountable_sdk._client import (
     Mountable,
     MountableError,
     MountTicket,
+    Webhook,
+    WebhookMessage,
+    verify_webhook,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     "MountTicket",
     "Mountable",
     "MountableError",
+    "Webhook",
+    "WebhookMessage",
+    "verify_webhook",
 ]

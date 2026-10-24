@@ -1,5 +1,7 @@
-// The Mountable files API and mount tickets over HTTPS. The behaviour is the
-// contract in sdk/contract.md, shared with the Python SDK.
+// The Mountable files API, mount tickets and webhooks over HTTPS. The
+// behaviour is the contract in sdk/contract.md, shared with the Python SDK.
+
+import type { webcrypto } from "node:crypto";
 
 const DEFAULT_BASE_URL = "https://mountable.io";
 // Milliseconds a request may take; a change-feed poll may take its wait longer.
@@ -7,10 +9,13 @@ const TIMEOUT_MS = 60_000;
 // A token session lasts an hour and is replaced this close to its expiry.
 const SESSION_SECONDS = 3600;
 const REFRESH_BEFORE_MS = 60_000;
+// Seconds a webhook's timestamp may be from now.
+const WEBHOOK_TOLERANCE = 300;
 
 export type Mode = "ro" | "rw";
 export type FileType = "file" | "directory" | "symlink";
 export type ChangeType = "created" | "updated" | "deleted";
+export type WebhookState = "active" | "disabled";
 
 export interface FileInfo {
   path: string;
@@ -66,6 +71,73 @@ export class MountTicket {
   get ticket(): string | null {
     return this.#ticket;
   }
+}
+
+/**
+ * A filesystem's webhook. Its `secret` is set only in the result of
+ * `createWebhook` and `rotateWebhookSecret`, the only time the API shows it,
+ * and is not shown when the object is printed or serialised.
+ */
+export class Webhook {
+  readonly id: string;
+  readonly filesystemId: string;
+  readonly url: string;
+  readonly pathPrefix: string;
+  readonly state: WebhookState;
+  /** "failing" or "access_revoked". */
+  readonly disabledReason: string | null;
+  readonly createdBy: string;
+  readonly createdAt: Date;
+  readonly lastSuccessAt: Date | null;
+  readonly lastFailureAt: Date | null;
+  /** timeout, connect_failed, tls_failed, blocked_address, redirect or http_<status>. */
+  readonly lastFailure: string | null;
+  readonly failingSince: Date | null;
+  readonly #secret: string | null;
+
+  /** @internal */
+  constructor(raw: any) {
+    this.id = raw.id;
+    this.filesystemId = raw.filesystem_id;
+    this.url = raw.url;
+    this.pathPrefix = raw.path_prefix;
+    this.state = raw.state;
+    this.disabledReason = raw.disabled_reason ?? null;
+    this.createdBy = raw.created_by;
+    this.createdAt = new Date(raw.created_at);
+    this.lastSuccessAt = optionalDate(raw.last_success_at);
+    this.lastFailureAt = optionalDate(raw.last_failure_at);
+    this.lastFailure = raw.last_failure ?? null;
+    this.failingSince = optionalDate(raw.failing_since);
+    this.#secret = raw.secret ?? null;
+  }
+
+  /** The signing secret (whsec_…); null except right after create or rotate. */
+  get secret(): string | null {
+    return this.#secret;
+  }
+}
+
+/** A verified webhook delivery. */
+export interface WebhookMessage {
+  /** The webhook-id header: the same on every retry of a message. */
+  id: string;
+  /** files.changed, or files.resync (no events: list what you need again). */
+  type: string;
+  timestamp: Date;
+  webhookId: string;
+  filesystemId: string;
+  events: Change[];
+  /**
+   * The ordering key: apply a message only if its cursor, compared as an
+   * integer, is greater than the last one applied.
+   */
+  cursor: string;
+}
+
+export interface CreateWebhookOptions {
+  /** Deliver only changes in this directory; default "/". */
+  pathPrefix?: string;
 }
 
 export interface MountableOptions {
@@ -127,12 +199,14 @@ export interface Filesystem {
   changes(options?: ChangesOptions): Promise<ChangeBatch>;
 }
 
-// Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-// tokens (mtblst_), tickets (mtbltk_) and login tokens.
+// Every credential the API issues starts with "mtbl": API keys (mtbl_),
+// session tokens (mtblst_), tickets (mtbltk_) and login tokens. Webhook
+// signing secrets are whsec_ and standard base64.
 const SECRET = /(mtbl[a-z]*)_[A-Za-z0-9_.-]+/g;
+const WEBHOOK_SECRET = /whsec_[A-Za-z0-9+/=]+/g;
 
 function redact(text: string): string {
-  return text.replace(SECRET, "$1_[redacted]");
+  return text.replace(SECRET, "$1_[redacted]").replace(WEBHOOK_SECRET, "whsec_[redacted]");
 }
 
 /**
@@ -187,6 +261,8 @@ export class Mountable {
   readonly baseUrl: string;
   // Private fields stay out of console.log and util.inspect.
   readonly #apiKey: string;
+  // The API key's organisation, which webhook paths name.
+  #orgId: Promise<string> | null = null;
 
   constructor(options: MountableOptions = {}) {
     const apiKey = options.apiKey || env("MOUNTABLE_API_KEY");
@@ -220,15 +296,86 @@ export class Mountable {
     return new MountTicket(await this.#postSession(body));
   }
 
-  async #postSession(body: Record<string, unknown>): Promise<any> {
-    const response = await this.#send("POST", "/api/v1/mount-sessions", this.#apiKey, {
-      body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
+  /**
+   * Calls `url` with the filesystem's changes under `pathPrefix`. The
+   * result's `secret` signs the deliveries and is shown only now: store it
+   * where your endpoint reads it. The first delivery, a files.resync, may
+   * arrive before this resolves. Never retried: after an unknown outcome,
+   * look for the URL in `listWebhooks` first.
+   */
+  async createWebhook(fsId: string, url: string, options: CreateWebhookOptions = {}): Promise<Webhook> {
+    const path = await this.#webhooks(fsId);
+    const body = { url, path_prefix: options.pathPrefix ?? "/" };
+    return new Webhook(json(await this.#call("POST", path, false, body)));
+  }
+
+  async listWebhooks(fsId: string): Promise<Webhook[]> {
+    const response = await this.#call("GET", await this.#webhooks(fsId), true);
+    return json(response).map((raw: any) => new Webhook(raw));
+  }
+
+  async deleteWebhook(fsId: string, webhookId: string): Promise<void> {
+    await this.#call("DELETE", await this.#webhooks(fsId, webhookId), false);
+  }
+
+  /**
+   * A new secret, shown only now. For 24 hours deliveries are signed with
+   * the previous one too; a second rotation in that time drops the oldest.
+   */
+  async rotateWebhookSecret(fsId: string, webhookId: string): Promise<Webhook> {
+    const path = `${await this.#webhooks(fsId, webhookId)}:rotate-secret`;
+    return new Webhook(json(await this.#call("POST", path, false)));
+  }
+
+  /** Resumes a webhook disabled as failing; one disabled as access_revoked rejects with access_revoked. */
+  async enableWebhook(fsId: string, webhookId: string): Promise<Webhook> {
+    const path = `${await this.#webhooks(fsId, webhookId)}:enable`;
+    return new Webhook(json(await this.#call("POST", path, false)));
+  }
+
+  /** The path of a filesystem's webhooks, or of one. The first call looks up the API key's organisation. */
+  async #webhooks(fsId: string, webhookId?: string): Promise<string> {
+    // A bad ID is refused before the lookup.
+    const ids = [idSegment(fsId), webhookId === undefined ? undefined : idSegment(webhookId)];
+    // Concurrent first calls share one lookup; a failed one is not kept.
+    this.#orgId ??= this.#lookUpOrg().catch((error) => {
+      this.#orgId = null;
+      throw error;
     });
+    const path = `/api/v1/orgs/${idSegment(await this.#orgId)}/filesystems/${ids[0]}/webhooks`;
+    return ids[1] === undefined ? path : `${path}/${ids[1]}`;
+  }
+
+  async #lookUpOrg(): Promise<string> {
+    const response = await this.#call("GET", "/api/v1/me", true);
+    const org = json(response).api_key?.org_id;
+    if (typeof org !== "string" || !org) {
+      throw new MountableError(response.status, "api_error", "the API did not report the API key's organisation");
+    }
+    return org;
+  }
+
+  /** Sends one request with the API key; with `retry`, once more after a network failure. */
+  async #call(method: string, path: string, retry: boolean, body?: unknown): Promise<Answer> {
+    const options: SendOptions =
+      body === undefined ? {} : { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } };
+    let response: Answer;
+    try {
+      response = await this.#send(method, path, this.#apiKey, options);
+    } catch (error) {
+      if (!retry || !(error instanceof MountableError) || error.code !== "network_error") {
+        throw error;
+      }
+      response = await this.#send(method, path, this.#apiKey, options);
+    }
     if (!isSuccess(response)) {
       throw apiError(response);
     }
-    return json(response);
+    return response;
+  }
+
+  async #postSession(body: Record<string, unknown>): Promise<any> {
+    return json(await this.#call("POST", "/api/v1/mount-sessions", false, body));
   }
 
   async #createTokenSession(fsId: string, mode: Mode): Promise<Session> {
@@ -370,14 +517,7 @@ class FilesystemHandle implements Filesystem {
       timeoutMs: TIMEOUT_MS + wait * 1000,
     });
     const body = json(response);
-    return {
-          events: body.events.map((event: any) => ({
-        type: event.type,
-        path: event.path,
-        file: event.file ? fileInfo(event.file) : null,
-      })),
-      cursor: body.cursor,
-    };
+    return { events: body.events.map(change), cursor: body.cursor };
   }
 
   #url(kind: string, path: string): string {
@@ -446,15 +586,107 @@ function isSuccess(response: Answer): boolean {
   return response.status >= 200 && response.status < 300;
 }
 
-type RandomSource = { getRandomValues(bytes: Uint8Array): Uint8Array };
+/** Web Crypto: global in Bun, Deno and Node 19+; Node 18 has no global in ES modules. */
+async function webCrypto(): Promise<webcrypto.Crypto> {
+  return (globalThis as { crypto?: webcrypto.Crypto }).crypto ?? (await import("node:crypto")).webcrypto;
+}
 
 async function randomKey(): Promise<string> {
   const bytes = new Uint8Array(16);
-  // Node 18 has no global Web Crypto in ES modules.
-  const source: RandomSource =
-    (globalThis as { crypto?: RandomSource }).crypto ?? (await import("node:crypto")).webcrypto;
-  source.getRandomValues(bytes);
+  (await webCrypto()).getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Headers as fetch-style servers (Headers) or Node's http module (an object) give them. */
+export type WebhookHeaders = Headers | Record<string, string | string[] | undefined>;
+
+/**
+ * Checks a delivery's signature and resolves to its message. `headers` are
+ * the request's (names in any case) and `body` its exact bytes or text, not
+ * JSON parsed and serialised again. Rejects with `MountableError` code
+ * `invalid_webhook` unless a v1 signature in webhook-signature is by
+ * `secret` (Standard Webhooks) and webhook-timestamp is within five minutes
+ * of now. A message can arrive more than once; see `WebhookMessage.cursor`.
+ */
+export async function verifyWebhook(
+  secret: string,
+  headers: WebhookHeaders,
+  body: Uint8Array | string,
+): Promise<WebhookMessage> {
+  const invalid = (reason: string) => new MountableError(null, "invalid_webhook", reason);
+  const header = (name: string): string => {
+    if (headers instanceof Headers) {
+      return headers.get(name) ?? "";
+    }
+    const found = Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+    return Array.isArray(found) ? found.join(" ") : (found ?? "");
+  };
+  const id = header("webhook-id");
+  const timestamp = header("webhook-timestamp");
+  if (!id || !/^[0-9]+$/.test(timestamp)) {
+    throw invalid("webhook-id or webhook-timestamp is missing");
+  }
+  if (timestamp.length > 12 || Math.abs(Date.now() / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE) {
+    throw invalid("webhook-timestamp is more than five minutes from now");
+  }
+  const key = secret.startsWith("whsec_") ? fromBase64(secret.slice("whsec_".length)) : null;
+  if (!key || key.length === 0) {
+    throw invalid("the secret is not a whsec_ secret");
+  }
+  const data = typeof body === "string" ? new TextEncoder().encode(body) : body;
+  const signed = concat([new TextEncoder().encode(`${id}.${timestamp}.`), data]);
+  const { subtle } = await webCrypto();
+  const hmacKey = await subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  let matched = false;
+  // Signatures are separated by spaces; a repeated header is joined with ", ".
+  for (const signature of header("webhook-signature").split(/\s+/)) {
+    const given = signature.startsWith("v1,") ? fromBase64(signature.slice(3).replace(/,$/, "")) : null;
+    // subtle.verify compares in constant time.
+    if (given && (await subtle.verify("HMAC", hmacKey, given, signed))) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) {
+    throw invalid("no signature matches");
+  }
+  try {
+    const message = JSON.parse(new TextDecoder().decode(data));
+    const payload = message.data;
+    if (
+      typeof message.type !== "string" ||
+      typeof message.timestamp !== "string" ||
+      typeof payload?.webhook_id !== "string" ||
+      typeof payload.filesystem_id !== "string" ||
+      typeof payload.cursor !== "string" ||
+      !Array.isArray(payload.events)
+    ) {
+      throw new Error("not a message");
+    }
+    const sent = new Date(message.timestamp);
+    if (Number.isNaN(sent.getTime())) {
+      throw new Error("not a timestamp");
+    }
+    return {
+      id,
+      type: message.type,
+      timestamp: sent,
+      webhookId: payload.webhook_id,
+      filesystemId: payload.filesystem_id,
+      events: payload.events.map(change),
+      cursor: payload.cursor,
+    };
+  } catch {
+    throw invalid("the body is not a mountable.io webhook message");
+  }
+}
+
+/** Standard base64 decoded, or null when it is not base64. */
+function fromBase64(text: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
+    return null;
+  }
+  return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -485,6 +717,17 @@ function encodeSegment(segment: string): string {
   return encodeURIComponent(segment).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+/**
+ * One ID as a path segment. An empty, "." or ".." ID would name another
+ * resource once the URL is normalised, so it is refused with invalid_request.
+ */
+function idSegment(id: string): string {
+  if (id === "" || id === "." || id === "..") {
+    throw new MountableError(null, "invalid_request", `invalid ID: ${JSON.stringify(id)}`);
+  }
+  return encodeSegment(id);
+}
+
 function quoteEtag(etag: string): string {
   return etag.startsWith('"') || etag.startsWith("W/") ? etag : `"${etag}"`;
 }
@@ -495,6 +738,14 @@ function describe(error: unknown): string {
     return `${error.message}${cause}`;
   }
   return String(error);
+}
+
+function change(raw: any): Change {
+  return { type: raw.type, path: raw.path, file: raw.file ? fileInfo(raw.file) : null };
+}
+
+function optionalDate(value: string | null | undefined): Date | null {
+  return value ? new Date(value) : null;
 }
 
 function fileInfo(raw: any): FileInfo {

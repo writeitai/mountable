@@ -2,7 +2,8 @@
 
 Read, write, delete, list and follow the files of a
 [mountable.io](https://mountable.io) filesystem over HTTPS from a backend,
-without mounting it, and create one-time mount tickets for sandboxes.
+without mounting it, create one-time mount tickets for sandboxes, and manage
+and verify the webhooks that call your backend when files change.
 
 ```sh
 pip install mountable-sdk
@@ -58,6 +59,50 @@ while True:  # 3. then follow changes from the cursor
     cursor = batch.cursor
 ```
 
+## Webhooks
+
+A webhook calls your HTTPS endpoint with a filesystem's changes. Creating one
+needs an API key with read-write access to the filesystem.
+
+```python
+hook = client.create_webhook(
+    "fs_…", "https://example.com/hooks/mountable", path_prefix="/tickets"
+)
+store_secret(hook.id, hook.secret)  # whsec_…, shown only now; not in repr(hook)
+
+client.list_webhooks("fs_…")  # [Webhook]: .state, .disabled_reason, .last_failure
+rotated = client.rotate_webhook_secret("fs_…", hook.id)
+store_secret(hook.id, rotated.secret)  # the old secret signs for 24 more hours
+client.enable_webhook("fs_…", hook.id)  # after it was disabled as "failing"
+client.delete_webhook("fs_…", hook.id)
+```
+
+In the endpoint, verify the signature on the raw body before anything else:
+
+```python
+from mountable_sdk import MountableError, verify_webhook
+
+
+def receive(headers, body: bytes) -> int:
+    try:
+        message = verify_webhook(secret, headers, body)
+    except MountableError:  # code "invalid_webhook"
+        return 400
+    if int(message.cursor) <= last_applied_cursor():  # a duplicate or a late message
+        return 204
+    if message.type == "files.resync":
+        ...  # list what you need again; events after message.cursor follow
+    for event in message.events:  # invalidations, as from fs.changes()
+        print(event.type, event.path, event.file and event.file.etag)
+    save_applied_cursor(message.cursor)
+    return 204
+```
+
+`verify_webhook` accepts any of the signatures a rotation sends and refuses
+a timestamp more than five minutes from now. Answer within 10 seconds; a
+message can arrive more than once, so apply it only when its `cursor`,
+compared as an integer, is greater than the last one applied.
+
 ## Behaviour
 
 - The handle creates a one-hour token session on its first call and keeps
@@ -68,15 +113,24 @@ while True:  # 3. then follow changes from the cursor
   `retry_after`. Network failures have `code == "network_error"`. API keys and
   tokens never appear in errors.
 - Only a `2xx` answer is a success; redirects are not followed.
-- Only reads (`read`, `list`, `changes`) are retried, once, after a network
-  failure. `write` and `delete` are never retried: after a timeout the outcome
-  is unknown, and a conditional write makes your own retry safe.
+- Only reads (`read`, `list`, `changes`, `list_webhooks`) are retried, once,
+  after a network failure. `write` and `delete` are never retried: after a
+  timeout the outcome is unknown, and a conditional write makes your own retry
+  safe. Nor are the webhook calls that change something: after an unknown
+  outcome of `create_webhook`, look for the URL in `list_webhooks` first;
+  after one of `rotate_webhook_secret`, the secret may have changed and is
+  not shown again, so rotate again and store the new one.
+- The webhook calls look up the API key's organisation once per client
+  (`GET /api/v1/me`).
 - A request fails with `network_error` after 60 seconds without an answer;
   `changes` waits 60 seconds plus `wait`.
 - `create_mount_ticket` returns the ticket once, in `.ticket`; it is left out
   of the result's `repr`. Reuse your
   `idempotency_key` to retry after an unknown outcome; a replay returns the
   session with `ticket` `None`.
+- `create_webhook` and `rotate_webhook_secret` return the signing secret
+  once, in `.secret`, left out of `repr`; webhook secrets never appear in
+  errors.
 
 Documentation: <https://mountable.io/docs>. The behaviour shared with the
 TypeScript SDK is listed in

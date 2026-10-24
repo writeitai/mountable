@@ -62,7 +62,7 @@ func TestMCPTools(t *testing.T) {
 		}
 	}
 	slices.Sort(names)
-	want := []string{"create_filesystem", "create_mount_ticket", "filesystem_usage", "list_filesystems", "list_mount_sessions", "list_organizations", "revoke_mount_session"}
+	want := []string{"create_filesystem", "create_mount_ticket", "delete_webhook", "enable_webhook", "filesystem_usage", "list_filesystems", "list_mount_sessions", "list_organizations", "list_webhooks", "revoke_mount_session"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("tools = %v", names)
 	}
@@ -240,5 +240,84 @@ func TestMCPLostReplacementCanBeRecovered(t *testing.T) {
 	var ok map[string]any
 	if isError || json.Unmarshal([]byte(text), &ok) != nil || ok["ticket"] != "mtbltk_recovered" || ok["replaced_session_id"] != "s-"+key {
 		t.Fatalf("retry: %v %s", isError, text)
+	}
+}
+
+// The webhook tools never return a signing secret: creating a webhook and
+// rotating its secret are left to the CLI and SDKs, and list_webhooks says
+// so.
+func TestMCPWebhookTools(t *testing.T) {
+	useAPIKey(t)
+	list := "[" + webhookJSON("disabled", "failing", "timeout", "") + "]"
+	enabled := webhookJSON("active", "", "", "")
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET " + hooksPath:                                         reply(200, list),
+		"DELETE " + hooksPath + "/" + hookID:                       reply(204, ""),
+		"POST " + hooksPath + "/" + hookID + ":enable":             reply(200, enabled),
+		"GET /api/v1/orgs/" + orgB + "/filesystems/fsone/webhooks": reply(200, "[]"),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	s := connectMCP(t)
+	for tool, err := range s.Tools(context.Background(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(tool.Name, "webhook") && (strings.Contains(tool.Name, "create") || strings.Contains(tool.Name, "rotate")) {
+			t.Fatalf("%s hands a signing secret to the model", tool.Name)
+		}
+		if tool.Name == "list_webhooks" && !strings.Contains(tool.Description, "mountable webhooks create") {
+			t.Fatalf("list_webhooks does not say where webhooks are created: %s", tool.Description)
+		}
+	}
+	cases := []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"list_webhooks", map[string]any{"filesystem_id": "fsone"}, list},
+		{"list_webhooks", map[string]any{"filesystem_id": "fsone", "org_id": orgB}, "[]"},
+		{"delete_webhook", map[string]any{"filesystem_id": "fsone", "webhook_id": hookID}, `{"deleted":true,"id":"` + hookID + `"}`},
+		{"enable_webhook", map[string]any{"filesystem_id": "fsone", "webhook_id": hookID}, enabled},
+	}
+	for _, tc := range cases {
+		got, isError := callTool(t, s, tc.tool, tc.args)
+		if isError || got != tc.want {
+			t.Errorf("%s = %v %s, want %s (calls %v)", tc.tool, isError, got, tc.want, api.called())
+		}
+	}
+	want := []string{"GET " + hooksPath, "GET /api/v1/orgs/" + orgB + "/filesystems/fsone/webhooks", "DELETE " + hooksPath + "/" + hookID, "POST " + hooksPath + "/" + hookID + ":enable"}
+	if calls := api.called(); strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestMCPWebhookErrors(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET " + hooksPath:                             reply(403, `{"detail":{"code":"no_grant"}}`),
+		"DELETE " + hooksPath + "/" + hookID:           reply(404, `{"detail":{"code":"not_found"}}`),
+		"POST " + hooksPath + "/" + hookID + ":enable": reply(409, `{"detail":{"code":"access_revoked"}}`),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	s := connectMCP(t)
+	cases := []struct {
+		tool, code, hint string
+	}{
+		{"list_webhooks", "no_grant", "read-write grant"},
+		{"delete_webhook", "not_found", "webhooks list"},
+		{"enable_webhook", "access_revoked", "create a new webhook"},
+	}
+	for _, tc := range cases {
+		args := map[string]any{"filesystem_id": "fsone", "webhook_id": hookID}
+		if tc.tool == "list_webhooks" {
+			delete(args, "webhook_id")
+		}
+		text, isError := callTool(t, s, tc.tool, args)
+		var out struct {
+			Error cliError `json:"error"`
+		}
+		if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != tc.code || !strings.Contains(out.Error.Hint, tc.hint) {
+			t.Errorf("%s = %v %s", tc.tool, isError, text)
+		}
 	}
 }

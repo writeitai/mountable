@@ -19,6 +19,9 @@ FILES = f"/api/v1/filesystems/{FS}/files"
 LIST = f"/api/v1/filesystems/{FS}/list"
 CHANGES = f"/api/v1/filesystems/{FS}/changes"
 SESSIONS = "/api/v1/mount-sessions"
+ME = "/api/v1/me"
+ORG = "11111111-1111-1111-1111-111111111111"
+WEBHOOKS = f"/api/v1/orgs/{ORG}/filesystems/{FS}/webhooks"
 
 
 @dataclass
@@ -64,8 +67,50 @@ def file_info(path: str, etag: str | None = '"e1"', **overrides: Any) -> dict[st
     return info
 
 
+def me(org: str = ORG) -> dict[str, Any]:
+    """GET /api/v1/me for an API key of org."""
+    return {
+        "id": "m1",
+        "email": "a@example.com",
+        "name": "A",
+        "organisations": [],
+        "api_key": {"id": "k1", "org_id": org},
+    }
+
+
+def webhook(secret: str | None = None, **overrides: Any) -> dict[str, Any]:
+    """A webhook as the API shows it; create and rotate add its secret."""
+    hook: dict[str, Any] = {
+        "id": "33333333-3333-3333-3333-333333333333",
+        "filesystem_id": FS,
+        "url": "https://example.com/hooks",
+        "path_prefix": "/tickets",
+        "state": "active",
+        "disabled_reason": None,
+        "created_by": "api key backend",
+        "created_at": "2026-10-20T12:00:00Z",
+        "last_success_at": None,
+        "last_failure_at": None,
+        "last_failure": None,
+        "failing_since": None,
+    }
+    hook.update(overrides)
+    if secret is not None:
+        hook["secret"] = secret
+    return hook
+
+
 def iso(moment: datetime) -> str:
     return moment.isoformat().replace("+00:00", "Z")
+
+
+class _Server(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A reply delayed past the client's timeout fails to write. Printing
+        # that from a daemon thread while the interpreter exits aborts it
+        # (seen on Python 3.14), so errors are not printed; the client's
+        # side of the failure is what the tests check.
+        pass
 
 
 class MockAPI:
@@ -130,7 +175,7 @@ class MockAPI:
 
             do_GET = do_PUT = do_DELETE = do_POST = _serve
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handle)
+        self._server = _Server(("127.0.0.1", 0), Handle)
         self._server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(
@@ -154,6 +199,8 @@ class MockAPI:
             return handler(request)
         if request.method == "POST" and request.path == SESSIONS:
             return self.issue_session(request)
+        if request.method == "GET" and request.path == ME:
+            return Reply(200, me())
         return error(404, "not_found")
 
     def issue_session(self, request: Request) -> Reply:

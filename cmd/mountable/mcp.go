@@ -15,6 +15,9 @@ const (
 	retryRead  = " Read-only and safe to retry."
 	rateLimits = " On rate_limited, wait retry_after seconds before retrying."
 	orgNote    = " org_id is optional: an API key uses its own organisation, and a login with one organisation uses that one."
+	// Creating a webhook and rotating its secret return the signing secret,
+	// which belongs in the receiving backend, not in a model's context.
+	webhookSecrets = " Creating a webhook and rotating its secret are not tools, because their answer is the signing secret: run `mountable webhooks create` or `rotate-secret` (or the SDKs) where the receiving backend stores it."
 )
 
 // mountCommandTemplate creates the mount directory, then mounts with the
@@ -45,6 +48,12 @@ type ticketInput struct {
 
 type sessionInput struct {
 	SessionID string `json:"session_id" jsonschema:"the mount session ID"`
+}
+
+type webhookInput struct {
+	FilesystemID string `json:"filesystem_id" jsonschema:"the filesystem ID"`
+	WebhookID    string `json:"webhook_id" jsonschema:"the webhook ID, from list_webhooks"`
+	OrgID        string `json:"org_id,omitempty" jsonschema:"the organisation ID; optional"`
 }
 
 func serveMCP() error {
@@ -103,6 +112,31 @@ func newMCPServer() *mcp.Server {
 			return nil, err
 		}
 		return map[string]any{"id": in.SessionID, "revoked": true}, nil
+	}))
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_webhooks",
+		Description: "List a filesystem's webhooks: url, path_prefix, state (active or disabled), disabled_reason (failing or access_revoked) and the last delivery's outcome (last_success_at, last_failure, failing_since). Needs read-write access to the filesystem." +
+			webhookSecrets + orgNote + retryRead + rateLimits,
+	}, toolIn(func(in filesystemInput) string { return in.OrgID }, func(ctx context.Context, c *client, in filesystemInput) (any, error) {
+		raw, err := c.listWebhooks(ctx, in.FilesystemID)
+		return raw, webhookError(err, "")
+	}))
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "delete_webhook",
+		Description: "Delete a webhook; deliveries to its URL stop. Not idempotent: after an unknown outcome, call list_webhooks to see whether it is gone." + orgNote + rateLimits,
+	}, toolIn(func(in webhookInput) string { return in.OrgID }, func(ctx context.Context, c *client, in webhookInput) (any, error) {
+		if err := c.deleteWebhook(ctx, in.FilesystemID, in.WebhookID); err != nil {
+			return nil, webhookError(err, "")
+		}
+		return map[string]any{"id": in.WebhookID, "deleted": true}, nil
+	}))
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "enable_webhook",
+		Description: "Re-enable a webhook disabled after 24 hours of failed deliveries (disabled_reason failing), once its endpoint works again; the next delivery is usually a files.resync. A webhook disabled as access_revoked cannot be re-enabled (error access_revoked): create a new one with `mountable webhooks create`. Safe to retry." +
+			orgNote + rateLimits,
+	}, toolIn(func(in webhookInput) string { return in.OrgID }, func(ctx context.Context, c *client, in webhookInput) (any, error) {
+		raw, err := c.webhookAction(ctx, in.FilesystemID, in.WebhookID, "enable")
+		return raw, webhookError(err, "")
 	}))
 	return s
 }

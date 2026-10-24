@@ -1,10 +1,12 @@
 package main
 
-// The management commands: organisations, filesystems, tickets, sessions.
+// The management commands: organisations, filesystems, tickets, sessions,
+// webhooks.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -306,6 +308,157 @@ func sessionsRevoke(o *output, args []string) error {
 		}
 		return o.result(map[string]any{"id": args[0], "revoked": true}, func(w io.Writer) error {
 			_, err := fmt.Fprintf(w, "revoked %s\n", args[0])
+			return err
+		})
+	})
+}
+
+const webhooksUsage = "webhooks list FS_ID | webhooks create FS_ID URL [--path-prefix DIR] | webhooks delete FS_ID WEBHOOK_ID | webhooks rotate-secret FS_ID WEBHOOK_ID | webhooks enable FS_ID WEBHOOK_ID"
+
+type webhook struct {
+	ID             string  `json:"id"`
+	URL            string  `json:"url"`
+	PathPrefix     string  `json:"path_prefix"`
+	State          string  `json:"state"`
+	DisabledReason *string `json:"disabled_reason"`
+	LastFailure    *string `json:"last_failure"`
+	Secret         string  `json:"secret"`
+}
+
+// webhookError gives the webhook commands' errors their own next steps.
+// unknown is the next step when the outcome is unknown (the request or its
+// answer was lost, or the API failed with a 5xx); empty keeps the default.
+// A command that passes one resolves the organisation first, so the error
+// is the webhook request's.
+func webhookError(err error, unknown string) error {
+	if err == nil {
+		return nil
+	}
+	e := toCLIError(err)
+	var api *apiError
+	var own *cliError
+	if unknown != "" && !errors.As(err, &own) && (!errors.As(err, &api) || api.Status >= 500) {
+		e.Hint = unknown
+		return e
+	}
+	switch e.Code {
+	case "no_grant":
+		e.Hint = "webhooks need read-write access to the filesystem; ask an owner or admin for a read-write grant"
+	case "not_found":
+		e.Hint = "check the filesystem ID with `mountable fs list` and the webhook ID with `mountable webhooks list FS_ID`"
+	}
+	return e
+}
+
+func webhooksList(o *output, args []string) error {
+	return apiCommand(args, 1, "webhooks list FS_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		raw, err := c.listWebhooks(ctx, args[0])
+		if err != nil {
+			return webhookError(err, "")
+		}
+		return o.result(raw, func(w io.Writer) error {
+			var list []webhook
+			if err := json.Unmarshal(raw, &list); err != nil {
+				return err
+			}
+			t := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(t, "ID\tURL\tPREFIX\tSTATE\tLAST FAILURE")
+			for _, h := range list {
+				state, failure := h.State, "-"
+				if h.DisabledReason != nil {
+					state += " (" + *h.DisabledReason + ")"
+				}
+				if h.LastFailure != nil {
+					failure = *h.LastFailure
+				}
+				fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\n", h.ID, h.URL, h.PathPrefix, state, failure)
+			}
+			return t.Flush()
+		})
+	})
+}
+
+func webhooksCreate(o *output, args []string) error {
+	const usage = "webhooks create FS_ID URL [--path-prefix DIR] [--org ORG_ID]"
+	f := newFlags(usage)
+	org := f.String("org", "", "organisation ID")
+	prefix := f.String("path-prefix", "/", "deliver only changes in this directory")
+	positional, err := f.parse(args, 2)
+	if err != nil {
+		return err
+	}
+	c, err := newClient(*org)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if err := c.resolveOrg(ctx); err != nil {
+		return err
+	}
+	raw, err := c.createWebhook(ctx, positional[0], positional[1], *prefix)
+	if err != nil {
+		return webhookError(err, "the webhook may have been created: run `mountable webhooks list FS_ID` and look for the URL before creating it again")
+	}
+	return webhookSecret(o, raw, false)
+}
+
+// webhookSecret writes a webhook whose answer carries its secret: with
+// --json the API's object, otherwise the secret alone on stdout. The API
+// shows a secret only once, so this is the only chance to store it.
+func webhookSecret(o *output, raw json.RawMessage, rotated bool) error {
+	return o.result(raw, func(w io.Writer) error {
+		var h webhook
+		if err := json.Unmarshal(raw, &h); err != nil {
+			return err
+		}
+		if rotated {
+			note(o.stderr, "new secret for webhook %s; for 24 hours deliveries are also signed with the previous one", h.ID)
+		} else {
+			note(o.stderr, "webhook %s for %s (path prefix %s)", h.ID, h.URL, h.PathPrefix)
+		}
+		note(o.stderr, "the secret is shown only now: store it where your endpoint can read it")
+		_, err := fmt.Fprintln(w, h.Secret)
+		return err
+	})
+}
+
+func webhooksDelete(o *output, args []string) error {
+	return apiCommand(args, 2, "webhooks delete FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		if err := c.deleteWebhook(ctx, args[0], args[1]); err != nil {
+			return webhookError(err, "")
+		}
+		return o.result(map[string]any{"id": args[1], "deleted": true}, func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "deleted %s\n", args[1])
+			return err
+		})
+	})
+}
+
+func webhooksRotateSecret(o *output, args []string) error {
+	return apiCommand(args, 2, "webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		if err := c.resolveOrg(ctx); err != nil {
+			return err
+		}
+		raw, err := c.webhookAction(ctx, args[0], args[1], "rotate-secret")
+		if err != nil {
+			return webhookError(err, "the secret may have changed and is not shown again: rotate again and store the new secret")
+		}
+		return webhookSecret(o, raw, true)
+	})
+}
+
+func webhooksEnable(o *output, args []string) error {
+	return apiCommand(args, 2, "webhooks enable FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		raw, err := c.webhookAction(ctx, args[0], args[1], "enable")
+		if err != nil {
+			return webhookError(err, "")
+		}
+		return o.result(raw, func(w io.Writer) error {
+			var h webhook
+			if err := json.Unmarshal(raw, &h); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintf(w, "%s %s\n", h.ID, h.State)
 			return err
 		})
 	})

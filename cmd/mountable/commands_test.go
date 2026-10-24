@@ -668,6 +668,7 @@ func TestRedact(t *testing.T) {
 		"odd mtblat_a..b.c-d_e":         "odd mtblat_[redacted]",
 		"jwt mtblat_.payload.signature": "jwt mtblat_[redacted]",
 		"refresh mtblrt_... refused":    "refresh mtblrt_[redacted] refused",
+		"secret whsec_MfKQ9r8+/w== no":  "secret whsec_[redacted] no",
 		"nothing secret here":           "nothing secret here",
 	} {
 		if got := redact(in); got != want {
@@ -850,5 +851,263 @@ func TestMountChecksTheDirectoryBeforeUsingTheTicket(t *testing.T) {
 	}
 	if calls := api.called(); len(calls) != 0 {
 		t.Fatalf("the ticket was used: %v", calls)
+	}
+}
+
+const (
+	testWebhookSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+	hookID            = "33333333-3333-3333-3333-333333333333"
+	hooksPath         = "/api/v1/orgs/" + orgA + "/filesystems/fsone/webhooks"
+)
+
+// webhookJSON is a webhook as the API shows it; secret is added when not
+// empty, as create and rotate-secret do.
+func webhookJSON(state, reason, failure, secret string) string {
+	quoted := func(s string) string {
+		if s == "" {
+			return "null"
+		}
+		return `"` + s + `"`
+	}
+	s := `{"id":"` + hookID + `","filesystem_id":"fsone","url":"https://example.com/hooks","path_prefix":"/tickets",` +
+		`"state":"` + state + `","disabled_reason":` + quoted(reason) + `,"created_by":"api key backend","created_at":"2026-10-20T12:00:00Z",` +
+		`"last_success_at":null,"last_failure_at":null,"last_failure":` + quoted(failure) + `,"failing_since":null`
+	if secret != "" {
+		s += `,"secret":"` + secret + `"`
+	}
+	return s + "}"
+}
+
+func TestWebhookCommands(t *testing.T) {
+	useAPIKey(t)
+	list := "[" + webhookJSON("active", "", "", "") + "," + strings.Replace(webhookJSON("disabled", "failing", "http_500", ""), hookID, "44444444-4444-4444-4444-444444444444", 1) + "]"
+	enabled := webhookJSON("active", "", "", "")
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET " + hooksPath:                                         reply(200, list),
+		"DELETE " + hooksPath + "/" + hookID:                       reply(204, ""),
+		"POST " + hooksPath + "/" + hookID + ":enable":             reply(200, enabled),
+		"POST " + hooksPath + "/" + hookID + ":bogus":              reply(500, ""),
+		"GET /api/v1/orgs/" + orgB + "/filesystems/fsone/webhooks": reply(200, "[]"),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+
+	r := runCLI(t, "webhooks", "list", "fsone", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != list || r.stderr != "" {
+		t.Fatalf("webhooks list --json = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	r = runCLI(t, "webhooks", "list", "fsone")
+	if r.code != 0 || !strings.Contains(r.stdout, hookID+"  https://example.com/hooks  /tickets  active") ||
+		!strings.Contains(r.stdout, "disabled (failing)  http_500") {
+		t.Fatalf("webhooks list = %d %q", r.code, r.stdout)
+	}
+	if r := runCLI(t, "webhooks", "list", "fsone", "--org", orgB, "--json"); r.code != 0 || strings.TrimSpace(r.stdout) != "[]" {
+		t.Fatalf("webhooks list --org = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "delete", "fsone", hookID, "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != `{"deleted":true,"id":"`+hookID+`"}` {
+		t.Fatalf("webhooks delete --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "delete", "fsone", hookID)
+	if r.code != 0 || r.stdout != "deleted "+hookID+"\n" {
+		t.Fatalf("webhooks delete = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "enable", "fsone", hookID, "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != enabled {
+		t.Fatalf("webhooks enable --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "enable", "fsone", hookID)
+	if r.code != 0 || r.stdout != hookID+" active\n" {
+		t.Fatalf("webhooks enable = %d %q", r.code, r.stdout)
+	}
+	if calls := api.called(); calls[len(calls)-1] != "POST "+hooksPath+"/"+hookID+":enable" || len(calls) != 7 {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+// create and rotate-secret print the secret once: alone on stdout, or in
+// the API's object with --json. Nothing else shows it.
+func TestWebhookSecretIsShownOnce(t *testing.T) {
+	useAPIKey(t)
+	created := webhookJSON("active", "", "", testWebhookSecret)
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"POST " + hooksPath: reply(201, created),
+		"POST " + hooksPath + "/" + hookID + ":rotate-secret": reply(200, created),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+
+	r := runCLI(t, "webhooks", "create", "fsone", "https://example.com/hooks", "--path-prefix", "/tickets", "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != created || r.stderr != "" {
+		t.Fatalf("webhooks create --json = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if b := api.bodies[0]; len(b) != 2 || b["url"] != "https://example.com/hooks" || b["path_prefix"] != "/tickets" {
+		t.Fatalf("body = %v", b)
+	}
+	r = runCLI(t, "webhooks", "create", "fsone", "https://example.com/hooks")
+	if r.code != 0 || r.stdout != testWebhookSecret+"\n" {
+		t.Fatalf("webhooks create = %d %q", r.code, r.stdout)
+	}
+	if strings.Contains(r.stderr, "whsec_") || !strings.Contains(r.stderr, hookID) || !strings.Contains(r.stderr, "shown only now") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+	if b := api.bodies[1]; b["path_prefix"] != "/" {
+		t.Fatalf("default path_prefix: body = %v", b)
+	}
+	r = runCLI(t, "webhooks", "rotate-secret", "fsone", hookID, "--json")
+	if r.code != 0 || strings.TrimSpace(r.stdout) != created {
+		t.Fatalf("webhooks rotate-secret --json = %d %q", r.code, r.stdout)
+	}
+	r = runCLI(t, "webhooks", "rotate-secret", "fsone", hookID)
+	if r.code != 0 || r.stdout != testWebhookSecret+"\n" || strings.Contains(r.stderr, "whsec_") || !strings.Contains(r.stderr, "24 hours") {
+		t.Fatalf("webhooks rotate-secret = %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	want := []string{"POST " + hooksPath, "POST " + hooksPath, "POST " + hooksPath + "/" + hookID + ":rotate-secret", "POST " + hooksPath + "/" + hookID + ":rotate-secret"}
+	if calls := api.called(); strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v", calls)
+	}
+	if api.auth[0] != "Bearer "+testKey {
+		t.Fatalf("authorization = %q", api.auth[0])
+	}
+}
+
+func TestWebhookErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		handler http.HandlerFunc
+		code    string
+		hint    string
+	}{
+		{"bad url", []string{"create", "fsone", "http://example.com"}, reply(400, `{"detail":{"code":"bad_url"}}`), "bad_url", "https:// URL on port 443"},
+		{"bad prefix", []string{"create", "fsone", "https://example.com", "--path-prefix", "x/../y"}, reply(400, `{"detail":{"code":"bad_path"}}`), "bad_path", "use / or a directory"},
+		{"limit", []string{"create", "fsone", "https://example.com"}, reply(409, `{"detail":{"code":"webhook_limit"}}`), "webhook_limit", "mountable webhooks list FS_ID"},
+		{"no grant", []string{"create", "fsone", "https://example.com"}, reply(403, `{"detail":{"code":"no_grant"}}`), "no_grant", "read-write grant"},
+		{"payment", []string{"create", "fsone", "https://example.com"}, reply(402, `{"detail":{"code":"payment_required","url":"https://mountable.io/console/billing"}}`), "payment_required", "https://mountable.io/console/billing"},
+		{"invalid", []string{"create", "fsone", "https://example.com"}, reply(422, `{"detail":[{"loc":["body","url"],"msg":"too long","type":"x"}]}`), "invalid_request", "check the command's arguments"},
+		{"create unknown", []string{"create", "fsone", "https://example.com"}, reply(502, `<html>bad gateway</html>`), "api_error", "look for the URL before creating it again"},
+		{"create lost", []string{"create", "fsone", "https://example.com"}, hangUp, "network_error", "look for the URL before creating it again"},
+		{"not found", []string{"delete", "fsone", hookID}, reply(404, `{"detail":{"code":"not_found"}}`), "not_found", "mountable webhooks list FS_ID"},
+		{"list no grant", []string{"list", "fsone"}, reply(403, `{"detail":{"code":"no_grant"}}`), "no_grant", "read-write grant"},
+		{"revoked", []string{"enable", "fsone", hookID}, reply(409, `{"detail":{"code":"access_revoked"}}`), "access_revoked", "create a new webhook"},
+		{"bad id", []string{"enable", "fsone", "nope"}, reply(422, `{"detail":[{"loc":["path","webhook_id"],"msg":"not a uuid","type":"x"}]}`), "invalid_request", "check the command's arguments"},
+		{"rotate unknown", []string{"rotate-secret", "fsone", hookID}, reply(503, ""), "api_error", "rotate again"},
+		{"rotate refused", []string{"rotate-secret", "fsone", hookID}, reply(404, `{"detail":{"code":"not_found"}}`), "not_found", "mountable webhooks list FS_ID"},
+		{"leaked secret", []string{"rotate-secret", "fsone", hookID}, reply(409, `{"detail":{"code":"conflict","message":"`+testWebhookSecret+`"}}`), "conflict", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useAPIKey(t)
+			api := newFakeAPI(t, nil)
+			api.routes = map[string]http.HandlerFunc{
+				"POST " + hooksPath:                                   tc.handler,
+				"GET " + hooksPath:                                    tc.handler,
+				"DELETE " + hooksPath + "/" + hookID:                  tc.handler,
+				"POST " + hooksPath + "/" + hookID + ":enable":        tc.handler,
+				"POST " + hooksPath + "/nope:enable":                  tc.handler,
+				"POST " + hooksPath + "/" + hookID + ":rotate-secret": tc.handler,
+			}
+			t.Setenv("MOUNTABLE_ORG", orgA)
+			r := runCLI(t, append(append([]string{"webhooks"}, tc.args...), "--json")...)
+			e := jsonError(t, r)
+			if r.code != 1 || e.Code != tc.code || !strings.Contains(e.Hint, tc.hint) || e.Message == "" {
+				t.Fatalf("got %d %+v", r.code, e)
+			}
+			if strings.Contains(r.stdout, "whsec_M") {
+				t.Fatalf("the secret leaked: %s", r.stdout)
+			}
+			r = runCLI(t, append([]string{"webhooks"}, tc.args...)...)
+			if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, "("+tc.code+")") || strings.Contains(r.stderr, "whsec_M") {
+				t.Fatalf("text: %d %q %q", r.code, r.stdout, r.stderr)
+			}
+			if calls := api.called(); len(calls) != 2 {
+				t.Fatalf("calls = %v (an error was retried?)", calls)
+			}
+		})
+	}
+}
+
+// hangUp closes the connection without an answer.
+func hangUp(w http.ResponseWriter, _ *http.Request) {
+	conn, _, _ := w.(http.Hijacker).Hijack()
+	conn.Close()
+}
+
+// The organisation is resolved before a webhook is created, so a failure
+// to resolve it never claims the webhook may exist.
+func TestWebhookCreateResolvesTheOrganisationFirst(t *testing.T) {
+	api := newFakeAPI(t, map[string]http.HandlerFunc{"GET /api/v1/me": reply(200, twoOrgs)})
+	useLogin(t) // after the fake API: the login is for its URL
+	r := runCLI(t, "webhooks", "create", "fsone", "https://example.com", "--json")
+	if e := jsonError(t, r); r.code != 1 || e.Code != "org_required" || !strings.Contains(e.Hint, "--org") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	api.routes["GET /api/v1/me"] = hangUp
+	r = runCLI(t, "webhooks", "rotate-secret", "fsone", hookID, "--json")
+	if e := jsonError(t, r); r.code != 1 || e.Code != "network_error" || strings.Contains(e.Hint, "rotate again") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	api.routes["GET /api/v1/me"] = reply(200, oneOrg)
+	api.routes["POST "+hooksPath] = reply(201, webhookJSON("active", "", "", testWebhookSecret))
+	r = runCLI(t, "webhooks", "create", "fsone", "https://example.com")
+	if r.code != 0 || r.stdout != testWebhookSecret+"\n" {
+		t.Fatalf("got %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if calls := api.called(); calls[len(calls)-1] != "POST "+hooksPath || calls[len(calls)-2] != "GET /api/v1/me" {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestWebhookUsageErrors(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	for _, args := range [][]string{
+		{"webhooks"},
+		{"webhooks", "bogus"},
+		{"webhooks", "list"},
+		{"webhooks", "create", "fsone"},
+		{"webhooks", "create", "fsone", "https://example.com", "extra"},
+		{"webhooks", "delete", "fsone"},
+		{"webhooks", "rotate-secret", "fsone"},
+		{"webhooks", "enable", "fsone", hookID, "extra"},
+		{"webhooks", "create", "fsone", "https://example.com", "--path-prefix"},
+	} {
+		r := runCLI(t, args...)
+		if r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, "webhooks") {
+			t.Errorf("%v = %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("usage errors called the API: %v", calls)
+	}
+}
+
+// An empty, "." or ".." ID is refused before any request: once the path is
+// normalised, webhooks/.. would be the filesystem itself.
+func TestWebhookDotSegmentIDsAreRefused(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	for _, bad := range []string{"", ".", ".."} {
+		for _, args := range [][]string{
+			{"webhooks", "delete", "fsone", bad},
+			{"webhooks", "enable", "fsone", bad},
+			{"webhooks", "rotate-secret", "fsone", bad},
+			{"webhooks", "list", bad},
+			{"webhooks", "create", bad, "https://example.com"},
+		} {
+			r := runCLI(t, append(args, "--json")...)
+			if e := jsonError(t, r); r.code != 1 || e.Code != "invalid_request" || strings.Contains(e.Hint, "may have") {
+				t.Errorf("%v = %d %+v", args, r.code, e)
+			}
+		}
+	}
+	s := connectMCP(t)
+	for _, tool := range []string{"delete_webhook", "enable_webhook"} {
+		text, isError := callTool(t, s, tool, map[string]any{"filesystem_id": "fsone", "webhook_id": ".."})
+		if !isError || !strings.Contains(text, `"invalid_request"`) {
+			t.Errorf("%s = %v %s", tool, isError, text)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("calls = %v", calls)
 	}
 }

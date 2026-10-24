@@ -148,7 +148,9 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 `mountable mcp` serves the same operations as MCP tools over stdio
 (`list_organizations`, `list_filesystems`, `create_filesystem`,
 `filesystem_usage`, `create_mount_ticket`, `list_mount_sessions`,
-`revoke_mount_session`). Mounting stays a command in the sandbox:
+`revoke_mount_session`, `list_webhooks`, `delete_webhook`,
+`enable_webhook`; creating a webhook or rotating its secret returns the
+secret, so they stay CLI and SDK calls). Mounting stays a command in the sandbox:
 `create_mount_ticket` returns the ticket and the exact `mount_command`, and
 takes an optional `max_duration_seconds`.
 
@@ -181,15 +183,19 @@ https://mountable.io/docs/end-user-limits
 
 ## Webhooks when files change
 
-Create one with the same curl call, sending
-`{"url": "https://example.com/hooks/mountable", "path_prefix": "/"}` to
-`…/filesystems/$FS_ID/webhooks` with a key that can write the filesystem. The
-response shows the signing `secret` (`whsec_…`) once; store it like the key.
-Every change, from mounts or the files API, then arrives as a `files.changed`
-message signed per Standard Webhooks. Verify the signature on the raw body,
-answer `2xx` within 10 seconds, apply a message only if its `data.cursor`,
-compared as an integer, exceeds the last one applied (delivery is at least
-once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
+Where the receiving backend keeps its secrets, with a key that can write the
+filesystem: `mountable webhooks create FS_ID https://example.com/hooks --json`
+(optional `--path-prefix /dir`). Its `secret` (`whsec_…`) is shown once;
+store it like the key, never in a prompt or log. Every change, from mounts or
+the files API, then arrives as a `files.changed` message signed per Standard
+Webhooks (the SDKs' `verify_webhook` checks it). Verify the signature on the
+raw body, answer `2xx` within 10 seconds, apply a message only if its
+`data.cursor`, compared as an integer, exceeds the last one applied (delivery
+is at least once), and on `files.resync` list again. `webhooks list FS_ID`
+shows `state` and `last_failure`; `webhooks enable` resumes one disabled as
+`failing`; `rotate-secret` and `delete` take the webhook ID too. `create` is
+not idempotent: after an unknown outcome, check `webhooks list` first. See
+https://mountable.io/docs/webhooks
 
 ## Limitations
 

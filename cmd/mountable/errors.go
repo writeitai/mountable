@@ -60,6 +60,10 @@ var explanations = map[string]struct{ message, hint string }{
 	"ticket_invalid":       {"the ticket is unknown, already used or expired", "create a new one with `mountable ticket create FS_ID`"},
 	"session_not_active":   {"the mount session has ended", "create a new ticket with `mountable ticket create FS_ID`"},
 	"invalid_request":      {"the API rejected the request", "check the command's arguments"},
+	"bad_url":              {"the webhook URL is not allowed", "use an https:// URL on port 443 with a public host, and no user name, password or fragment"},
+	"bad_path":             {"the path prefix is not a directory path", "use / or a directory such as /tickets"},
+	"webhook_limit":        {"the filesystem already has 5 webhooks", "delete one first (`mountable webhooks list FS_ID`)"},
+	"access_revoked":       {"the webhook's creator can no longer read the filesystem", "create a new webhook"},
 	"network_error":        {"the API could not be reached", "check the network and MOUNTABLE_API_URL; reads and revoking sessions are safe to retry"},
 }
 
@@ -145,16 +149,21 @@ func redactValue(v any) any {
 	return v
 }
 
-// Every secret the API issues starts with "mtbl": API keys (mtbl_), login
-// tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
-// An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so
-// a secret runs up to the first character outside [A-Za-z0-9_.-]; a dot
-// right after a secret is redacted with it.
-var secretPattern = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
+// Every credential the API issues starts with "mtbl": API keys (mtbl_),
+// login tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations
+// (mtblinv_). An access token may be a JWT
+// (mtblat_<header>.<payload>.<signature>), so a secret runs up to the first
+// character outside [A-Za-z0-9_.-]; a dot right after a secret is redacted
+// with it. Webhook signing secrets are whsec_ and standard base64.
+var (
+	secretPattern        = regexp.MustCompile(`(mtbl[a-z]*)_[A-Za-z0-9_.-]+`)
+	webhookSecretPattern = regexp.MustCompile(`whsec_[A-Za-z0-9+/=]+`)
+)
 
 // redact removes anything shaped like a Mountable secret from s.
 func redact(s string) string {
-	return secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+	s = secretPattern.ReplaceAllString(s, "${1}_[redacted]")
+	return webhookSecretPattern.ReplaceAllString(s, "whsec_[redacted]")
 }
 
 // diagnostics is where diagnostics outside a command's output go: stderr
