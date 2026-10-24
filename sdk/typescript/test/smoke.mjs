@@ -1,7 +1,8 @@
 // Runs the built package (dist/) once against a local server, so CI can
 // check it on the oldest supported Node: node test/smoke.mjs
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
-import { Mountable } from "../dist/index.js";
+import { Mountable, verifyWebhook } from "../dist/index.js";
 
 const server = createServer((req, res) => {
   let body = "";
@@ -23,5 +24,22 @@ const file = await client.filesystem("fs_smoke").read("a b.txt");
 server.close();
 if (new TextDecoder().decode(file.data) !== "abc" || file.info.etag !== '"e1"') {
   throw new Error(`unexpected read: ${JSON.stringify(file.info)}`);
+}
+// verifyWebhook uses node:crypto's Web Crypto where there is no global one.
+const secret = `whsec_${Buffer.alloc(32, 7).toString("base64")}`;
+const body = JSON.stringify({
+  type: "files.resync",
+  timestamp: new Date().toISOString(),
+  data: { webhook_id: "w1", filesystem_id: "fs_smoke", events: [], cursor: "7" },
+});
+const timestamp = String(Math.floor(Date.now() / 1000));
+const signature = createHmac("sha256", Buffer.alloc(32, 7)).update(`msg_1.${timestamp}.${body}`).digest("base64");
+const message = await verifyWebhook(
+  secret,
+  { "webhook-id": "msg_1", "webhook-timestamp": timestamp, "webhook-signature": `v1,${signature}` },
+  body,
+);
+if (message.cursor !== "7" || message.type !== "files.resync") {
+  throw new Error(`unexpected message: ${JSON.stringify(message)}`);
 }
 console.log(`mountable-sdk works on Node ${process.version}`);

@@ -136,6 +136,14 @@ func (c *client) orgID(ctx context.Context) (string, error) {
 	}
 }
 
+// resolveOrg resolves the organisation now, so later calls send only their
+// own request.
+func (c *client) resolveOrg(ctx context.Context) error {
+	org, err := c.orgID(ctx)
+	c.org = org
+	return err
+}
+
 // inOrg calls a path under the resolved organisation.
 func (c *client) inOrg(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
 	org, err := c.orgID(ctx)
@@ -161,6 +169,31 @@ func (c *client) filesystemUsage(ctx context.Context, fsID string) (json.RawMess
 
 func (c *client) listSessions(ctx context.Context, fsID string) (json.RawMessage, error) {
 	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/mount-sessions", nil)
+}
+
+func webhooksPath(fsID string) string {
+	return "/filesystems/" + url.PathEscape(fsID) + "/webhooks"
+}
+
+func (c *client) listWebhooks(ctx context.Context, fsID string) (json.RawMessage, error) {
+	return c.inOrg(ctx, "GET", webhooksPath(fsID), nil)
+}
+
+// createWebhook returns the webhook with its secret, which the API shows
+// only here and on rotation.
+func (c *client) createWebhook(ctx context.Context, fsID, hookURL, pathPrefix string) (json.RawMessage, error) {
+	return c.inOrg(ctx, "POST", webhooksPath(fsID), map[string]string{"url": hookURL, "path_prefix": pathPrefix})
+}
+
+func (c *client) deleteWebhook(ctx context.Context, fsID, webhookID string) error {
+	_, err := c.inOrg(ctx, "DELETE", webhooksPath(fsID)+"/"+url.PathEscape(webhookID), nil)
+	return err
+}
+
+// webhookAction posts one of a webhook's actions: rotate-secret (the answer
+// carries the new secret) or enable.
+func (c *client) webhookAction(ctx context.Context, fsID, webhookID, action string) (json.RawMessage, error) {
+	return c.inOrg(ctx, "POST", webhooksPath(fsID)+"/"+url.PathEscape(webhookID)+":"+action, nil)
 }
 
 // revokeSession is idempotent: revoking an ended session succeeds.

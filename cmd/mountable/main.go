@@ -23,6 +23,14 @@ const usage = `usage:
   mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration DURATION]
   mountable sessions list FS_ID [--org ORG_ID]
   mountable sessions revoke SESSION_ID
+  mountable webhooks list FS_ID [--org ORG_ID]
+  mountable webhooks create FS_ID URL [--path-prefix DIR] [--org ORG_ID]
+                                           prints the signing secret, shown once
+  mountable webhooks delete FS_ID WEBHOOK_ID [--org ORG_ID]
+  mountable webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]
+                                           prints the new secret, shown once
+  mountable webhooks enable FS_ID WEBHOOK_ID [--org ORG_ID]
+                                           resume a webhook disabled as failing
   mountable mount [--ro] FS_ID DIR         mount with your login
   mountable mount --ticket-stdin DIR       mount with a ticket read from stdin
   mountable unmount DIR
@@ -147,6 +155,20 @@ func dispatch(o *output, command string, args []string) error {
 			return sessionsRevoke(o, rest)
 		}
 		return usageError("sessions list FS_ID | sessions revoke SESSION_ID")
+	case "webhooks":
+		switch name, rest := sub("list", "create", "delete", "rotate-secret", "enable"); name {
+		case "list":
+			return webhooksList(o, rest)
+		case "create":
+			return webhooksCreate(o, rest)
+		case "delete":
+			return webhooksDelete(o, rest)
+		case "rotate-secret":
+			return webhooksRotateSecret(o, rest)
+		case "enable":
+			return webhooksEnable(o, rest)
+		}
+		return usageError(webhooksUsage)
 	}
 	return usageError("COMMAND; run `mountable help`")
 }

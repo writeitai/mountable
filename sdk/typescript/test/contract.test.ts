@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { Mountable, MountableError } from "../src/index.ts";
+import { Mountable, MountableError, verifyWebhook, Webhook } from "../src/index.ts";
 import {
   API_KEY,
   CHANGES,
@@ -14,11 +14,15 @@ import {
   FS,
   fileInfo,
   LIST,
+  ME,
   MockAPI,
+  me,
   type Reply,
   type Request,
   reply,
   SESSIONS,
+  WEBHOOKS,
+  webhook,
 } from "./mock-api.ts";
 
 const MODIFIED = new Date("2026-10-17T12:00:00.123Z");
@@ -568,6 +572,269 @@ test("C32 a redirect is an error", async () => {
   assert.equal((await rejects(fs.read("a.md"))).status, 307);
   assert.equal((await rejects(client.createMountTicket(FS))).status, 303);
   assert.ok(!api.requests.some((r) => r.path.includes("elsewhere")));
+});
+
+// --- webhooks --------------------------------------------------------------
+
+const SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+const HOOK = "33333333-3333-3333-3333-333333333333";
+const CREATED = new Date("2026-10-20T12:00:00Z");
+
+test("C33 createWebhook", async () => {
+  api.route("POST", WEBHOOKS, reply(201, webhook(SECRET)));
+  const hook = await client.createWebhook(FS, "https://example.com/hooks", { pathPrefix: "/x" });
+  assert.ok(hook instanceof Webhook);
+  assert.deepEqual(
+    {
+      id: hook.id,
+      filesystemId: hook.filesystemId,
+      url: hook.url,
+      pathPrefix: hook.pathPrefix,
+      state: hook.state,
+      disabledReason: hook.disabledReason,
+      createdBy: hook.createdBy,
+      createdAt: hook.createdAt,
+      lastSuccessAt: hook.lastSuccessAt,
+      lastFailureAt: hook.lastFailureAt,
+      lastFailure: hook.lastFailure,
+      failingSince: hook.failingSince,
+      secret: hook.secret,
+    },
+    {
+      id: HOOK,
+      filesystemId: FS,
+      url: "https://example.com/hooks",
+      pathPrefix: "/tickets",
+      state: "active",
+      disabledReason: null,
+      createdBy: "api key backend",
+      createdAt: CREATED,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastFailure: null,
+      failingSince: null,
+      secret: SECRET,
+    },
+  );
+  await client.createWebhook(FS, "https://example.com/other");
+  const [lookup, first, second] = api.requests;
+  assert.deepEqual([lookup.method, lookup.path], ["GET", ME]);
+  for (const request of api.requests) {
+    assert.equal(request.headers.authorization, `Bearer ${API_KEY}`);
+  }
+  assert.deepEqual([first.method, first.path], ["POST", WEBHOOKS]);
+  assert.equal(first.headers["content-type"], "application/json");
+  assert.deepEqual(first.json(), { url: "https://example.com/hooks", path_prefix: "/x" });
+  assert.deepEqual(second.json(), { url: "https://example.com/other", path_prefix: "/" });
+  // Concurrent first calls on a new client share one lookup.
+  const fresh = new Mountable({ apiKey: API_KEY, baseUrl: api.url });
+  api.route("GET", WEBHOOKS, reply(200, []));
+  await Promise.all([fresh.listWebhooks(FS), fresh.listWebhooks(FS)]);
+  assert.equal(api.calls().filter((c) => c === `GET ${ME}`).length, 2);
+});
+
+test("C34 list, enable and delete webhooks", async () => {
+  const failing = webhook(undefined, {
+    state: "disabled",
+    disabled_reason: "failing",
+    last_failure: "http_500",
+    last_failure_at: "2026-10-21T12:00:00Z",
+    last_success_at: "2026-10-20T13:00:00.5Z",
+    failing_since: "2026-10-20T14:00:00Z",
+  });
+  api.route("GET", WEBHOOKS, reply(200, [failing]));
+  api.route("POST", `${WEBHOOKS}/${HOOK}:enable`, reply(200, webhook()));
+  api.route("DELETE", `${WEBHOOKS}/${HOOK}`, reply(204));
+  api.route("DELETE", `${WEBHOOKS}/a%2Fb%3Fc`, reply(204));
+  const [hook] = await client.listWebhooks(FS);
+  assert.deepEqual([hook.state, hook.disabledReason, hook.lastFailure], ["disabled", "failing", "http_500"]);
+  assert.deepEqual(hook.lastFailureAt, new Date("2026-10-21T12:00:00Z"));
+  assert.deepEqual(hook.lastSuccessAt, new Date("2026-10-20T13:00:00.500Z"));
+  assert.deepEqual(hook.failingSince, new Date("2026-10-20T14:00:00Z"));
+  assert.equal(hook.secret, null);
+  const enabled = await client.enableWebhook(FS, HOOK);
+  assert.equal(enabled.state, "active");
+  assert.equal(enabled.secret, null);
+  assert.equal(await client.deleteWebhook(FS, HOOK), undefined);
+  await client.deleteWebhook(FS, "a/b?c");
+  assert.deepEqual(api.calls(), [
+    `GET ${ME}`,
+    `GET ${WEBHOOKS}`,
+    `POST ${WEBHOOKS}/${HOOK}:enable`,
+    `DELETE ${WEBHOOKS}/${HOOK}`,
+    `DELETE ${WEBHOOKS}/a%2Fb%3Fc`,
+  ]);
+});
+
+test("C35 rotateWebhookSecret", async () => {
+  const rotated = `whsec_${"B".repeat(43)}=`;
+  api.route("POST", `${WEBHOOKS}/${HOOK}:rotate-secret`, reply(200, webhook(rotated)));
+  const hook = await client.rotateWebhookSecret(FS, HOOK);
+  assert.equal(hook.secret, rotated);
+  assert.equal(hook.id, HOOK);
+  assert.equal(api.calls().at(-1), `POST ${WEBHOOKS}/${HOOK}:rotate-secret`);
+  assert.equal(api.requests.at(-1)?.body.length, 0);
+});
+
+test("C36 the secret is shown once", async () => {
+  api.route("POST", WEBHOOKS, reply(201, webhook(SECRET)));
+  const hook = await client.createWebhook(FS, "https://example.com/hooks");
+  assert.equal(hook.secret, SECRET);
+  for (const shown of [String(hook), inspect(hook), JSON.stringify(hook), JSON.stringify({ ...hook })]) {
+    assert.ok(!shown.includes("whsec_"), shown);
+  }
+  api.route("POST", `${WEBHOOKS}/${HOOK}:rotate-secret`, error(409, "conflict", { message: `refused ${SECRET}` }));
+  const e = await rejects(client.rotateWebhookSecret(FS, HOOK));
+  for (const shown of [String(e), inspect(e), e.message, e.stack ?? "", JSON.stringify(e)]) {
+    assert.ok(!shown.includes("MfKQ9r8"), shown);
+  }
+  assert.ok(e.message.includes("whsec_[redacted]"));
+});
+
+const WEBHOOK_ERRORS: [number, string][] = [
+  [400, "bad_url"],
+  [400, "bad_path"],
+  [402, "payment_required"],
+  [403, "no_grant"],
+  [404, "not_found"],
+  [409, "webhook_limit"],
+  [409, "access_revoked"],
+];
+
+test("C37 webhook errors", async () => {
+  for (const [status, code] of WEBHOOK_ERRORS) {
+    api.route("POST", WEBHOOKS, error(status, code));
+    api.route("POST", `${WEBHOOKS}/${HOOK}:enable`, error(status, code));
+    let e = await rejects(client.createWebhook(FS, "https://example.com/hooks"));
+    assert.deepEqual([e.status, e.code], [status, code]);
+    assert.ok(e.message);
+    e = await rejects(client.enableWebhook(FS, HOOK));
+    assert.deepEqual([e.status, e.code], [status, code]);
+  }
+  const invalid = { detail: [{ loc: ["path", "webhook_id"], msg: "not a uuid" }] };
+  api.route("DELETE", `${WEBHOOKS}/nope`, reply(422, invalid));
+  let e = await rejects(client.deleteWebhook(FS, "nope"));
+  assert.deepEqual([e.status, e.code], [422, "invalid_request"]);
+  assert.ok(e.message.includes("webhook_id"));
+  const before = api.requests.length;
+  api.route("GET", ME, error(401, "unauthenticated"));
+  e = await rejects(new Mountable({ apiKey: API_KEY, baseUrl: api.url }).listWebhooks(FS));
+  assert.deepEqual([e.status, e.code], [401, "unauthenticated"]);
+  api.route("GET", ME, reply(200, { ...me(), api_key: null }));
+  const lookups = new Mountable({ apiKey: API_KEY, baseUrl: api.url });
+  e = await rejects(lookups.createWebhook(FS, "https://example.com/hooks"));
+  assert.equal(e.code, "api_error");
+  // A failed lookup sends no webhook request, and is not kept.
+  api.route("GET", ME, reply(200, me()));
+  api.route("GET", WEBHOOKS, reply(200, []));
+  assert.deepEqual(await lookups.listWebhooks(FS), []);
+  assert.deepEqual(api.calls().slice(before), [`GET ${ME}`, `GET ${ME}`, `GET ${ME}`, `GET ${WEBHOOKS}`]);
+});
+
+test("C38 only webhook reads are retried", async () => {
+  api.route("GET", ME, failFirst(1, "drop", reply(200, me())));
+  api.route("GET", WEBHOOKS, failFirst(1, "drop", reply(200, [webhook()])));
+  assert.equal((await client.listWebhooks(FS)).length, 1);
+  assert.deepEqual(api.calls(), [`GET ${ME}`, `GET ${ME}`, `GET ${WEBHOOKS}`, `GET ${WEBHOOKS}`]);
+  const writes: [string, string, () => Promise<unknown>][] = [
+    ["POST", WEBHOOKS, () => client.createWebhook(FS, "https://x.example")],
+    ["DELETE", `${WEBHOOKS}/${HOOK}`, () => client.deleteWebhook(FS, HOOK)],
+    ["POST", `${WEBHOOKS}/${HOOK}:rotate-secret`, () => client.rotateWebhookSecret(FS, HOOK)],
+    ["POST", `${WEBHOOKS}/${HOOK}:enable`, () => client.enableWebhook(FS, HOOK)],
+  ];
+  for (const [method, path, call] of writes) {
+    api.route(method, path, failFirst(1, "drop", reply(200, webhook(SECRET))));
+    assert.equal((await rejects(call)).code, "network_error");
+    assert.equal(api.calls().filter((c) => c === `${method} ${path}`).length, 1);
+  }
+  assert.equal(api.calls().filter((c) => c === `GET ${ME}`).length, 2); // the organisation is kept
+});
+
+const VECTOR = JSON.parse(readFileSync(new URL("../../testdata/webhook.json", import.meta.url), "utf8")) as {
+  secret: string;
+  id: string;
+  timestamp: number;
+  reference_body: string;
+  reference_signature: string;
+  body: string;
+  signature: string;
+};
+
+function signedHeaders(signature = VECTOR.signature): Record<string, string> {
+  return {
+    "Webhook-Id": VECTOR.id,
+    "WEBHOOK-TIMESTAMP": String(VECTOR.timestamp),
+    "webhook-signature": signature,
+  };
+}
+
+test("C39 verifyWebhook accepts a signed delivery", async (t) => {
+  t.mock.method(Date, "now", () => (VECTOR.timestamp + 10) * 1000);
+  const message = await verifyWebhook(VECTOR.secret, signedHeaders(), new TextEncoder().encode(VECTOR.body));
+  assert.deepEqual(message, {
+    id: VECTOR.id,
+    type: "files.changed",
+    timestamp: new Date("2021-02-25T15:02:10.123Z"),
+    webhookId: HOOK,
+    filesystemId: FS,
+    events: [
+      {
+        type: "created",
+        path: "/tickets/AB-42.md",
+        file: {
+          path: "/tickets/AB-42.md",
+          type: "file",
+          size: 1234,
+          etag: '"3f2a"',
+          modifiedAt: new Date("2021-02-25T15:02:09Z"),
+        },
+      },
+      { type: "deleted", path: "/tickets/AB-41.md", file: null },
+    ],
+    cursor: "48213",
+  });
+  // A string body, Headers, and a rotation's two signatures with ours second.
+  const rotation = new Headers(signedHeaders(`v1,${"A".repeat(43)}= ${VECTOR.signature}`));
+  assert.deepEqual(await verifyWebhook(VECTOR.secret, rotation, VECTOR.body), message);
+});
+
+test("C40 verifyWebhook refuses anything else", async (t) => {
+  const now = t.mock.method(Date, "now", () => (VECTOR.timestamp + 10) * 1000);
+  const { secret, body } = VECTOR;
+  const headers = signedHeaders();
+  const { "Webhook-Id": _, ...missing } = headers;
+  const cases: [string, Record<string, string>, string][] = [
+    [secret, headers, `${body} `],
+    [`whsec_${"A".repeat(43)}=`, headers, body],
+    [secret, missing, body],
+    [secret, signedHeaders(VECTOR.signature.slice(3)), body],
+    ["MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body],
+    ["whsec_not base64!", headers, body],
+  ];
+  for (const [caseSecret, caseHeaders, caseBody] of cases) {
+    const e = await rejects(verifyWebhook(caseSecret, caseHeaders, caseBody));
+    assert.deepEqual([e.status, e.code], [null, "invalid_webhook"]);
+    assert.ok(!String(e).includes("MfKQ9r8") && !inspect(e).includes("MfKQ9r8"));
+  }
+  // The gateway's own signature of a body that is not a message: the
+  // signature passes, the body does not.
+  const reference = { ...headers, "webhook-signature": VECTOR.reference_signature };
+  const e = await rejects(verifyWebhook(secret, reference, VECTOR.reference_body));
+  assert.equal(e.code, "invalid_webhook");
+  assert.ok(e.message.includes("not a mountable.io webhook"), e.message);
+  for (const [offset, ok] of [
+    [-300, true],
+    [300, true],
+    [-301, false],
+    [301, false],
+  ] as const) {
+    now.mock.mockImplementation(() => (VECTOR.timestamp + offset) * 1000);
+    if (ok) {
+      assert.equal((await verifyWebhook(secret, headers, body)).cursor, "48213");
+    } else {
+      assert.equal((await rejects(verifyWebhook(secret, headers, body))).code, "invalid_webhook");
+    }
+  }
 });
 
 // --- parity ----------------------------------------------------------------

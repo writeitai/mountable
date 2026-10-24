@@ -38,6 +38,11 @@ they fail with `org_required`.
 | `mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration D]` | a one-time mount ticket for a sandbox; the session lasts `D` (such as `12h` or `720h`; default 12 hours, at most the API key's or login's expiry) |
 | `mountable sessions list FS_ID` | live mount sessions |
 | `mountable sessions revoke SESSION_ID` | revoke a session; its mount stops |
+| `mountable webhooks list FS_ID` | the filesystem's [webhooks](#webhooks) and their delivery state |
+| `mountable webhooks create FS_ID URL [--path-prefix DIR]` | call `URL` with the filesystem's changes (under `DIR`, default `/`); prints the signing secret, shown once |
+| `mountable webhooks delete FS_ID WEBHOOK_ID` | delete a webhook |
+| `mountable webhooks rotate-secret FS_ID WEBHOOK_ID` | a new signing secret, shown once; the previous one keeps signing for 24 hours |
+| `mountable webhooks enable FS_ID WEBHOOK_ID` | resume a webhook disabled after 24 hours of failed deliveries |
 | `mountable mount [--ro] FS_ID DIR` | mount with your login |
 | `mountable mount --ticket-stdin DIR` | mount with a ticket read from stdin |
 | `mountable unmount DIR` | unmount; on Linux, pending writes are committed |
@@ -64,8 +69,10 @@ Deleting a filesystem is done in the console.
   `org_required` (pass `--org`), `not_found` (check the ID with
   `mountable fs list`), `payment_required` (the hint is the console's billing
   link), `rate_limited` (wait `retry_after` seconds).
-- The one-time ticket appears only in the result of `ticket create`. API keys,
-  login tokens, certificates and tickets never appear in errors or logs.
+- The one-time ticket appears only in the result of `ticket create`, and a
+  webhook's signing secret only in the result of `webhooks create` and
+  `webhooks rotate-secret`. API keys, login tokens, certificates, tickets and
+  webhook secrets never appear in errors or logs.
 
 ### Retries
 
@@ -85,6 +92,12 @@ Deleting a filesystem is done in the console.
 - `fs create` has no idempotency key, and names need not be unique. After a
   timeout, run `fs list` and look for the name before creating again.
 - `sessions revoke` is idempotent.
+- `webhooks create` is not idempotent either. After an unknown outcome
+  (`network_error`, or a 5xx `api_error`), run `webhooks list FS_ID` and
+  look for the URL before creating again.
+- `webhooks rotate-secret` that ends with an unknown outcome may have
+  replaced the secret, which is not shown again: rotate again and store the
+  new one. `webhooks enable` is safe to retry.
 - On HTTP 429 (`rate_limited`), wait `retry_after` seconds.
 
 ## Agent workflow
@@ -107,6 +120,37 @@ mountable unmount /mnt/work
 Any existing, writable directory works as the mount point; `mount` checks it
 before it uses the ticket. The ticket is read from stdin, so it never appears
 in an argument list.
+
+## Webhooks
+
+A webhook calls an HTTPS endpoint of yours with every change in a filesystem,
+from mounts and the files API alike, signed per
+[Standard Webhooks](https://www.standardwebhooks.com/). Creating one needs
+read-write access to the filesystem: an API key with a read-write grant (a key
+limited to that filesystem is the usual choice), or a login.
+
+```sh
+# Prints the signing secret (whsec_…) and nothing else on stdout: store it
+# where your endpoint reads it. It is shown only now.
+mountable webhooks create "$FS_ID" https://example.com/hooks/mountable --path-prefix /tickets
+mountable webhooks list "$FS_ID"       # state, disabled_reason, last_failure
+```
+
+- `URL` must be `https://` on port 443 with a public host (`bad_url`
+  otherwise); `--path-prefix` must be `/` or a directory (`bad_path`). A
+  filesystem has at most 5 webhooks (`webhook_limit`).
+- The first delivery, a `files.resync`, can arrive before the command
+  returns: answer it `503` until your endpoint has the secret, and it is
+  retried.
+- A webhook whose deliveries fail for 24 hours is disabled (`failing`);
+  `webhooks enable` resumes it. One whose creator lost access to the
+  filesystem is disabled as `access_revoked` and cannot be resumed
+  (`access_revoked`): create a new one.
+- `webhooks rotate-secret` prints a new secret. For 24 hours deliveries
+  carry signatures with both, so update your endpoint within that time; a
+  second rotation in those 24 hours drops the oldest secret.
+- The SDKs' `verify_webhook` / `verifyWebhook` check a delivery's signature.
+  See <https://mountable.io/docs/webhooks> for the message format.
 
 ## macOS
 
@@ -186,11 +230,15 @@ It lives in [`skills/mountable/SKILL.md`](skills/mountable/SKILL.md).
 
 `mountable mcp` serves the tools `list_organizations`, `list_filesystems`,
 `create_filesystem`, `filesystem_usage`, `create_mount_ticket`,
-`list_mount_sessions` and `revoke_mount_session` over stdio
-(`create_mount_ticket` takes an optional `max_duration_seconds`). It
-authenticates like the CLI. Results are the API's JSON; errors return the
-code and hint. Mounting stays a process in the sandbox:
-`create_mount_ticket` returns the ticket and the command that mounts with it.
+`list_mount_sessions`, `revoke_mount_session`, `list_webhooks`,
+`delete_webhook` and `enable_webhook` over stdio (`create_mount_ticket`
+takes an optional `max_duration_seconds`). It authenticates like the CLI.
+Results are the API's JSON; errors return the code and hint. Mounting stays
+a process in the sandbox: `create_mount_ticket` returns the ticket and the
+command that mounts with it. Creating a webhook and rotating its secret are
+not tools: their result is the signing secret, which belongs in the backend
+that receives the deliveries, not in a model's context. Run
+`mountable webhooks create` there, or use the SDKs.
 
 Give the server `MOUNTABLE_API_KEY` through its environment: inherited from
 the environment the MCP client starts in, or set in the client's MCP
@@ -231,7 +279,8 @@ from the environment Claude Code runs in, so the key stays out of the file):
 
 Backends that read and write files without mounting use the files API through
 the SDKs, which create and refresh their own short token sessions from an API
-key.
+key. The SDKs also manage a filesystem's webhooks and verify their
+deliveries.
 
 Both are published as `mountable-sdk`, Python 3.10+ on PyPI and TypeScript on
 npm (Node 18+, Bun, or Deno):

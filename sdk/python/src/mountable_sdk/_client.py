@@ -1,4 +1,4 @@
-"""The Mountable files API and mount tickets over HTTPS.
+"""The Mountable files API, mount tickets and webhooks over HTTPS.
 
 The behaviour is the contract in sdk/contract.md, shared with the TypeScript
 SDK.
@@ -6,9 +6,16 @@ SDK.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import json
 import os
 import re
 import secrets
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -27,18 +34,23 @@ TIMEOUT = 60.0
 # A token session lasts an hour and is replaced this close to its expiry.
 SESSION_SECONDS = 3600
 REFRESH_BEFORE = timedelta(seconds=60)
+# Seconds a webhook's timestamp may be from now.
+WEBHOOK_TOLERANCE = 300
 
 Mode = Literal["ro", "rw"]
 FileType = Literal["file", "directory", "symlink"]
 ChangeType = Literal["created", "updated", "deleted"]
+WebhookState = Literal["active", "disabled"]
 
-# Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-# tokens (mtblst_), tickets (mtbltk_) and login tokens.
+# Every credential the API issues starts with "mtbl": API keys (mtbl_),
+# session tokens (mtblst_), tickets (mtbltk_) and login tokens. Webhook
+# signing secrets are whsec_ and standard base64.
 _SECRET = re.compile(r"(mtbl[a-z]*)_[A-Za-z0-9_.-]+")
+_WEBHOOK_SECRET = re.compile(r"whsec_[A-Za-z0-9+/=]+")
 
 
 def _redact(text: str) -> str:
-    return _SECRET.sub(r"\1_[redacted]", text)
+    return _WEBHOOK_SECRET.sub("whsec_[redacted]", _SECRET.sub(r"\1_[redacted]", text))
 
 
 class MountableError(Exception):
@@ -117,6 +129,48 @@ class MountTicket:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class Webhook:
+    """A filesystem's webhook. ``secret`` is set only in the result of
+    ``create_webhook`` and ``rotate_webhook_secret``, the only time the API
+    shows it."""
+
+    id: str
+    filesystem_id: str
+    url: str
+    path_prefix: str
+    state: WebhookState
+    # failing or access_revoked
+    disabled_reason: str | None
+    created_by: str
+    created_at: datetime
+    last_success_at: datetime | None
+    last_failure_at: datetime | None
+    # timeout, connect_failed, tls_failed, blocked_address, redirect or
+    # http_<status>
+    last_failure: str | None
+    failing_since: datetime | None
+    # A credential: kept out of repr.
+    secret: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class WebhookMessage:
+    """A verified webhook delivery."""
+
+    # The webhook-id header: the same on every retry of a message.
+    id: str
+    # files.changed, or files.resync (no events: list what you need again).
+    type: str
+    timestamp: datetime
+    webhook_id: str
+    filesystem_id: str
+    events: list[Change]
+    # The ordering key: apply a message only if its cursor, compared as an
+    # integer, is greater than the last one applied.
+    cursor: str
+
+
 class Mountable:
     """A client authenticated with an API key.
 
@@ -134,6 +188,8 @@ class Mountable:
         url = base_url or os.environ.get("MOUNTABLE_API_URL") or DEFAULT_BASE_URL
         self.base_url = url.rstrip("/")
         self._http = httpx.Client()
+        # The API key's organisation, which webhook paths name.
+        self._org_id: str | None = None
 
     def __repr__(self) -> str:
         return f"Mountable(base_url={self.base_url!r})"
@@ -190,12 +246,83 @@ class Mountable:
             expires_at=_parse_time(session["expires_at"]),
         )
 
-    def _post_session(self, body: dict[str, Any]) -> dict[str, Any]:
-        response = self._send(
-            "POST", "/api/v1/mount-sessions", self._api_key, json=body
+    def create_webhook(self, fs_id: str, url: str, path_prefix: str = "/") -> Webhook:
+        """Calls ``url`` with the filesystem's changes under ``path_prefix``.
+
+        The result's ``secret`` signs the deliveries and is shown only now:
+        store it where your endpoint reads it. The first delivery, a
+        ``files.resync``, may arrive before this returns. Never retried: after
+        an unknown outcome, look for the URL in ``list_webhooks`` first.
+        """
+        response = self._call(
+            "POST",
+            self._webhooks(fs_id),
+            retry=False,
+            body={"url": url, "path_prefix": path_prefix},
         )
+        return _webhook(_json(response))
+
+    def list_webhooks(self, fs_id: str) -> list[Webhook]:
+        response = self._call("GET", self._webhooks(fs_id), retry=True)
+        return [_webhook(raw) for raw in cast(list[dict[str, Any]], _json(response))]
+
+    def delete_webhook(self, fs_id: str, webhook_id: str) -> None:
+        self._call("DELETE", self._webhooks(fs_id, webhook_id), retry=False)
+
+    def rotate_webhook_secret(self, fs_id: str, webhook_id: str) -> Webhook:
+        """A new secret, shown only now. For 24 hours deliveries are signed
+        with the previous one too; a second rotation in that time drops the
+        oldest."""
+        path = self._webhooks(fs_id, webhook_id) + ":rotate-secret"
+        return _webhook(_json(self._call("POST", path, retry=False)))
+
+    def enable_webhook(self, fs_id: str, webhook_id: str) -> Webhook:
+        """Resumes a webhook disabled as ``failing``; one disabled as
+        ``access_revoked`` raises ``access_revoked``."""
+        path = self._webhooks(fs_id, webhook_id) + ":enable"
+        return _webhook(_json(self._call("POST", path, retry=False)))
+
+    def _webhooks(self, fs_id: str, webhook_id: str | None = None) -> str:
+        """The path of a filesystem's webhooks, or of one. The first call
+        looks up the API key's organisation."""
+        if self._org_id is None:
+            response = self._call("GET", "/api/v1/me", retry=True)
+            key = _json(response).get("api_key")
+            org = (
+                cast(dict[str, Any], key).get("org_id")
+                if isinstance(key, dict)
+                else None
+            )
+            if not isinstance(org, str) or not org:
+                raise MountableError(
+                    response.status_code,
+                    "api_error",
+                    "the API did not report the API key's organisation",
+                )
+            self._org_id = org
+        path = (
+            f"/api/v1/orgs/{quote(self._org_id, safe='')}"
+            f"/filesystems/{quote(fs_id, safe='')}/webhooks"
+        )
+        return path if webhook_id is None else f"{path}/{quote(webhook_id, safe='')}"
+
+    def _call(
+        self, method: str, path: str, *, retry: bool, body: Any = None
+    ) -> httpx.Response:
+        """Sends one request with the API key; with ``retry``, once more after
+        a network failure."""
+        try:
+            response = self._send(method, path, self._api_key, json=body)
+        except MountableError as error:
+            if not retry or error.code != "network_error":
+                raise
+            response = self._send(method, path, self._api_key, json=body)
         if not response.is_success:
             raise _api_error(response)
+        return response
+
+    def _post_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        response = self._call("POST", "/api/v1/mount-sessions", retry=False, body=body)
         return _json(response)
 
     def _create_token_session(self, fs_id: str, mode: Mode) -> _Session:
@@ -344,14 +471,7 @@ class Filesystem:
         )
         body = _json(response)
         return ChangeBatch(
-            events=[
-                Change(
-                    type=event["type"],
-                    path=event["path"],
-                    file=_file_info(event["file"]) if event.get("file") else None,
-                )
-                for event in body["events"]
-            ],
+            events=[_change(event) for event in body["events"]],
             cursor=body["cursor"],
         )
 
@@ -428,6 +548,101 @@ def _file_info(raw: dict[str, Any]) -> FileInfo:
         etag=raw.get("etag"),
         modified_at=_parse_time(raw["modified_at"]),
     )
+
+
+def _change(raw: dict[str, Any]) -> Change:
+    return Change(
+        type=raw["type"],
+        path=raw["path"],
+        file=_file_info(raw["file"]) if raw.get("file") else None,
+    )
+
+
+def _optional_time(value: str | None) -> datetime | None:
+    return _parse_time(value) if value else None
+
+
+def _webhook(raw: dict[str, Any]) -> Webhook:
+    return Webhook(
+        id=raw["id"],
+        filesystem_id=raw["filesystem_id"],
+        url=raw["url"],
+        path_prefix=raw["path_prefix"],
+        state=raw["state"],
+        disabled_reason=raw.get("disabled_reason"),
+        created_by=raw["created_by"],
+        created_at=_parse_time(raw["created_at"]),
+        last_success_at=_optional_time(raw.get("last_success_at")),
+        last_failure_at=_optional_time(raw.get("last_failure_at")),
+        last_failure=raw.get("last_failure"),
+        failing_since=_optional_time(raw.get("failing_since")),
+        secret=raw.get("secret"),
+    )
+
+
+def verify_webhook(
+    secret: str, headers: Mapping[str, str], body: bytes | str
+) -> WebhookMessage:
+    """Checks a delivery's signature and returns its message.
+
+    ``headers`` are the request's (names in any case) and ``body`` its exact
+    bytes, not JSON parsed and encoded again. Raises ``MountableError`` with
+    code ``invalid_webhook`` unless a ``v1`` signature in ``webhook-signature``
+    is by ``secret`` (Standard Webhooks) and ``webhook-timestamp`` is within
+    five minutes of now. A message can arrive more than once; see
+    ``WebhookMessage.cursor``.
+    """
+
+    def invalid(reason: str) -> MountableError:
+        return MountableError(None, "invalid_webhook", reason)
+
+    lower = {name.lower(): value for name, value in headers.items()}
+    msg_id = lower.get("webhook-id", "")
+    timestamp = lower.get("webhook-timestamp", "")
+    if not msg_id or not timestamp.isascii() or not timestamp.isdigit():
+        raise invalid("webhook-id or webhook-timestamp is missing")
+    if abs(time.time() - int(timestamp)) > WEBHOOK_TOLERANCE:
+        raise invalid("webhook-timestamp is more than five minutes from now")
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except (ValueError, binascii.Error):
+        key = b""
+    if not secret.startswith("whsec_") or not key:
+        raise invalid("the secret is not a whsec_ secret")
+    data = body.encode() if isinstance(body, str) else body
+    signed = f"{msg_id}.{timestamp}.".encode() + data
+    expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest())
+    if not any(
+        hmac.compare_digest(signature[3:].encode(), expected)
+        for signature in lower.get("webhook-signature", "").split()
+        if signature.startswith("v1,")
+    ):
+        raise invalid("no signature matches")
+    try:
+        message = json.loads(data)
+        payload = message["data"]
+        fields = (
+            message["type"],
+            message["timestamp"],
+            payload["webhook_id"],
+            payload["filesystem_id"],
+            payload["cursor"],
+        )
+        if not all(isinstance(value, str) for value in fields) or not isinstance(
+            payload["events"], list
+        ):
+            raise TypeError
+        return WebhookMessage(
+            id=msg_id,
+            type=message["type"],
+            timestamp=_parse_time(message["timestamp"]),
+            webhook_id=payload["webhook_id"],
+            filesystem_id=payload["filesystem_id"],
+            events=[_change(event) for event in payload["events"]],
+            cursor=payload["cursor"],
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise invalid("the body is not a mountable.io webhook message") from None
 
 
 def _json(response: httpx.Response) -> dict[str, Any]:

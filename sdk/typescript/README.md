@@ -2,7 +2,8 @@
 
 Read, write, delete, list and follow the files of a
 [mountable.io](https://mountable.io) filesystem over HTTPS from a backend,
-without mounting it, and create one-time mount tickets for sandboxes.
+without mounting it, create one-time mount tickets for sandboxes, and manage
+and verify the webhooks that call your backend when files change.
 
 ```sh
 npm install mountable-sdk
@@ -67,6 +68,50 @@ for (;;) {
 }
 ```
 
+## Webhooks
+
+A webhook calls your HTTPS endpoint with a filesystem's changes. Creating one
+needs an API key with read-write access to the filesystem.
+
+```ts
+const hook = await client.createWebhook("fs_…", "https://example.com/hooks/mountable", { pathPrefix: "/tickets" });
+await storeSecret(hook.id, hook.secret); // whsec_…, shown only now; not in console.log(hook)
+
+await client.listWebhooks("fs_…"); // Webhook[]: .state, .disabledReason, .lastFailure
+await client.rotateWebhookSecret("fs_…", hook.id); // .secret is the new one
+await client.enableWebhook("fs_…", hook.id); // after it was disabled as "failing"
+await client.deleteWebhook("fs_…", hook.id);
+```
+
+In the endpoint, verify the signature on the raw body before anything else:
+
+```ts
+import { MountableError, verifyWebhook } from "mountable-sdk";
+
+export async function POST(request: Request): Promise<Response> {
+  let message;
+  try {
+    message = await verifyWebhook(secret, request.headers, await request.text());
+  } catch (e) {
+    if (e instanceof MountableError && e.code === "invalid_webhook") return new Response(null, { status: 400 });
+    throw e;
+  }
+  if (BigInt(message.cursor) <= (await lastAppliedCursor())) return new Response(null, { status: 204 }); // a duplicate or a late message
+  if (message.type === "files.resync") {
+    // list what you need again; events after message.cursor follow
+  }
+  for (const event of message.events) console.log(event.type, event.path, event.file?.etag); // invalidations, as from fs.changes()
+  await saveAppliedCursor(message.cursor);
+  return new Response(null, { status: 204 });
+}
+```
+
+`verifyWebhook` takes `Headers` or Node's `req.headers`, and the body as a
+string or bytes. It accepts any of the signatures a rotation sends and
+refuses a timestamp more than five minutes from now. Answer within 10
+seconds; a message can arrive more than once, so apply it only when its
+`cursor`, compared as an integer, is greater than the last one applied.
+
 ## Behaviour
 
 - The handle creates a one-hour token session on its first call and keeps
@@ -77,15 +122,22 @@ for (;;) {
   `retryAfter`. Network failures have `code === "network_error"`. API keys and
   tokens never appear in errors or in `console.log` of the client.
 - Only a `2xx` answer is a success; redirects are not followed.
-- Only reads (`read`, `list`, `changes`) are retried, once, after a network
-  failure. `write` and `delete` are never retried: after a timeout the outcome
-  is unknown, and a conditional write makes your own retry safe.
+- Only reads (`read`, `list`, `changes`, `listWebhooks`) are retried, once,
+  after a network failure. `write` and `delete` are never retried: after a
+  timeout the outcome is unknown, and a conditional write makes your own retry
+  safe. Nor are the webhook calls that change something: after an unknown
+  outcome of `createWebhook`, look for the URL in `listWebhooks` first.
+- The webhook calls look up the API key's organisation once per client
+  (`GET /api/v1/me`).
 - A request fails with `network_error` after 60 seconds without an answer;
   `changes` waits 60 seconds plus `wait`.
 - `createMountTicket` returns the ticket once, in `.ticket`; printing,
   inspecting or `JSON.stringify` of the result leaves it out. Reuse your `idempotencyKey` to
   retry after an unknown outcome; a replay returns the session with `ticket`
   `null`.
+- `createWebhook` and `rotateWebhookSecret` return the signing secret once,
+  in `.secret`; printing, inspecting or `JSON.stringify` of the result leaves
+  it out, and webhook secrets never appear in errors.
 
 Documentation: <https://mountable.io/docs>. The behaviour shared with the
 Python SDK is listed in

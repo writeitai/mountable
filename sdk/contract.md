@@ -8,7 +8,8 @@ HTTP server and fail when a case listed here has no test. A change to one
 SDK's public behaviour lands in the other, and here, in the same pull request.
 
 The API the SDKs wrap is the files API (`/api/v1/filesystems/{fs}/files/{path}`,
-`/list/{path}`, `/changes`) and `POST /api/v1/mount-sessions`. Names below are
+`/list/{path}`, `/changes`), `POST /api/v1/mount-sessions` and a filesystem's
+webhooks (`/api/v1/orgs/{org}/filesystems/{fs}/webhooks`). Names below are
 Python's; TypeScript uses the same names in camelCase and returns promises.
 
 ## Operations
@@ -82,3 +83,16 @@ Python's; TypeScript uses the same names in camelCase and returns promises.
 | ID | Case |
 | --- | --- |
 | C32 | Only a `2xx` answer is a success. A `3xx` answer is not followed and raises `MountableError` with its status (`api_error` without a code), for file operations and session creation alike. |
+
+## Webhooks
+
+| ID | Case |
+| --- | --- |
+| C33 | The first webhook call asks `GET /api/v1/me` with the API key for the key's organisation (`api_key.org_id`) and keeps it for the client's later calls. `create_webhook(fs_id, url, path_prefix="/")` then sends `POST /api/v1/orgs/{org}/filesystems/{fs}/webhooks` with the API key and `{"url", "path_prefix"}`, and returns `Webhook` with the answer's fields (datetimes parsed, `null` as `None`) and its `secret`. |
+| C34 | `list_webhooks` sends `GET …/webhooks` and returns a list of `Webhook`; `enable_webhook` sends `POST …/webhooks/{id}:enable` and returns `Webhook`; `delete_webhook` sends `DELETE …/webhooks/{id}`, and `204` returns nothing. Their `secret` is `None`. IDs are percent-encoded. |
+| C35 | `rotate_webhook_secret` sends `POST …/webhooks/{id}:rotate-secret` and returns `Webhook` with the new `secret`. |
+| C36 | The secret is read from `.secret` only: a returned `Webhook` does not show it when printed or inspected (nor in `JSON.stringify` in TypeScript), and an error never shows a `whsec_` secret, even when the API echoes one. |
+| C37 | The webhook error codes raise `MountableError` with that `status` and `code`: `400 bad_url`, `400 bad_path`, `402 payment_required`, `403 no_grant`, `404 not_found`, `409 webhook_limit`, `409 access_revoked`, and `422` validation details as `invalid_request`. A failed `GET /me` raises its error and sends no webhook request; an answer without `api_key.org_id` raises `api_error`. |
+| C38 | `list_webhooks` and the `GET /me` lookup are sent once more after a network failure; `create_webhook`, `delete_webhook`, `rotate_webhook_secret` and `enable_webhook` are never sent again. |
+| C39 | `verify_webhook(secret, headers, body)` accepts a delivery whose `webhook-signature` holds a `v1` HMAC-SHA256 signature by the secret of `{webhook-id}.{webhook-timestamp}.{body}` (the shared vector `sdk/testdata/webhook.json`), with header names in any case, a body as bytes or a string, and two signatures of which only the second matches (a rotation). It returns `WebhookMessage`: `id` (the `webhook-id`), `type`, `timestamp`, `webhook_id`, `filesystem_id`, `events` as `Change` and `cursor`. |
+| C40 | `verify_webhook` raises `invalid_webhook` (`status` `None`) for a changed body, another secret, a missing header, a timestamp more than 300 seconds before or after now, a signature without `v1,`, a malformed secret, or a signed body that is not a message. Its message never shows the secret. |

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,19 +13,32 @@ from typing import Any
 import httpx
 import pytest
 
-from mountable_sdk import File, FileInfo, Mountable, MountableError, _client
+from mountable_sdk import (
+    Change,
+    File,
+    FileInfo,
+    Mountable,
+    MountableError,
+    Webhook,
+    _client,
+    verify_webhook,
+)
 from tests.mock_api import (
     API_KEY,
     CHANGES,
     FILES,
     FS,
     LIST,
+    ME,
     SESSIONS,
+    WEBHOOKS,
     MockAPI,
     Reply,
     Request,
     error,
     file_info,
+    me,
+    webhook,
 )
 
 MODIFIED = datetime(2026, 10, 17, 12, 0, 0, 123456, tzinfo=timezone.utc)
@@ -650,6 +665,255 @@ def test_c32_a_redirect_is_an_error(api: MockAPI, client: Mountable):
     assert raises(lambda: fs.read("a.md")).status == 307
     assert raises(lambda: client.create_mount_ticket(FS)).status == 303
     assert not any("elsewhere" in r.path for r in api.requests)
+
+
+# --- webhooks --------------------------------------------------------------
+
+SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+HOOK = "33333333-3333-3333-3333-333333333333"
+CREATED = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+
+
+def test_c33_create_webhook(api: MockAPI, client: Mountable):
+    api.route("POST", WEBHOOKS, Reply(201, webhook(SECRET)))
+    hook = client.create_webhook(FS, "https://example.com/hooks", path_prefix="/x")
+    assert hook == Webhook(
+        id=HOOK,
+        filesystem_id=FS,
+        url="https://example.com/hooks",
+        path_prefix="/tickets",
+        state="active",
+        disabled_reason=None,
+        created_by="api key backend",
+        created_at=CREATED,
+        last_success_at=None,
+        last_failure_at=None,
+        last_failure=None,
+        failing_since=None,
+        secret=SECRET,
+    )
+    client.create_webhook(FS, "https://example.com/other")
+    lookup, first, second = api.requests
+    assert (lookup.method, lookup.path) == ("GET", ME)
+    for request in api.requests:
+        assert request.headers["authorization"] == f"Bearer {API_KEY}"
+    assert (first.method, first.path) == ("POST", WEBHOOKS)
+    assert first.json() == {"url": "https://example.com/hooks", "path_prefix": "/x"}
+    assert second.json() == {"url": "https://example.com/other", "path_prefix": "/"}
+
+
+def test_c34_list_enable_and_delete_webhooks(api: MockAPI, client: Mountable):
+    failing = webhook(
+        state="disabled",
+        disabled_reason="failing",
+        last_failure="http_500",
+        last_failure_at="2026-10-21T12:00:00Z",
+        last_success_at="2026-10-20T13:00:00.5Z",
+        failing_since="2026-10-20T14:00:00Z",
+    )
+    api.route("GET", WEBHOOKS, Reply(200, [failing]))
+    api.route("POST", f"{WEBHOOKS}/{HOOK}:enable", Reply(200, webhook()))
+    api.route("DELETE", f"{WEBHOOKS}/{HOOK}", Reply(204))
+    api.route("DELETE", f"{WEBHOOKS}/a%2Fb%3Fc", Reply(204))
+    (hook,) = client.list_webhooks(FS)
+    assert (hook.state, hook.disabled_reason, hook.last_failure) == (
+        "disabled",
+        "failing",
+        "http_500",
+    )
+    assert hook.last_failure_at == datetime(2026, 10, 21, 12, tzinfo=timezone.utc)
+    assert hook.last_success_at == datetime(
+        2026, 10, 20, 13, 0, 0, 500000, tzinfo=timezone.utc
+    )
+    assert hook.failing_since == datetime(2026, 10, 20, 14, tzinfo=timezone.utc)
+    assert hook.secret is None
+    enabled = client.enable_webhook(FS, HOOK)
+    assert enabled.state == "active" and enabled.secret is None
+    assert client.delete_webhook(FS, HOOK) is None
+    client.delete_webhook(FS, "a/b?c")
+    assert api.calls() == [
+        f"GET {ME}",
+        f"GET {WEBHOOKS}",
+        f"POST {WEBHOOKS}/{HOOK}:enable",
+        f"DELETE {WEBHOOKS}/{HOOK}",
+        f"DELETE {WEBHOOKS}/a%2Fb%3Fc",
+    ]
+
+
+def test_c35_rotate_webhook_secret(api: MockAPI, client: Mountable):
+    rotated = "whsec_" + "B" * 43 + "="
+    api.route("POST", f"{WEBHOOKS}/{HOOK}:rotate-secret", Reply(200, webhook(rotated)))
+    hook = client.rotate_webhook_secret(FS, HOOK)
+    assert hook.secret == rotated and hook.id == HOOK
+    assert api.calls()[-1] == f"POST {WEBHOOKS}/{HOOK}:rotate-secret"
+    assert api.requests[-1].body == b""
+
+
+def test_c36_the_secret_is_shown_once(api: MockAPI, client: Mountable):
+    api.route("POST", WEBHOOKS, Reply(201, webhook(SECRET)))
+    hook = client.create_webhook(FS, "https://example.com/hooks")
+    assert hook.secret == SECRET
+    assert "whsec_" not in repr(hook) and "whsec_" not in str(hook)
+    api.route(
+        "POST",
+        f"{WEBHOOKS}/{HOOK}:rotate-secret",
+        error(409, "conflict", message=f"refused {SECRET}"),
+    )
+    e = raises(lambda: client.rotate_webhook_secret(FS, HOOK))
+    for text in (str(e), repr(e), e.message):
+        assert "MfKQ9r8" not in text and "whsec_[redacted]" in text
+
+
+WEBHOOK_ERRORS = [
+    (400, "bad_url"),
+    (400, "bad_path"),
+    (402, "payment_required"),
+    (403, "no_grant"),
+    (404, "not_found"),
+    (409, "webhook_limit"),
+    (409, "access_revoked"),
+]
+
+
+@pytest.mark.parametrize(("status", "code"), WEBHOOK_ERRORS)
+def test_c37_webhook_errors(api: MockAPI, client: Mountable, status: int, code: str):
+    api.route("POST", WEBHOOKS, error(status, code))
+    api.route("POST", f"{WEBHOOKS}/{HOOK}:enable", error(status, code))
+    e = raises(lambda: client.create_webhook(FS, "https://example.com/hooks"))
+    assert (e.status, e.code) == (status, code) and e.message
+    e = raises(lambda: client.enable_webhook(FS, HOOK))
+    assert (e.status, e.code) == (status, code)
+
+
+def test_c37_validation_and_lookup_errors(api: MockAPI):
+    invalid = {"detail": [{"loc": ["path", "webhook_id"], "msg": "not a uuid"}]}
+    api.route("DELETE", f"{WEBHOOKS}/nope", Reply(422, invalid))
+    with Mountable(api_key=API_KEY, base_url=api.url) as client:
+        e = raises(lambda: client.delete_webhook(FS, "nope"))
+        assert (e.status, e.code) == (422, "invalid_request")
+        assert "webhook_id" in e.message
+    api.route("GET", ME, error(401, "unauthenticated"))
+    with Mountable(api_key=API_KEY, base_url=api.url) as client:
+        e = raises(lambda: client.list_webhooks(FS))
+        assert (e.status, e.code) == (401, "unauthenticated")
+    api.route("GET", ME, Reply(200, {**me(), "api_key": None}))
+    with Mountable(api_key=API_KEY, base_url=api.url) as client:
+        e = raises(lambda: client.create_webhook(FS, "https://example.com/hooks"))
+        assert e.code == "api_error"
+    # A failed lookup sends no webhook request.
+    assert [r.path for r in api.requests[2:]] == [ME, ME]
+
+
+def test_c38_only_reads_are_retried(api: MockAPI, client: Mountable):
+    api.route("GET", ME, fail_first(1, "drop", Reply(200, me())))
+    api.route("GET", WEBHOOKS, fail_first(1, "drop", Reply(200, [webhook()])))
+    assert len(client.list_webhooks(FS)) == 1
+    assert api.calls() == [f"GET {ME}"] * 2 + [f"GET {WEBHOOKS}"] * 2
+    writes = [
+        ("POST", WEBHOOKS, lambda: client.create_webhook(FS, "https://x.example")),
+        ("DELETE", f"{WEBHOOKS}/{HOOK}", lambda: client.delete_webhook(FS, HOOK)),
+        (
+            "POST",
+            f"{WEBHOOKS}/{HOOK}:rotate-secret",
+            lambda: client.rotate_webhook_secret(FS, HOOK),
+        ),
+        (
+            "POST",
+            f"{WEBHOOKS}/{HOOK}:enable",
+            lambda: client.enable_webhook(FS, HOOK),
+        ),
+    ]
+    for method, path, call in writes:
+        api.route(method, path, fail_first(1, "drop", Reply(200, webhook(SECRET))))
+        assert raises(call).code == "network_error"
+        assert api.calls().count(f"{method} {path}") == 1
+    assert api.calls().count(f"GET {ME}") == 2  # the organisation is kept
+
+
+VECTOR: dict[str, Any] = json.loads(
+    (Path(__file__).parents[2] / "testdata" / "webhook.json").read_text()
+)
+
+
+def signed_headers(signature: str = VECTOR["signature"]) -> dict[str, str]:
+    return {
+        "Webhook-Id": VECTOR["id"],
+        "WEBHOOK-TIMESTAMP": str(VECTOR["timestamp"]),
+        "webhook-signature": signature,
+    }
+
+
+@pytest.fixture
+def at_vector_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: VECTOR["timestamp"] + 10)
+
+
+@pytest.mark.usefixtures("at_vector_time")
+def test_c39_verify_webhook_accepts_a_signed_delivery():
+    message = verify_webhook(
+        VECTOR["secret"], signed_headers(), VECTOR["body"].encode()
+    )
+    assert message.id == VECTOR["id"]
+    assert message.type == "files.changed"
+    assert message.timestamp == datetime(
+        2021, 2, 25, 15, 2, 10, 123000, tzinfo=timezone.utc
+    )
+    assert message.webhook_id == HOOK and message.filesystem_id == FS
+    assert message.events == [
+        Change(
+            "created",
+            "/tickets/AB-42.md",
+            FileInfo(
+                "/tickets/AB-42.md",
+                "file",
+                1234,
+                '"3f2a"',
+                datetime(2021, 2, 25, 15, 2, 9, tzinfo=timezone.utc),
+            ),
+        ),
+        Change("deleted", "/tickets/AB-41.md", None),
+    ]
+    assert message.cursor == "48213"
+    # A string body, and a rotation's two signatures with ours second.
+    rotation = "v1," + "A" * 43 + "= " + VECTOR["signature"]
+    again = verify_webhook(VECTOR["secret"], signed_headers(rotation), VECTOR["body"])
+    assert again == message
+
+
+@pytest.mark.usefixtures("at_vector_time")
+def test_c40_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatch):
+    secret, body = VECTOR["secret"], VECTOR["body"]
+    headers = signed_headers()
+    missing = {k: v for k, v in headers.items() if k != "Webhook-Id"}
+    unversioned = signed_headers(VECTOR["signature"].removeprefix("v1,"))
+    cases: list[tuple[str, dict[str, str], str]] = [
+        (secret, headers, body + " "),
+        ("whsec_" + "A" * 43 + "=", headers, body),
+        (secret, missing, body),
+        (secret, unversioned, body),
+        ("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body),
+        ("whsec_not base64!", headers, body),
+    ]
+    for case_secret, case_headers, case_body in cases:
+        with pytest.raises(MountableError) as caught:
+            verify_webhook(case_secret, case_headers, case_body)
+        e = caught.value
+        assert (e.status, e.code) == (None, "invalid_webhook")
+        assert "MfKQ9r8" not in str(e) and "MfKQ9r8" not in repr(e)
+    # The gateway's own signature of a body that is not a message: the
+    # signature passes, the body does not.
+    reference = dict(headers, **{"webhook-signature": VECTOR["reference_signature"]})
+    e = raises(lambda: verify_webhook(secret, reference, VECTOR["reference_body"]))
+    assert e.code == "invalid_webhook" and "not a mountable.io webhook" in e.message
+    for offset, ok in ((-300, True), (300, True), (-301, False), (301, False)):
+        stamp = VECTOR["timestamp"] + offset
+        monkeypatch.setattr(time, "time", lambda stamp=stamp: stamp)
+        if ok:
+            assert verify_webhook(secret, headers, body).cursor == "48213"
+        else:
+            assert raises(lambda: verify_webhook(secret, headers, body)).code == (
+                "invalid_webhook"
+            )
 
 
 # --- parity ----------------------------------------------------------------
