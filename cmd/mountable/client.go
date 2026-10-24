@@ -171,29 +171,57 @@ func (c *client) listSessions(ctx context.Context, fsID string) (json.RawMessage
 	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/mount-sessions", nil)
 }
 
-func webhooksPath(fsID string) string {
-	return "/filesystems/" + url.PathEscape(fsID) + "/webhooks"
+// webhooksPath is the path of a filesystem's webhooks, or of the one named
+// by webhookID.
+func webhooksPath(fsID string, webhookID ...string) (string, error) {
+	path := "/filesystems/" + url.PathEscape(fsID) + "/webhooks"
+	for _, id := range webhookID {
+		path += "/" + url.PathEscape(id)
+	}
+	for _, id := range append([]string{fsID}, webhookID...) {
+		// Such an ID would name another resource once the path is
+		// normalised: ".." after webhooks/ is the filesystem itself.
+		if id == "" || id == "." || id == ".." {
+			return "", &cliError{Code: "invalid_request", Message: fmt.Sprintf("invalid ID %q", id), Hint: "check the IDs with `mountable fs list` and `mountable webhooks list FS_ID`"}
+		}
+	}
+	return path, nil
 }
 
 func (c *client) listWebhooks(ctx context.Context, fsID string) (json.RawMessage, error) {
-	return c.inOrg(ctx, "GET", webhooksPath(fsID), nil)
+	path, err := webhooksPath(fsID)
+	if err != nil {
+		return nil, err
+	}
+	return c.inOrg(ctx, "GET", path, nil)
 }
 
 // createWebhook returns the webhook with its secret, which the API shows
 // only here and on rotation.
 func (c *client) createWebhook(ctx context.Context, fsID, hookURL, pathPrefix string) (json.RawMessage, error) {
-	return c.inOrg(ctx, "POST", webhooksPath(fsID), map[string]string{"url": hookURL, "path_prefix": pathPrefix})
+	path, err := webhooksPath(fsID)
+	if err != nil {
+		return nil, err
+	}
+	return c.inOrg(ctx, "POST", path, map[string]string{"url": hookURL, "path_prefix": pathPrefix})
 }
 
 func (c *client) deleteWebhook(ctx context.Context, fsID, webhookID string) error {
-	_, err := c.inOrg(ctx, "DELETE", webhooksPath(fsID)+"/"+url.PathEscape(webhookID), nil)
+	path, err := webhooksPath(fsID, webhookID)
+	if err == nil {
+		_, err = c.inOrg(ctx, "DELETE", path, nil)
+	}
 	return err
 }
 
 // webhookAction posts one of a webhook's actions: rotate-secret (the answer
 // carries the new secret) or enable.
 func (c *client) webhookAction(ctx context.Context, fsID, webhookID, action string) (json.RawMessage, error) {
-	return c.inOrg(ctx, "POST", webhooksPath(fsID)+"/"+url.PathEscape(webhookID)+":"+action, nil)
+	path, err := webhooksPath(fsID, webhookID)
+	if err != nil {
+		return nil, err
+	}
+	return c.inOrg(ctx, "POST", path+":"+action, nil)
 }
 
 // revokeSession is idempotent: revoking an ended session succeeds.

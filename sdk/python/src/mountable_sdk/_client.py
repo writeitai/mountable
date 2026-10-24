@@ -285,6 +285,9 @@ class Mountable:
     def _webhooks(self, fs_id: str, webhook_id: str | None = None) -> str:
         """The path of a filesystem's webhooks, or of one. The first call
         looks up the API key's organisation."""
+        for value in (fs_id, webhook_id):
+            if value is not None:
+                _id(value)  # refuse a bad ID before the lookup
         if self._org_id is None:
             response = self._call("GET", "/api/v1/me", retry=True)
             key = _json(response).get("api_key")
@@ -300,11 +303,8 @@ class Mountable:
                     "the API did not report the API key's organisation",
                 )
             self._org_id = org
-        path = (
-            f"/api/v1/orgs/{quote(self._org_id, safe='')}"
-            f"/filesystems/{quote(fs_id, safe='')}/webhooks"
-        )
-        return path if webhook_id is None else f"{path}/{quote(webhook_id, safe='')}"
+        path = f"/api/v1/orgs/{_id(self._org_id)}/filesystems/{_id(fs_id)}/webhooks"
+        return path if webhook_id is None else f"{path}/{_id(webhook_id)}"
 
     def _call(
         self, method: str, path: str, *, retry: bool, body: Any = None
@@ -517,6 +517,14 @@ class Filesystem:
             return response
 
 
+def _id(value: str) -> str:
+    """One ID as a path segment. An empty, "." or ".." ID would name another
+    resource once the URL is normalised, so it raises ``invalid_request``."""
+    if value in ("", ".", ".."):
+        raise MountableError(None, "invalid_request", f"invalid ID: {value!r}")
+    return quote(value, safe="")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -601,7 +609,8 @@ def verify_webhook(
     timestamp = lower.get("webhook-timestamp", "")
     if not msg_id or not timestamp.isascii() or not timestamp.isdigit():
         raise invalid("webhook-id or webhook-timestamp is missing")
-    if abs(time.time() - int(timestamp)) > WEBHOOK_TOLERANCE:
+    # More digits than any timestamp would overflow, or exceed int's limit.
+    if len(timestamp) > 12 or abs(time.time() - int(timestamp)) > WEBHOOK_TOLERANCE:
         raise invalid("webhook-timestamp is more than five minutes from now")
     try:
         key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)

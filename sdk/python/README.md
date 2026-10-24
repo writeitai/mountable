@@ -65,11 +65,14 @@ A webhook calls your HTTPS endpoint with a filesystem's changes. Creating one
 needs an API key with read-write access to the filesystem.
 
 ```python
-hook = client.create_webhook("fs_…", "https://example.com/hooks/mountable", path_prefix="/tickets")
+hook = client.create_webhook(
+    "fs_…", "https://example.com/hooks/mountable", path_prefix="/tickets"
+)
 store_secret(hook.id, hook.secret)  # whsec_…, shown only now; not in repr(hook)
 
 client.list_webhooks("fs_…")  # [Webhook]: .state, .disabled_reason, .last_failure
-client.rotate_webhook_secret("fs_…", hook.id)  # .secret is the new one
+rotated = client.rotate_webhook_secret("fs_…", hook.id)
+store_secret(hook.id, rotated.secret)  # the old secret signs for 24 more hours
 client.enable_webhook("fs_…", hook.id)  # after it was disabled as "failing"
 client.delete_webhook("fs_…", hook.id)
 ```
@@ -114,7 +117,9 @@ compared as an integer, is greater than the last one applied.
   after a network failure. `write` and `delete` are never retried: after a
   timeout the outcome is unknown, and a conditional write makes your own retry
   safe. Nor are the webhook calls that change something: after an unknown
-  outcome of `create_webhook`, look for the URL in `list_webhooks` first.
+  outcome of `create_webhook`, look for the URL in `list_webhooks` first;
+  after one of `rotate_webhook_secret`, the secret may have changed and is
+  not shown again, so rotate again and store the new one.
 - The webhook calls look up the API key's organisation once per client
   (`GET /api/v1/me`).
 - A request fails with `network_error` after 60 seconds without an answer;

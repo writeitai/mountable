@@ -335,13 +335,15 @@ export class Mountable {
 
   /** The path of a filesystem's webhooks, or of one. The first call looks up the API key's organisation. */
   async #webhooks(fsId: string, webhookId?: string): Promise<string> {
+    // A bad ID is refused before the lookup.
+    const ids = [idSegment(fsId), webhookId === undefined ? undefined : idSegment(webhookId)];
     // Concurrent first calls share one lookup; a failed one is not kept.
     this.#orgId ??= this.#lookUpOrg().catch((error) => {
       this.#orgId = null;
       throw error;
     });
-    const path = `/api/v1/orgs/${encodeSegment(await this.#orgId)}/filesystems/${encodeSegment(fsId)}/webhooks`;
-    return webhookId === undefined ? path : `${path}/${encodeSegment(webhookId)}`;
+    const path = `/api/v1/orgs/${idSegment(await this.#orgId)}/filesystems/${ids[0]}/webhooks`;
+    return ids[1] === undefined ? path : `${path}/${ids[1]}`;
   }
 
   async #lookUpOrg(): Promise<string> {
@@ -624,7 +626,7 @@ export async function verifyWebhook(
   if (!id || !/^[0-9]+$/.test(timestamp)) {
     throw invalid("webhook-id or webhook-timestamp is missing");
   }
-  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE) {
+  if (timestamp.length > 12 || Math.abs(Date.now() / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE) {
     throw invalid("webhook-timestamp is more than five minutes from now");
   }
   const key = secret.startsWith("whsec_") ? fromBase64(secret.slice("whsec_".length)) : null;
@@ -712,6 +714,17 @@ function trimSlashes(path: string): string {
 /** Percent-encodes everything but A–Z a–z 0–9 - _ . ~, as Python's quote(safe=""). */
 function encodeSegment(segment: string): string {
   return encodeURIComponent(segment).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+/**
+ * One ID as a path segment. An empty, "." or ".." ID would name another
+ * resource once the URL is normalised, so it is refused with invalid_request.
+ */
+function idSegment(id: string): string {
+  if (id === "" || id === "." || id === "..") {
+    throw new MountableError(null, "invalid_request", `invalid ID: ${JSON.stringify(id)}`);
+  }
+  return encodeSegment(id);
 }
 
 function quoteEtag(etag: string): string {

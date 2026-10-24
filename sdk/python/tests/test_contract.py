@@ -731,13 +731,27 @@ def test_c34_list_enable_and_delete_webhooks(api: MockAPI, client: Mountable):
     assert enabled.state == "active" and enabled.secret is None
     assert client.delete_webhook(FS, HOOK) is None
     client.delete_webhook(FS, "a/b?c")
-    assert api.calls() == [
+    calls = [
         f"GET {ME}",
         f"GET {WEBHOOKS}",
         f"POST {WEBHOOKS}/{HOOK}:enable",
         f"DELETE {WEBHOOKS}/{HOOK}",
         f"DELETE {WEBHOOKS}/a%2Fb%3Fc",
     ]
+    assert api.calls() == calls
+    for bad in ("", ".", ".."):
+        for call in (
+            lambda bad=bad: client.delete_webhook(FS, bad),
+            lambda bad=bad: client.enable_webhook(FS, bad),
+            lambda bad=bad: client.rotate_webhook_secret(FS, bad),
+            lambda bad=bad: client.list_webhooks(bad),
+            lambda bad=bad: client.create_webhook(bad, "https://x.example"),
+        ):
+            e = raises(call)
+            assert (e.status, e.code) == (None, "invalid_request")
+    with Mountable(api_key=API_KEY, base_url=api.url) as fresh:
+        assert raises(lambda: fresh.delete_webhook(FS, "..")).code == "invalid_request"
+    assert api.calls() == calls  # nothing sent, not even the lookup
 
 
 def test_c35_rotate_webhook_secret(api: MockAPI, client: Mountable):
@@ -894,6 +908,10 @@ def test_c40_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
         ("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body),
         ("whsec_not base64!", headers, body),
     ]
+    for digits in (13, 400, 5000):  # overflows a float, then int's digit limit
+        cases.append(
+            (secret, dict(headers, **{"WEBHOOK-TIMESTAMP": "9" * digits}), body)
+        )
     for case_secret, case_headers, case_body in cases:
         with pytest.raises(MountableError) as caught:
             verify_webhook(case_secret, case_headers, case_body)

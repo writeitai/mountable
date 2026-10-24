@@ -657,13 +657,29 @@ test("C34 list, enable and delete webhooks", async () => {
   assert.equal(enabled.secret, null);
   assert.equal(await client.deleteWebhook(FS, HOOK), undefined);
   await client.deleteWebhook(FS, "a/b?c");
-  assert.deepEqual(api.calls(), [
+  const calls = [
     `GET ${ME}`,
     `GET ${WEBHOOKS}`,
     `POST ${WEBHOOKS}/${HOOK}:enable`,
     `DELETE ${WEBHOOKS}/${HOOK}`,
     `DELETE ${WEBHOOKS}/a%2Fb%3Fc`,
-  ]);
+  ];
+  assert.deepEqual(api.calls(), calls);
+  for (const bad of ["", ".", ".."]) {
+    for (const call of [
+      () => client.deleteWebhook(FS, bad),
+      () => client.enableWebhook(FS, bad),
+      () => client.rotateWebhookSecret(FS, bad),
+      () => client.listWebhooks(bad),
+      () => client.createWebhook(bad, "https://x.example"),
+    ]) {
+      const e = await rejects(call);
+      assert.deepEqual([e.status, e.code], [null, "invalid_request"]);
+    }
+  }
+  const fresh = new Mountable({ apiKey: API_KEY, baseUrl: api.url });
+  assert.equal((await rejects(fresh.deleteWebhook(FS, ".."))).code, "invalid_request");
+  assert.deepEqual(api.calls(), calls); // nothing sent, not even the lookup
 });
 
 test("C35 rotateWebhookSecret", async () => {
@@ -811,6 +827,9 @@ test("C40 verifyWebhook refuses anything else", async (t) => {
     ["MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body],
     ["whsec_not base64!", headers, body],
   ];
+  for (const digits of [13, 400, 5000]) {
+    cases.push([secret, { ...headers, "WEBHOOK-TIMESTAMP": "9".repeat(digits) }, body]);
+  }
   for (const [caseSecret, caseHeaders, caseBody] of cases) {
     const e = await rejects(verifyWebhook(caseSecret, caseHeaders, caseBody));
     assert.deepEqual([e.status, e.code], [null, "invalid_webhook"]);

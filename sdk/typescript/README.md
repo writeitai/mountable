@@ -78,7 +78,8 @@ const hook = await client.createWebhook("fs_…", "https://example.com/hooks/mou
 await storeSecret(hook.id, hook.secret); // whsec_…, shown only now; not in console.log(hook)
 
 await client.listWebhooks("fs_…"); // Webhook[]: .state, .disabledReason, .lastFailure
-await client.rotateWebhookSecret("fs_…", hook.id); // .secret is the new one
+const rotated = await client.rotateWebhookSecret("fs_…", hook.id);
+await storeSecret(hook.id, rotated.secret); // the old secret signs for 24 more hours
 await client.enableWebhook("fs_…", hook.id); // after it was disabled as "failing"
 await client.deleteWebhook("fs_…", hook.id);
 ```
@@ -126,7 +127,9 @@ seconds; a message can arrive more than once, so apply it only when its
   after a network failure. `write` and `delete` are never retried: after a
   timeout the outcome is unknown, and a conditional write makes your own retry
   safe. Nor are the webhook calls that change something: after an unknown
-  outcome of `createWebhook`, look for the URL in `listWebhooks` first.
+  outcome of `createWebhook`, look for the URL in `listWebhooks` first;
+  after one of `rotateWebhookSecret`, the secret may have changed and is not
+  shown again, so rotate again and store the new one.
 - The webhook calls look up the API key's organisation once per client
   (`GET /api/v1/me`).
 - A request fails with `network_error` after 60 seconds without an answer;

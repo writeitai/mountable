@@ -336,7 +336,8 @@ func webhookError(err error, unknown string) error {
 	}
 	e := toCLIError(err)
 	var api *apiError
-	if unknown != "" && (!errors.As(err, &api) || api.Status >= 500) {
+	var own *cliError
+	if unknown != "" && !errors.As(err, &own) && (!errors.As(err, &api) || api.Status >= 500) {
 		e.Hint = unknown
 		return e
 	}

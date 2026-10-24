@@ -1079,3 +1079,35 @@ func TestWebhookUsageErrors(t *testing.T) {
 		t.Fatalf("usage errors called the API: %v", calls)
 	}
 }
+
+// An empty, "." or ".." ID is refused before any request: once the path is
+// normalised, webhooks/.. would be the filesystem itself.
+func TestWebhookDotSegmentIDsAreRefused(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	for _, bad := range []string{"", ".", ".."} {
+		for _, args := range [][]string{
+			{"webhooks", "delete", "fsone", bad},
+			{"webhooks", "enable", "fsone", bad},
+			{"webhooks", "rotate-secret", "fsone", bad},
+			{"webhooks", "list", bad},
+			{"webhooks", "create", bad, "https://example.com"},
+		} {
+			r := runCLI(t, append(args, "--json")...)
+			if e := jsonError(t, r); r.code != 1 || e.Code != "invalid_request" || strings.Contains(e.Hint, "may have") {
+				t.Errorf("%v = %d %+v", args, r.code, e)
+			}
+		}
+	}
+	s := connectMCP(t)
+	for _, tool := range []string{"delete_webhook", "enable_webhook"} {
+		text, isError := callTool(t, s, tool, map[string]any{"filesystem_id": "fsone", "webhook_id": ".."})
+		if !isError || !strings.Contains(text, `"invalid_request"`) {
+			t.Errorf("%s = %v %s", tool, isError, text)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("calls = %v", calls)
+	}
+}
