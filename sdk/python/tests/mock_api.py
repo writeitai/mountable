@@ -104,6 +104,15 @@ def iso(moment: datetime) -> str:
     return moment.isoformat().replace("+00:00", "Z")
 
 
+class _Server(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A reply delayed past the client's timeout fails to write. Printing
+        # that from a daemon thread while the interpreter exits aborts it
+        # (seen on Python 3.14), so errors are not printed; the client's
+        # side of the failure is what the tests check.
+        pass
+
+
 class MockAPI:
     """Answers "METHOD /path" routes and records every request.
 
@@ -166,7 +175,7 @@ class MockAPI:
 
             do_GET = do_PUT = do_DELETE = do_POST = _serve
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handle)
+        self._server = _Server(("127.0.0.1", 0), Handle)
         self._server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(
