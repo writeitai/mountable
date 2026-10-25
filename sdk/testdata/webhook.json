@@ -1,0 +1,10 @@
+{
+  "comment": "The Standard Webhooks reference secret, id and timestamp, as in fsit's internal/gateway/testdata/webhook_signature.json. reference_body and reference_signature are that file's body and the signature the gateway produces for it; body and signature are a files.changed message signed the same way. Both SDKs' verify_webhook tests use this file.",
+  "secret": "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+  "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+  "timestamp": 1614265330,
+  "reference_body": "{\"test\": 2432232314}",
+  "reference_signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=",
+  "body": "{\"type\":\"files.changed\",\"timestamp\":\"2021-02-25T15:02:10.123Z\",\"data\":{\"webhook_id\":\"33333333-3333-3333-3333-333333333333\",\"filesystem_id\":\"fs_one\",\"events\":[{\"type\":\"created\",\"path\":\"/tickets/AB-42.md\",\"file\":{\"path\":\"/tickets/AB-42.md\",\"type\":\"file\",\"size\":1234,\"etag\":\"\\\"3f2a\\\"\",\"modified_at\":\"2021-02-25T15:02:09Z\"}},{\"type\":\"deleted\",\"path\":\"/tickets/AB-41.md\",\"file\":null}],\"cursor\":\"48213\"}}",
+  "signature": "v1,rx9q/Yt7PLT+yxNu8itAw+GCFyW5/A9j4gVEtpOrTqs="
+}

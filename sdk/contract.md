@@ -106,3 +106,11 @@ Management calls send the API key, not a token session. Below, `…` is
 | C44 | `/me`, `list_filesystems`, `get_filesystem`, `filesystem_usage`, `list_mount_sessions`, `list_webhooks`, `revoke_mount_session` and `enable_webhook` are sent once more after a network failure; a second failure raises `network_error`. |
 | C45 | `create_filesystem`, `update_filesystem`, `create_webhook`, `rotate_webhook_secret` and `delete_webhook` are never sent again after a network failure. |
 | C46 | API errors raise `MountableError` with their status and code, for example `403 key_limited_to_filesystem` from `create_filesystem` and `update_filesystem`, `422` validation details (`invalid_request`) from `update_filesystem`, a `403` from `list_webhooks` and `404 not_found` from `delete_webhook`. |
+| C47 | An empty, `.` or `..` organisation, filesystem, session or webhook ID raises `invalid_request` (`status` `None`) before any request, the `/me` lookup included: URL normalisation would send it to another resource (`…/webhooks/..` is the filesystem). |
+
+## Webhook deliveries
+
+| ID | Case |
+| --- | --- |
+| C48 | `verify_webhook(secret, headers, body)` accepts a delivery whose `webhook-signature` holds a `v1` HMAC-SHA256 signature by the secret of `{webhook-id}.{webhook-timestamp}.{body}` (the shared vector `sdk/testdata/webhook.json`), with header names in any case, a body as bytes or a string, and two signatures of which only one matches, first or second (a rotation), also when a repeated header was joined with `", "` (in TypeScript, also Node's array of values). It returns `WebhookMessage`: `id` (the `webhook-id`), `type`, `timestamp`, `webhook_id`, `filesystem_id`, `events` as `Change` and `cursor`. |
+| C49 | `verify_webhook` raises `invalid_webhook` (`status` `None`) for a changed body, another secret, a missing header, a timestamp more than 300 seconds before or after now or longer than 12 digits, a signature without `v1,`, a malformed secret, or a signed body that is not a message (the gateway's reference signature of a non-message body passes the signature check and fails here). Its message never shows the secret. |

@@ -235,7 +235,8 @@ mountable webhooks delete FS_ID WEBHOOK_ID --json
 The signing `secret` appears once, in the result of `create` or
 `rotate-secret` (without `--json`, alone on stdout); store it like the key.
 Every change, from mounts or the files API, then arrives as a `files.changed`
-message signed per Standard Webhooks. Verify the signature on the raw body,
+message signed per Standard Webhooks (the SDKs' `verify_webhook` checks it).
+Verify the signature on the raw body,
 answer `2xx` within 10 seconds, apply a message only if its `data.cursor`,
 compared as an integer, exceeds the last one applied (delivery is at least
 once), and on `files.resync` list again. See https://mountable.io/docs/webhooks

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +14,7 @@ import httpx
 import pytest
 
 from mountable_sdk import (
+    Change,
     File,
     FileInfo,
     FilesystemInfo,
@@ -21,6 +24,7 @@ from mountable_sdk import (
     MountSession,
     Webhook,
     _client,
+    verify_webhook,
 )
 from tests.mock_api import (
     API_KEY,
@@ -1014,6 +1018,127 @@ def test_c46_management_errors_propagate(api: MockAPI, client: Mountable):
     assert (e.status, e.code, e.message) == (403, "forbidden", "needs read-write")
     e = raises(lambda: client.delete_webhook(FS, "wh_gone"))
     assert (e.status, e.code) == (404, "not_found")
+
+
+def test_c47_dot_segment_ids_are_refused(api: MockAPI):
+    calls: list[Any] = []
+    with Mountable(api_key=API_KEY, base_url=api.url) as client:
+        for bad in ("", ".", ".."):
+            calls += [
+                lambda bad=bad: client.get_filesystem(bad),
+                lambda bad=bad: client.update_filesystem(bad, byte_quota=1),
+                lambda bad=bad: client.filesystem_usage(bad),
+                lambda bad=bad: client.list_mount_sessions(bad),
+                lambda bad=bad: client.revoke_mount_session(bad),
+                lambda bad=bad: client.list_webhooks(bad),
+                lambda bad=bad: client.create_webhook(bad, "https://x.example"),
+                lambda bad=bad: client.delete_webhook(FS, bad),
+                lambda bad=bad: client.rotate_webhook_secret(FS, bad),
+                lambda bad=bad: client.enable_webhook(FS, bad),
+            ]
+        for call in calls:
+            e = raises(call)
+            assert (e.status, e.code) == (None, "invalid_request")
+    with Mountable(api_key=API_KEY, base_url=api.url, org_id="..") as client:
+        assert raises(lambda: client.list_webhooks(FS)).code == "invalid_request"
+    assert api.requests == []  # nothing sent, not even the /me lookup
+
+
+# --- webhook deliveries ----------------------------------------------------
+
+HOOK = "33333333-3333-3333-3333-333333333333"
+VECTOR: dict[str, Any] = json.loads(
+    (Path(__file__).parents[2] / "testdata" / "webhook.json").read_text()
+)
+
+
+def signed_headers(signature: str = VECTOR["signature"]) -> dict[str, str]:
+    return {
+        "Webhook-Id": VECTOR["id"],
+        "WEBHOOK-TIMESTAMP": str(VECTOR["timestamp"]),
+        "webhook-signature": signature,
+    }
+
+
+@pytest.fixture
+def at_vector_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "time", lambda: VECTOR["timestamp"] + 10)
+
+
+@pytest.mark.usefixtures("at_vector_time")
+def test_c48_verify_webhook_accepts_a_signed_delivery():
+    message = verify_webhook(
+        VECTOR["secret"], signed_headers(), VECTOR["body"].encode()
+    )
+    assert message.id == VECTOR["id"]
+    assert message.type == "files.changed"
+    assert message.timestamp == datetime(
+        2021, 2, 25, 15, 2, 10, 123000, tzinfo=timezone.utc
+    )
+    assert message.webhook_id == HOOK and message.filesystem_id == FS
+    assert message.events == [
+        Change(
+            "created",
+            "/tickets/AB-42.md",
+            FileInfo(
+                "/tickets/AB-42.md",
+                "file",
+                1234,
+                '"3f2a"',
+                datetime(2021, 2, 25, 15, 2, 9, tzinfo=timezone.utc),
+            ),
+        ),
+        Change("deleted", "/tickets/AB-41.md", None),
+    ]
+    assert message.cursor == "48213"
+    # A string body, and a rotation's two signatures with ours second.
+    other = "v1," + "A" * 43 + "="
+    rotation = f"{other} {VECTOR['signature']}"
+    again = verify_webhook(VECTOR["secret"], signed_headers(rotation), VECTOR["body"])
+    assert again == message
+    # Ours first, and a repeated header joined with ", ".
+    for joined in (f"{VECTOR['signature']} {other}", f"{VECTOR['signature']}, {other}"):
+        assert verify_webhook(VECTOR["secret"], signed_headers(joined), VECTOR["body"])
+
+
+@pytest.mark.usefixtures("at_vector_time")
+def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatch):
+    secret, body = VECTOR["secret"], VECTOR["body"]
+    headers = signed_headers()
+    missing = {k: v for k, v in headers.items() if k != "Webhook-Id"}
+    unversioned = signed_headers(VECTOR["signature"].removeprefix("v1,"))
+    cases: list[tuple[str, dict[str, str], str]] = [
+        (secret, headers, body + " "),
+        ("whsec_" + "A" * 43 + "=", headers, body),
+        (secret, missing, body),
+        (secret, unversioned, body),
+        ("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body),
+        ("whsec_not base64!", headers, body),
+    ]
+    for digits in (13, 400, 5000):  # overflows a float, then int's digit limit
+        cases.append(
+            (secret, dict(headers, **{"WEBHOOK-TIMESTAMP": "9" * digits}), body)
+        )
+    for case_secret, case_headers, case_body in cases:
+        with pytest.raises(MountableError) as caught:
+            verify_webhook(case_secret, case_headers, case_body)
+        e = caught.value
+        assert (e.status, e.code) == (None, "invalid_webhook")
+        assert "MfKQ9r8" not in str(e) and "MfKQ9r8" not in repr(e)
+    # The gateway's own signature of a body that is not a message: the
+    # signature passes, the body does not.
+    reference = dict(headers, **{"webhook-signature": VECTOR["reference_signature"]})
+    e = raises(lambda: verify_webhook(secret, reference, VECTOR["reference_body"]))
+    assert e.code == "invalid_webhook" and "not a mountable.io webhook" in e.message
+    for offset, ok in ((-300, True), (300, True), (-301, False), (301, False)):
+        stamp = VECTOR["timestamp"] + offset
+        monkeypatch.setattr(time, "time", lambda stamp=stamp: stamp)
+        if ok:
+            assert verify_webhook(secret, headers, body).cursor == "48213"
+        else:
+            assert raises(lambda: verify_webhook(secret, headers, body)).code == (
+                "invalid_webhook"
+            )
 
 
 # --- parity ----------------------------------------------------------------

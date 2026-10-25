@@ -1,12 +1,16 @@
 // The Mountable files API, mount tickets and management over HTTPS. The
 // behaviour is the contract in sdk/contract.md, shared with the Python SDK.
 
+import type { webcrypto } from "node:crypto";
+
 const DEFAULT_BASE_URL = "https://mountable.io";
 // Milliseconds a request may take; a change-feed poll may take its wait longer.
 const TIMEOUT_MS = 60_000;
 // A token session lasts an hour and is replaced this close to its expiry.
 const SESSION_SECONDS = 3600;
 const REFRESH_BEFORE_MS = 60_000;
+// Seconds a webhook's timestamp may be from now.
+const WEBHOOK_TOLERANCE = 300;
 
 export type Mode = "ro" | "rw";
 export type FileType = "file" | "directory" | "symlink";
@@ -34,6 +38,23 @@ export interface Change {
   type: ChangeType;
   path: string;
   file: FileInfo | null;
+}
+
+/** A verified webhook delivery. */
+export interface WebhookMessage {
+  /** The webhook-id header: the same on every retry of a message. */
+  id: string;
+  /** files.changed, or files.resync (no events: list what you need again). */
+  type: string;
+  timestamp: Date;
+  webhookId: string;
+  filesystemId: string;
+  events: Change[];
+  /**
+   * The ordering key: apply a message only if its cursor, compared as an
+   * integer, is greater than the last one applied.
+   */
+  cursor: string;
 }
 
 export interface ChangeBatch {
@@ -372,7 +393,7 @@ export class Mountable {
 
   /** Ends a session; revoking an ended one succeeds too. */
   async revokeMountSession(sessionId: string): Promise<void> {
-    await this.#call("DELETE", `/api/v1/mount-sessions/${encodeSegment(sessionId)}`, true);
+    await this.#call("DELETE", `/api/v1/mount-sessions/${idSegment(sessionId)}`, true);
   }
 
   /** Creates a webhook; its signing secret is in `.secret`, only here. Never retried. */
@@ -411,7 +432,7 @@ export class Mountable {
       this.#org = null;
       throw error;
     });
-    return `/api/v1/orgs/${encodeSegment(await this.#org)}${path}`;
+    return `/api/v1/orgs/${idSegment(await this.#org)}${path}`;
   }
 
   async #readOrg(): Promise<string> {
@@ -423,12 +444,13 @@ export class Mountable {
     return orgId;
   }
 
+  // The IDs are checked (idSegment throws) before the organisation is read.
   #fsPath(fsId: string, path = ""): Promise<string> {
-    return this.#orgPath(`/filesystems/${encodeSegment(fsId)}${path}`);
+    return this.#orgPath(`/filesystems/${idSegment(fsId)}${path}`);
   }
 
   #webhookPath(fsId: string, webhookId: string): Promise<string> {
-    return this.#fsPath(fsId, `/webhooks/${encodeSegment(webhookId)}`);
+    return this.#fsPath(fsId, `/webhooks/${idSegment(webhookId)}`);
   }
 
   /** Sends one call with the API key; a repeatable one is sent once more after a network error. */
@@ -600,14 +622,7 @@ class FilesystemHandle implements Filesystem {
       timeoutMs: TIMEOUT_MS + wait * 1000,
     });
     const body = json(response);
-    return {
-          events: body.events.map((event: any) => ({
-        type: event.type,
-        path: event.path,
-        file: event.file ? fileInfo(event.file) : null,
-      })),
-      cursor: body.cursor,
-    };
+    return { events: body.events.map(change), cursor: body.cursor };
   }
 
   #url(kind: string, path: string): string {
@@ -676,16 +691,109 @@ function isSuccess(response: Answer): boolean {
   return response.status >= 200 && response.status < 300;
 }
 
-type RandomSource = { getRandomValues(bytes: Uint8Array): Uint8Array };
+/** Web Crypto: global in Bun, Deno and Node 19+; Node 18 has no global in ES modules. */
+async function webCrypto(): Promise<webcrypto.Crypto> {
+  return (globalThis as { crypto?: webcrypto.Crypto }).crypto ?? (await import("node:crypto")).webcrypto;
+}
 
 async function randomKey(): Promise<string> {
   const bytes = new Uint8Array(16);
-  // Node 18 has no global Web Crypto in ES modules.
-  const source: RandomSource =
-    (globalThis as { crypto?: RandomSource }).crypto ?? (await import("node:crypto")).webcrypto;
-  source.getRandomValues(bytes);
+  (await webCrypto()).getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+/** Headers as fetch-style servers (Headers) or Node's http module (an object) give them. */
+export type WebhookHeaders = Headers | Record<string, string | string[] | undefined>;
+
+/**
+ * Checks a delivery's signature and resolves to its message. `headers` are
+ * the request's (names in any case) and `body` its exact bytes or text, not
+ * JSON parsed and serialised again. Rejects with `MountableError` code
+ * `invalid_webhook` unless a v1 signature in webhook-signature is by
+ * `secret` (Standard Webhooks) and webhook-timestamp is within five minutes
+ * of now. A message can arrive more than once; see `WebhookMessage.cursor`.
+ */
+export async function verifyWebhook(
+  secret: string,
+  headers: WebhookHeaders,
+  body: Uint8Array | string,
+): Promise<WebhookMessage> {
+  const invalid = (reason: string) => new MountableError(null, "invalid_webhook", reason);
+  const header = (name: string): string => {
+    if (headers instanceof Headers) {
+      return headers.get(name) ?? "";
+    }
+    const found = Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+    return Array.isArray(found) ? found.join(" ") : (found ?? "");
+  };
+  const id = header("webhook-id");
+  const timestamp = header("webhook-timestamp");
+  if (!id || !/^[0-9]+$/.test(timestamp)) {
+    throw invalid("webhook-id or webhook-timestamp is missing");
+  }
+  if (timestamp.length > 12 || Math.abs(Date.now() / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE) {
+    throw invalid("webhook-timestamp is more than five minutes from now");
+  }
+  const key = secret.startsWith("whsec_") ? fromBase64(secret.slice("whsec_".length)) : null;
+  if (!key || key.length === 0) {
+    throw invalid("the secret is not a whsec_ secret");
+  }
+  const data = typeof body === "string" ? new TextEncoder().encode(body) : body;
+  const signed = concat([new TextEncoder().encode(`${id}.${timestamp}.`), data]);
+  const { subtle } = await webCrypto();
+  const hmacKey = await subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  let matched = false;
+  // Signatures are separated by spaces; a repeated header is joined with ", ".
+  for (const signature of header("webhook-signature").split(/\s+/)) {
+    const given = signature.startsWith("v1,") ? fromBase64(signature.slice(3).replace(/,$/, "")) : null;
+    // subtle.verify compares in constant time.
+    if (given && (await subtle.verify("HMAC", hmacKey, given, signed))) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) {
+    throw invalid("no signature matches");
+  }
+  try {
+    const message = JSON.parse(new TextDecoder().decode(data));
+    const payload = message.data;
+    if (
+      typeof message.type !== "string" ||
+      typeof message.timestamp !== "string" ||
+      typeof payload?.webhook_id !== "string" ||
+      typeof payload.filesystem_id !== "string" ||
+      typeof payload.cursor !== "string" ||
+      !Array.isArray(payload.events)
+    ) {
+      throw new Error("not a message");
+    }
+    const sent = new Date(message.timestamp);
+    if (Number.isNaN(sent.getTime())) {
+      throw new Error("not a timestamp");
+    }
+    return {
+      id,
+      type: message.type,
+      timestamp: sent,
+      webhookId: payload.webhook_id,
+      filesystemId: payload.filesystem_id,
+      events: payload.events.map(change),
+      cursor: payload.cursor,
+    };
+  } catch {
+    throw invalid("the body is not a mountable.io webhook message");
+  }
+}
+
+/** Standard base64 decoded, or null when it is not base64. */
+function fromBase64(text: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
+    return null;
+  }
+  return Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+}
+
 
 function concat(chunks: Uint8Array[]): Uint8Array {
   const data = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
@@ -708,6 +816,18 @@ function env(name: string): string | undefined {
 
 function trimSlashes(path: string): string {
   return path.replace(/^\/+|\/+$/g, "");
+}
+
+/**
+ * One management ID as a path segment. An empty, "." or ".." ID would name
+ * another resource once the URL is normalised (…/webhooks/.. is the
+ * filesystem), so it is refused with invalid_request before any request.
+ */
+function idSegment(id: string): string {
+  if (id === "" || id === "." || id === "..") {
+    throw new MountableError(null, "invalid_request", `invalid ID: ${JSON.stringify(id)}`);
+  }
+  return encodeSegment(id);
 }
 
 /** Percent-encodes everything but A–Z a–z 0–9 - _ . ~, as Python's quote(safe=""). */
@@ -752,6 +872,10 @@ function filesystemInfo(raw: any): FilesystemInfo {
 
 function optionalDate(value: string | null | undefined): Date | null {
   return value ? new Date(value) : null;
+}
+
+function change(raw: any): Change {
+  return { type: raw.type, path: raw.path, file: raw.file ? fileInfo(raw.file) : null };
 }
 
 function fileInfo(raw: any): FileInfo {

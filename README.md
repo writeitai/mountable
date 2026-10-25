@@ -299,7 +299,8 @@ from the environment Claude Code runs in, so the key stays out of the file):
 
 Backends that read and write files without mounting use the files API through
 the SDKs, which create and refresh their own short token sessions from an API
-key.
+key. In a webhook receiver, `verify_webhook` / `verifyWebhook` checks a
+delivery's signature and returns its message.
 
 Both are published as `mountable-sdk`, Python 3.10+ on PyPI and TypeScript on
 npm (Node 18+, Bun, or Deno):
