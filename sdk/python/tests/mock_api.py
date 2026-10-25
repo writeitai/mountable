@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -119,6 +120,19 @@ def iso(moment: datetime) -> str:
     return moment.isoformat().replace("+00:00", "Z")
 
 
+class _Server(ThreadingHTTPServer):
+    # Each connection serves one request (HTTP/1.0), and close() joins the
+    # handler threads, so none outlives its test or writes during shutdown.
+    daemon_threads = False
+    block_on_close = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # The client went away first (it timed out, or after a drop): expected.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 class MockAPI:
     """Answers "METHOD /path" routes and records every request.
 
@@ -182,8 +196,7 @@ class MockAPI:
 
             do_GET = do_PUT = do_DELETE = do_POST = do_PATCH = _serve
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handle)
-        self._server.daemon_threads = True
+        self._server = _Server(("127.0.0.1", 0), Handle)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(
             target=self._server.serve_forever, args=(0.01,), daemon=True
