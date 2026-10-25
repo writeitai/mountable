@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -121,16 +120,10 @@ def iso(moment: datetime) -> str:
 
 
 class _Server(ThreadingHTTPServer):
-    # Each connection serves one request (HTTP/1.0), and close() joins the
-    # handler threads, so none outlives its test or writes during shutdown.
+    # close() joins the handler threads, so none outlives its test or writes
+    # during shutdown.
     daemon_threads = False
     block_on_close = True
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        # The client went away first (it timed out, or after a drop): expected.
-        if isinstance(sys.exc_info()[1], ConnectionError):
-            return
-        super().handle_error(request, client_address)
 
 
 class MockAPI:
@@ -150,8 +143,16 @@ class MockAPI:
         api = self
 
         class Handle(BaseHTTPRequestHandler):
+            # Seconds a read or write may block, so a client that stops
+            # mid-request cannot keep close() waiting.
+            timeout = 5
+
             def log_message(self, format: str, *args: Any) -> None:
                 pass
+
+            def handle(self) -> None:
+                # One request per connection, whatever the reply's headers say.
+                self.handle_one_request()
 
             def _serve(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -169,6 +170,12 @@ class MockAPI:
                 reply = api.answer(request)
                 if reply.delay:
                     time.sleep(reply.delay)
+                try:
+                    self._reply(reply)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # the client went away first (it timed out): expected
+
+            def _reply(self, reply: Reply) -> None:
                 if reply.fault == "drop":
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)
