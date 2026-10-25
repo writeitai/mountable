@@ -1128,7 +1128,8 @@ def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
         e = caught.value
         assert (e.status, e.code) == (None, "invalid_webhook")
         assert "MfKQ9r8" not in str(e) and "MfKQ9r8" not in repr(e)
-    # Signed, but its events are not change events.
+    # Signed, but its events are not change events or its cursor is not a
+    # decimal integer.
     FILE: dict[str, Any] = {
         "path": "/a",
         "type": "file",
@@ -1151,9 +1152,12 @@ def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
         [{"type": "x", "path": "/a", "file": FILE | {"modified_at": "yesterday"}}],
         [{"type": "x", "path": "/a", "file": FILE | {"size": "1"}}],
     ]
-    for events in malformed:
+    changes = [("events", events) for events in malformed] + [
+        ("cursor", cursor) for cursor in ("", "1.5", "-1", "not-a-cursor", "٣")
+    ]
+    for name, value in changes:
         message = json.loads(body)
-        message["data"]["events"] = events
+        message["data"][name] = value
         signed_body = json.dumps(message)
         key = base64.b64decode(secret.removeprefix("whsec_"))
         content = f"{VECTOR['id']}.{VECTOR['timestamp']}.{signed_body}".encode()

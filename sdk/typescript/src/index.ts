@@ -764,6 +764,8 @@ export async function verifyWebhook(
       typeof payload?.webhook_id !== "string" ||
       typeof payload.filesystem_id !== "string" ||
       typeof payload.cursor !== "string" ||
+      // A decimal integer: the ordering key.
+      !/^[0-9]+$/.test(payload.cursor) ||
       !Array.isArray(payload.events) ||
       !payload.events.every(isEvent)
     ) {

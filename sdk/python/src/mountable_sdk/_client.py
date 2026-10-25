@@ -778,8 +778,11 @@ def verify_webhook(
             payload["cursor"],
         )
         events = payload["events"]
+        cursor = payload["cursor"]
         if (
             not all(isinstance(value, str) for value in fields)
+            # A decimal integer: the ordering key.
+            or not (cursor.isascii() and cursor.isdigit())
             or not isinstance(events, list)
             or not all(_is_event(event) for event in cast(list[Any], events))
         ):

@@ -1004,9 +1004,10 @@ test("C49 verifyWebhook refuses anything else", async (t) => {
     assert.deepEqual([e.status, e.code], [null, "invalid_webhook"]);
     assert.ok(!String(e).includes("MfKQ9r8") && !inspect(e).includes("MfKQ9r8"));
   }
-  // Signed, but its events are not change events.
+  // Signed, but its events are not change events or its cursor is not a
+  // decimal integer.
   const file = { path: "/a", type: "file", size: 1, modified_at: "2021-02-25T15:02:09Z" };
-  for (const events of [
+  const malformed = [
     [{}],
     [42],
     [{ type: 1, path: "/a" }],
@@ -1015,9 +1016,14 @@ test("C49 verifyWebhook refuses anything else", async (t) => {
     [{ type: "x", path: "/a", file: { path: "/a", type: "file", size: 1 } }],
     [{ type: "x", path: "/a", file: { ...file, modified_at: "yesterday" } }],
     [{ type: "x", path: "/a", file: { ...file, size: "1" } }],
-  ]) {
+  ];
+  const changes: [string, unknown][] = [
+    ...malformed.map((events): [string, unknown] => ["events", events]),
+    ...["", "1.5", "-1", "not-a-cursor", "٣"].map((cursor): [string, unknown] => ["cursor", cursor]),
+  ];
+  for (const [name, value] of changes) {
     const message = JSON.parse(body);
-    message.data.events = events;
+    message.data[name] = value;
     const signedBody = JSON.stringify(message);
     const key = Buffer.from(secret.slice("whsec_".length), "base64");
     const digest = createHmac("sha256", key).update(`${VECTOR.id}.${VECTOR.timestamp}.${signedBody}`).digest("base64");
