@@ -787,14 +787,27 @@ export async function verifyWebhook(
   }
 }
 
-/** Whether value is shaped like a change event: type and path strings, and file a FileInfo object or null. */
+/** Whether value is shaped like a change event: type and path strings, and file a FileInfo or null. */
 function isEvent(value: any): boolean {
   return (
     typeof value === "object" &&
     value !== null &&
     typeof value.type === "string" &&
     typeof value.path === "string" &&
-    (value.file === null || value.file === undefined || (typeof value.file === "object" && !Array.isArray(value.file)))
+    (value.file === null || value.file === undefined || isFileInfo(value.file))
+  );
+}
+
+function isFileInfo(value: any): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof value.path === "string" &&
+    typeof value.type === "string" &&
+    Number.isInteger(value.size) &&
+    typeof value.modified_at === "string" &&
+    !Number.isNaN(Date.parse(value.modified_at)) &&
+    (value.etag === null || value.etag === undefined || typeof value.etag === "string")
   );
 }
 

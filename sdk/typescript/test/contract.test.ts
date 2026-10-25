@@ -1005,7 +1005,17 @@ test("C49 verifyWebhook refuses anything else", async (t) => {
     assert.ok(!String(e).includes("MfKQ9r8") && !inspect(e).includes("MfKQ9r8"));
   }
   // Signed, but its events are not change events.
-  for (const events of [[{}], [42], [{ type: 1, path: "/a" }], [{ type: "x", path: "/a", file: [1] }]]) {
+  const file = { path: "/a", type: "file", size: 1, modified_at: "2021-02-25T15:02:09Z" };
+  for (const events of [
+    [{}],
+    [42],
+    [{ type: 1, path: "/a" }],
+    [{ type: "x", path: "/a", file: [1] }],
+    [{ type: "x", path: "/a", file: {} }],
+    [{ type: "x", path: "/a", file: { path: "/a", type: "file", size: 1 } }],
+    [{ type: "x", path: "/a", file: { ...file, modified_at: "yesterday" } }],
+    [{ type: "x", path: "/a", file: { ...file, size: "1" } }],
+  ]) {
     const message = JSON.parse(body);
     message.data.events = events;
     const signedBody = JSON.stringify(message);

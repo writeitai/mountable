@@ -113,8 +113,10 @@ These calls use the API key, and the API checks what it may do:
   (no cap), `mutationsPerMinute` 1–1,000 or `null` (the platform default),
   `byteQuota` 1 GiB–100 GiB, `entryQuota` 10,000–1,000,000. The two quotas
   cannot be removed.
-- An empty, `.` or `..` ID rejects with `invalid_request` before any
-  request: URL normalisation would send it to another resource.
+- An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
+  organisation ID, rejects with `invalid_request` before any request: URL
+  normalisation would send it to another resource. An empty `orgId` counts
+  as not given.
 
 ## Receiving webhooks
 

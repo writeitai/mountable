@@ -1129,11 +1129,27 @@ def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
         assert (e.status, e.code) == (None, "invalid_webhook")
         assert "MfKQ9r8" not in str(e) and "MfKQ9r8" not in repr(e)
     # Signed, but its events are not change events.
+    FILE: dict[str, Any] = {
+        "path": "/a",
+        "type": "file",
+        "size": 1,
+        "modified_at": "2021-02-25T15:02:09Z",
+    }
     malformed: list[list[Any]] = [
         [{}],
         [42],
         [{"type": 1, "path": "/a"}],
         [{"type": "x", "path": "/a", "file": [1]}],
+        [{"type": "x", "path": "/a", "file": {}}],
+        [
+            {
+                "type": "x",
+                "path": "/a",
+                "file": {"path": "/a", "type": "file", "size": 1},
+            }
+        ],
+        [{"type": "x", "path": "/a", "file": FILE | {"modified_at": "yesterday"}}],
+        [{"type": "x", "path": "/a", "file": FILE | {"size": "1"}}],
     ]
     for events in malformed:
         message = json.loads(body)

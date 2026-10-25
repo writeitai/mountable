@@ -799,14 +799,29 @@ def verify_webhook(
 
 def _is_event(value: Any) -> bool:
     """Whether value is shaped like a change event: type and path strings,
-    and file a FileInfo object or null."""
+    and file a FileInfo or null."""
     if not isinstance(value, dict):
         return False
     event = cast(dict[str, Any], value)
     return (
         isinstance(event.get("type"), str)
         and isinstance(event.get("path"), str)
-        and (event.get("file") is None or isinstance(event.get("file"), dict))
+        and (event.get("file") is None or _is_file_info(event["file"]))
+    )
+
+
+def _is_file_info(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    info = cast(dict[str, Any], value)
+    size = info.get("size")
+    return (
+        isinstance(info.get("path"), str)
+        and isinstance(info.get("type"), str)
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and isinstance(info.get("modified_at"), str)
+        and (info.get("etag") is None or isinstance(info.get("etag"), str))
     )
 
 
