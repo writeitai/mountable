@@ -33,11 +33,23 @@ they fail with `org_required`.
 | --- | --- |
 | `mountable orgs list` | the caller's organisations |
 | `mountable fs list` | filesystems |
-| `mountable fs create NAME` | create a filesystem; prints its ID |
+| `mountable fs create NAME [--spending-cap-cents N] [--mutations-per-minute N] [--byte-quota BYTES] [--entry-quota N]` | create a filesystem, with the limits given; prints its ID |
+| `mountable fs get FS_ID` | a filesystem and its limits |
+| `mountable fs update FS_ID [--spending-cap-cents N\|none] [--mutations-per-minute N\|none] [--byte-quota BYTES] [--entry-quota N]` | change only the limits given (at least one); `none` removes the spending cap or restores the default mutation rate |
 | `mountable fs usage FS_ID` | stored bytes and files against quotas, 30-day traffic |
 | `mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration D]` | a one-time mount ticket for a sandbox; the session lasts `D` (such as `12h` or `720h`; default 12 hours, at most the API key's or login's expiry) |
 | `mountable sessions list FS_ID` | live mount sessions |
 | `mountable sessions revoke SESSION_ID` | revoke a session; its mount stops |
+| `mountable files write FS_ID PATH [--from FILE] [--if-match ETAG] [--if-none-match]` | write a whole file from FILE or stdin; prints `path etag size` |
+| `mountable files read FS_ID PATH [--to FILE]` | the file's bytes on stdout, or into FILE (then prints `path etag size`) |
+| `mountable files delete FS_ID PATH [--if-match ETAG]` | delete a file, symlink or empty directory |
+| `mountable files list FS_ID [PATH] [--after NAME] [--limit N]` | one page of a directory; a note on stderr gives the `--after` for the next |
+| `mountable files changes FS_ID [--cursor CURSOR] [--wait SECONDS]` | without `--cursor`, the current cursor at once; with it, the changes after it, waiting up to `--wait` seconds (default 25) for one |
+| `mountable webhooks create FS_ID URL [--path-prefix PREFIX]` | a webhook for changes under `PREFIX` (default `/`); prints its signing secret |
+| `mountable webhooks list FS_ID` | webhooks, their state and last failure |
+| `mountable webhooks delete FS_ID WEBHOOK_ID` | delete a webhook |
+| `mountable webhooks rotate-secret FS_ID WEBHOOK_ID` | a new signing secret; prints it |
+| `mountable webhooks enable FS_ID WEBHOOK_ID` | turn a disabled webhook back on |
 | `mountable mount [--ro] FS_ID DIR` | mount with your login |
 | `mountable mount --ticket-stdin DIR` | mount with a ticket read from stdin |
 | `mountable unmount DIR` | unmount; on Linux, pending writes are committed |
@@ -46,12 +58,33 @@ they fail with `org_required`.
 
 Deleting a filesystem is done in the console.
 
+The API checks the limits' ranges: `--spending-cap-cents` 0 to 1,000,000,000
+(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 GiB to
+100 GiB, `--entry-quota` 10,000 to 1,000,000; the quotas cannot be removed.
+`fs create` and `fs update` refuse an API key limited to one filesystem
+(`key_limited_to_filesystem`) and need the key's creator to be an owner or
+admin. `fs update` and every `webhooks` command need read-write access to the
+filesystem. An API key lists and revokes only its own sessions.
+
+The `files` commands use the files API without mounting, with your login or
+the API key: each creates a token session for itself (`ro` for `read`, `list`
+and `changes`, `rw` for `write` and `delete`), keeps its token in memory and
+revokes it at the end; if that fails, a note says so and the session expires
+within the hour. Paths are encoded per segment; a `.` or `..` segment fails
+with `bad_path` before any request.
+
 ### Output, errors and exit codes
 
 - `--json` on every command writes one JSON document to stdout, with the
   API's field names (`help --json` writes `{"usage": …}`). Diagnostics go to
   stderr. Nothing ever prompts. The exception is `mountable mcp`, whose stdout
   is the MCP protocol.
+- `files read` without `--to` writes the file's bytes to stdout, so it takes
+  `--json` only with `--to` (then it prints the file's `path`, `type`, `size`,
+  `etag` and `modified_at`). `files list --json` writes
+  `{"entries":[…],"next":…}`, `files changes --json`
+  `{"events":[…],"cursor":…}`, `files delete --json`
+  `{"path":…,"deleted":true}`.
 - `mountable mount --json` writes JSON lines as the mount progresses:
   `{"event":"mounted","path":…,"filesystem_id":…,"mode":…}` once the mount is
   usable, and `{"event":"unmounted","reason":"signal|unmount|revoked|expired|error","detail":…}`
@@ -64,12 +97,20 @@ Deleting a filesystem is done in the console.
   `org_required` (pass `--org`), `not_found` (check the ID with
   `mountable fs list`), `payment_required` (the hint is the console's billing
   link), `rate_limited` (wait `retry_after` seconds).
-- The one-time ticket appears only in the result of `ticket create`. API keys,
-  login tokens, certificates and tickets never appear in errors or logs.
+- `precondition_failed` (an `--if-match` or `--if-none-match` that did not
+  hold) carries `current_etag`: the file's ETag, or `null` when nothing exists
+  there; the hint names it.
+- The one-time ticket appears only in the result of `ticket create`, and a
+  webhook's signing secret (`whsec_…`) only in the result of `webhooks create`
+  and `webhooks rotate-secret`: alone on stdout, with the webhook's ID on
+  stderr, or in the JSON answer. API keys, login and session tokens,
+  certificates, tickets and webhook secrets never appear in errors or logs.
 
 ### Retries
 
-- Reads (`list`, `usage`) are safe to retry.
+- The CLI never retries on its own.
+- Reads (`list`, `get`, `usage`, `files read`, `files list`, `files changes`,
+  `webhooks list`) are safe to retry.
 - `ticket create` sends an idempotency key: the one given with
   `--idempotency-key`, or a random one it prints to stderr before sending.
   Retry with the same key after a timeout. When the outcome is unknown
@@ -84,8 +125,28 @@ Deleting a filesystem is done in the console.
     with `ticket_already_used`; use a new key for another mount.
 - `fs create` has no idempotency key, and names need not be unique. After a
   timeout, run `fs list` and look for the name before creating again.
+- `fs update` sets the values given, so repeating it changes nothing more.
+- `files write` and `files delete` with `--if-match` or `--if-none-match`
+  fail with `precondition_failed` rather than undo a change made since; a
+  repeat after an unknown outcome can fail that way because the first one
+  succeeded, so compare `current_etag` with the file you wrote.
+- `webhooks create` is not idempotent: after an unknown outcome, run
+  `webhooks list` before creating again. `webhooks rotate-secret` issues a new
+  secret each time; after an unknown outcome, rotate again and use the secret
+  it prints. `webhooks delete` after a lost answer answers `not_found`.
+  `webhooks enable` is safe to repeat.
 - `sessions revoke` is idempotent.
 - On HTTP 429 (`rate_limited`), wait `retry_after` seconds.
+
+### Files limits
+
+- `files read` to stdout streams the file: if the download breaks off, the
+  command fails (exit 1) and the bytes already written are incomplete. With
+  `--to FILE`, FILE is replaced only once the whole file arrived.
+- `files write` reads stdin fully before sending, so its length is known;
+  `--from FILE` streams a regular file with its size.
+- Each request has 60 seconds, the transfer included (`files changes`: 60
+  seconds plus `--wait`).
 
 ## Agent workflow
 

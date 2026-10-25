@@ -151,8 +151,23 @@ func (c *client) listFilesystems(ctx context.Context) (json.RawMessage, error) {
 	return c.inOrg(ctx, "GET", "/filesystems", nil)
 }
 
-func (c *client) createFilesystem(ctx context.Context, name string) (json.RawMessage, error) {
-	return c.inOrg(ctx, "POST", "/filesystems", map[string]string{"name": name})
+// createFilesystem sends name and the limits given (API field names).
+func (c *client) createFilesystem(ctx context.Context, name string, limits map[string]any) (json.RawMessage, error) {
+	body := map[string]any{"name": name}
+	for field, value := range limits {
+		body[field] = value
+	}
+	return c.inOrg(ctx, "POST", "/filesystems", body)
+}
+
+func (c *client) getFilesystem(ctx context.Context, fsID string) (json.RawMessage, error) {
+	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID), nil)
+}
+
+// updateFilesystem changes only the limits given; a nil value removes a
+// spending cap or a mutation rate.
+func (c *client) updateFilesystem(ctx context.Context, fsID string, limits map[string]any) (json.RawMessage, error) {
+	return c.inOrg(ctx, "PATCH", "/filesystems/"+url.PathEscape(fsID), limits)
 }
 
 func (c *client) filesystemUsage(ctx context.Context, fsID string) (json.RawMessage, error) {
@@ -161,6 +176,26 @@ func (c *client) filesystemUsage(ctx context.Context, fsID string) (json.RawMess
 
 func (c *client) listSessions(ctx context.Context, fsID string) (json.RawMessage, error) {
 	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/mount-sessions", nil)
+}
+
+// createWebhook sends path_prefix only when one is given (nil leaves it to
+// the API's default, /). The answer carries the signing secret, once.
+func (c *client) createWebhook(ctx context.Context, fsID, hookURL string, pathPrefix *string) (json.RawMessage, error) {
+	body := map[string]string{"url": hookURL}
+	if pathPrefix != nil {
+		body["path_prefix"] = *pathPrefix
+	}
+	return c.inOrg(ctx, "POST", "/filesystems/"+url.PathEscape(fsID)+"/webhooks", body)
+}
+
+func (c *client) listWebhooks(ctx context.Context, fsID string) (json.RawMessage, error) {
+	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/webhooks", nil)
+}
+
+// webhook calls a path under one webhook: "" (the webhook itself),
+// ":rotate-secret" or ":enable".
+func (c *client) webhook(ctx context.Context, method, fsID, webhookID, action string) (json.RawMessage, error) {
+	return c.inOrg(ctx, method, "/filesystems/"+url.PathEscape(fsID)+"/webhooks/"+url.PathEscape(webhookID)+action, nil)
 }
 
 // revokeSession is idempotent: revoking an ended session succeeds.

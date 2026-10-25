@@ -35,6 +35,9 @@ type apiError struct {
 	Message string
 	// RetryAfter is how many seconds to wait after rate_limited.
 	RetryAfter int
+	// CurrentETag is the file's ETag after precondition_failed, as the API
+	// sent it (a string, or null when nothing exists).
+	CurrentETag json.RawMessage
 }
 
 func (e *apiError) Error() string {
@@ -95,8 +98,9 @@ func do(req *http.Request, out any) error {
 	return json.Unmarshal(data, out)
 }
 
-// parseAPIError reads the API's error forms: {"detail": {"code": …}},
-// {"detail": [validation errors]} and the device flow's {"error": …}.
+// parseAPIError reads the API's error forms: {"detail": {"code": …}}, the
+// same fields at the top level (the files API), {"detail": [validation
+// errors]} and the device flow's {"error": …}.
 func parseAPIError(resp *http.Response, data []byte) *apiError {
 	var problem struct {
 		Error  string          `json:"error"`
@@ -104,13 +108,22 @@ func parseAPIError(resp *http.Response, data []byte) *apiError {
 	}
 	_ = json.Unmarshal(data, &problem)
 	e := &apiError{Status: resp.StatusCode, Code: problem.Error}
-	var detail struct {
-		Code       string `json:"code"`
-		URL        string `json:"url"`
-		RetryAfter int    `json:"retry_after"`
+	type fields struct {
+		Code        string          `json:"code"`
+		Message     string          `json:"message"`
+		URL         string          `json:"url"`
+		RetryAfter  int             `json:"retry_after"`
+		CurrentETag json.RawMessage `json:"current_etag"`
 	}
-	if json.Unmarshal(problem.Detail, &detail) == nil && detail.Code != "" {
-		e.Code, e.URL, e.RetryAfter = detail.Code, detail.URL, detail.RetryAfter
+	var detail fields
+	if json.Unmarshal(problem.Detail, &detail) != nil || detail.Code == "" {
+		detail = fields{}
+		if json.Unmarshal(data, &detail) != nil {
+			detail = fields{}
+		}
+	}
+	if detail.Code != "" {
+		e.Code, e.Message, e.URL, e.RetryAfter, e.CurrentETag = detail.Code, detail.Message, detail.URL, detail.RetryAfter, detail.CurrentETag
 	}
 	var invalid []struct {
 		Loc []any  `json:"loc"`

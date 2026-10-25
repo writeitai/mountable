@@ -70,7 +70,7 @@ func newMCPServer() *mcp.Server {
 		Description: "Create a filesystem and return it; its id is what tickets and mounts need." + orgNote +
 			" Not idempotent, and names need not be unique: after a timeout or an unknown outcome, call list_filesystems and look for the name before creating again. Never retry blindly." + rateLimits,
 	}, toolIn(func(in createFilesystemInput) string { return in.OrgID }, func(ctx context.Context, c *client, in createFilesystemInput) (any, error) {
-		return c.createFilesystem(ctx, in.Name)
+		return c.createFilesystem(ctx, in.Name, nil)
 	}))
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "filesystem_usage",
