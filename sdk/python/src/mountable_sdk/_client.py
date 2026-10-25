@@ -777,8 +777,11 @@ def verify_webhook(
             payload["filesystem_id"],
             payload["cursor"],
         )
-        if not all(isinstance(value, str) for value in fields) or not isinstance(
-            payload["events"], list
+        events = payload["events"]
+        if (
+            not all(isinstance(value, str) for value in fields)
+            or not isinstance(events, list)
+            or not all(_is_event(event) for event in cast(list[Any], events))
         ):
             raise TypeError
         return WebhookMessage(
@@ -792,6 +795,19 @@ def verify_webhook(
         )
     except (ValueError, KeyError, TypeError, AttributeError):
         raise invalid("the body is not a mountable.io webhook message") from None
+
+
+def _is_event(value: Any) -> bool:
+    """Whether value is shaped like a change event: type and path strings,
+    and file a FileInfo object or null."""
+    if not isinstance(value, dict):
+        return False
+    event = cast(dict[str, Any], value)
+    return (
+        isinstance(event.get("type"), str)
+        and isinstance(event.get("path"), str)
+        and (event.get("file") is None or isinstance(event.get("file"), dict))
+    )
 
 
 def _json(response: httpx.Response) -> Any:

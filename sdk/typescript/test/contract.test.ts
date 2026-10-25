@@ -1,6 +1,7 @@
 // The cases of sdk/contract.md, one test per case ID.
 
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, test } from "node:test";
@@ -1002,6 +1003,17 @@ test("C49 verifyWebhook refuses anything else", async (t) => {
     const e = await rejects(verifyWebhook(caseSecret, caseHeaders, caseBody));
     assert.deepEqual([e.status, e.code], [null, "invalid_webhook"]);
     assert.ok(!String(e).includes("MfKQ9r8") && !inspect(e).includes("MfKQ9r8"));
+  }
+  // Signed, but its events are not change events.
+  for (const events of [[{}], [42], [{ type: 1, path: "/a" }], [{ type: "x", path: "/a", file: [1] }]]) {
+    const message = JSON.parse(body);
+    message.data.events = events;
+    const signedBody = JSON.stringify(message);
+    const key = Buffer.from(secret.slice("whsec_".length), "base64");
+    const digest = createHmac("sha256", key).update(`${VECTOR.id}.${VECTOR.timestamp}.${signedBody}`).digest("base64");
+    const e = await rejects(verifyWebhook(secret, signedHeaders(`v1,${digest}`), signedBody));
+    assert.equal(e.code, "invalid_webhook");
+    assert.ok(e.message.includes("not a mountable.io webhook"), e.message);
   }
   // The gateway's own signature of a body that is not a message: the
   // signature passes, the body does not.

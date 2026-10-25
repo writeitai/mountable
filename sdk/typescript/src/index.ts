@@ -764,7 +764,8 @@ export async function verifyWebhook(
       typeof payload?.webhook_id !== "string" ||
       typeof payload.filesystem_id !== "string" ||
       typeof payload.cursor !== "string" ||
-      !Array.isArray(payload.events)
+      !Array.isArray(payload.events) ||
+      !payload.events.every(isEvent)
     ) {
       throw new Error("not a message");
     }
@@ -784,6 +785,17 @@ export async function verifyWebhook(
   } catch {
     throw invalid("the body is not a mountable.io webhook message");
   }
+}
+
+/** Whether value is shaped like a change event: type and path strings, and file a FileInfo object or null. */
+function isEvent(value: any): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof value.type === "string" &&
+    typeof value.path === "string" &&
+    (value.file === null || value.file === undefined || (typeof value.file === "object" && !Array.isArray(value.file)))
+  );
 }
 
 /** Standard base64 decoded, or null when it is not base64. */

@@ -440,6 +440,10 @@ func webhooksCreate(o *output, args []string) error {
 		if f.given()["path-prefix"] {
 			pathPrefix = prefix
 		}
+		// A bad ID fails before the organisation is resolved.
+		if _, err := webhooksPath(args[0]); err != nil {
+			return err
+		}
 		if err := c.resolveOrg(ctx); err != nil {
 			return err
 		}
@@ -453,6 +457,9 @@ func webhooksCreate(o *output, args []string) error {
 
 func webhooksRotateSecret(o *output, args []string) error {
 	return apiCommand(args, 2, "webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		if _, err := webhooksPath(args[0], args[1]); err != nil {
+			return err
+		}
 		if err := c.resolveOrg(ctx); err != nil {
 			return err
 		}

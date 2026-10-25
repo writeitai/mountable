@@ -1220,8 +1220,7 @@ func TestWebhookCreateResolvesTheOrganisationFirst(t *testing.T) {
 // normalised, webhooks/.. would be the filesystem itself.
 func TestWebhookDotSegmentIDsAreRefused(t *testing.T) {
 	useAPIKey(t)
-	api := newFakeAPI(t, nil)
-	t.Setenv("MOUNTABLE_ORG", orgA)
+	api := newFakeAPI(t, nil) // no MOUNTABLE_ORG: not even /me is asked
 	for _, bad := range []string{"", ".", ".."} {
 		for _, args := range [][]string{
 			{"webhooks", "delete", "fsone", bad},

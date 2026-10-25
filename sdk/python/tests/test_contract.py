@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import re
 import time
@@ -1125,6 +1128,25 @@ def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
         e = caught.value
         assert (e.status, e.code) == (None, "invalid_webhook")
         assert "MfKQ9r8" not in str(e) and "MfKQ9r8" not in repr(e)
+    # Signed, but its events are not change events.
+    malformed: list[list[Any]] = [
+        [{}],
+        [42],
+        [{"type": 1, "path": "/a"}],
+        [{"type": "x", "path": "/a", "file": [1]}],
+    ]
+    for events in malformed:
+        message = json.loads(body)
+        message["data"]["events"] = events
+        signed_body = json.dumps(message)
+        key = base64.b64decode(secret.removeprefix("whsec_"))
+        content = f"{VECTOR['id']}.{VECTOR['timestamp']}.{signed_body}".encode()
+        digest = base64.b64encode(hmac.new(key, content, hashlib.sha256).digest())
+        signed = signed_headers("v1," + digest.decode())
+        with pytest.raises(MountableError) as caught:
+            verify_webhook(secret, signed, signed_body)
+        assert caught.value.code == "invalid_webhook"
+        assert "not a mountable.io webhook" in caught.value.message
     # The gateway's own signature of a body that is not a message: the
     # signature passes, the body does not.
     reference = dict(headers, **{"webhook-signature": VECTOR["reference_signature"]})
