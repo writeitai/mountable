@@ -1125,3 +1125,125 @@ func TestWebhookErrors(t *testing.T) {
 		}
 	}
 }
+
+const hooksPath = "/api/v1/orgs/" + orgA + "/filesystems/fsone/webhooks"
+
+// hangUp closes the connection without an answer.
+func hangUp(w http.ResponseWriter, _ *http.Request) {
+	conn, _, _ := w.(http.Hijacker).Hijack()
+	conn.Close()
+}
+
+// Webhook errors carry webhook next steps: the API's codes, and after an
+// unknown outcome, what to check before trying create or rotate-secret
+// again. No error is retried.
+func TestWebhookErrorHints(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		handler http.HandlerFunc
+		code    string
+		hint    string
+	}{
+		{"bad url", []string{"create", "fsone", "http://example.com"}, reply(400, `{"detail":{"code":"bad_url"}}`), "bad_url", "https:// URL on port 443"},
+		{"bad prefix", []string{"create", "fsone", "https://example.com", "--path-prefix", "x"}, reply(400, `{"detail":{"code":"bad_path"}}`), "bad_path", "use / or a directory"},
+		{"limit", []string{"create", "fsone", "https://example.com"}, reply(409, `{"detail":{"code":"webhook_limit"}}`), "webhook_limit", "mountable webhooks list FS_ID"},
+		{"no grant", []string{"create", "fsone", "https://example.com"}, reply(403, `{"detail":{"code":"no_grant"}}`), "no_grant", "read-write grant"},
+		{"payment", []string{"create", "fsone", "https://example.com"}, reply(402, `{"detail":{"code":"payment_required","url":"https://mountable.io/console/billing"}}`), "payment_required", "https://mountable.io/console/billing"},
+		{"create unknown", []string{"create", "fsone", "https://example.com"}, reply(502, `<html>bad gateway</html>`), "api_error", "look for the URL before creating it again"},
+		{"create lost", []string{"create", "fsone", "https://example.com"}, hangUp, "network_error", "look for the URL before creating it again"},
+		{"create cut short", []string{"create", "fsone", "https://example.com"}, cutShort, "error", "look for the URL before creating it again"},
+		{"not found", []string{"delete", "fsone", "wh1"}, reply(404, `{"detail":{"code":"not_found"}}`), "not_found", "mountable webhooks list FS_ID"},
+		{"list no grant", []string{"list", "fsone"}, reply(403, `{"detail":{"code":"no_grant"}}`), "no_grant", "read-write grant"},
+		{"revoked", []string{"enable", "fsone", "wh1"}, reply(409, `{"detail":{"code":"access_revoked"}}`), "access_revoked", "create a new webhook"},
+		{"rotate unknown", []string{"rotate-secret", "fsone", "wh1"}, reply(503, ""), "api_error", "rotate again"},
+		{"rotate lost", []string{"rotate-secret", "fsone", "wh1"}, hangUp, "network_error", "rotate again"},
+		{"rotate refused", []string{"rotate-secret", "fsone", "wh1"}, reply(404, `{"detail":{"code":"not_found"}}`), "not_found", "mountable webhooks list FS_ID"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useAPIKey(t)
+			api := newFakeAPI(t, nil)
+			api.routes = map[string]http.HandlerFunc{
+				"POST " + hooksPath:                        tc.handler,
+				"GET " + hooksPath:                         tc.handler,
+				"DELETE " + hooksPath + "/wh1":             tc.handler,
+				"POST " + hooksPath + "/wh1:enable":        tc.handler,
+				"POST " + hooksPath + "/wh1:rotate-secret": tc.handler,
+			}
+			t.Setenv("MOUNTABLE_ORG", orgA)
+			r := runCLI(t, append(append([]string{"webhooks"}, tc.args...), "--json")...)
+			e := jsonError(t, r)
+			if r.code != 1 || e.Code != tc.code || !strings.Contains(e.Hint, tc.hint) || e.Message == "" {
+				t.Fatalf("got %d %+v", r.code, e)
+			}
+			r = runCLI(t, append([]string{"webhooks"}, tc.args...)...)
+			if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, "("+tc.code+")") {
+				t.Fatalf("text: %d %q %q", r.code, r.stdout, r.stderr)
+			}
+			if calls := api.called(); len(calls) != 2 {
+				t.Fatalf("calls = %v (an error was retried?)", calls)
+			}
+		})
+	}
+}
+
+// The organisation is resolved before a webhook is created or its secret
+// rotated, so a failure to resolve it never claims the webhook may exist or
+// its secret may have changed.
+func TestWebhookCreateResolvesTheOrganisationFirst(t *testing.T) {
+	api := newFakeAPI(t, map[string]http.HandlerFunc{"GET /api/v1/me": reply(200, twoOrgs)})
+	useLogin(t) // after the fake API: the login is for its URL
+	r := runCLI(t, "webhooks", "create", "fsone", "https://example.com", "--json")
+	if e := jsonError(t, r); r.code != 1 || e.Code != "org_required" || !strings.Contains(e.Hint, "--org") {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+	api.routes["GET /api/v1/me"] = hangUp
+	for _, args := range [][]string{{"create", "fsone", "https://example.com"}, {"rotate-secret", "fsone", "wh1"}} {
+		r = runCLI(t, append(append([]string{"webhooks"}, args...), "--json")...)
+		if e := jsonError(t, r); r.code != 1 || e.Code != "network_error" || strings.Contains(e.Hint, "may have") || strings.Contains(e.Hint, "rotate again") {
+			t.Fatalf("%v: got %d %+v", args, r.code, e)
+		}
+	}
+	api.routes["GET /api/v1/me"] = reply(200, oneOrg)
+	api.routes["POST "+hooksPath] = reply(201, webhookCreated)
+	r = runCLI(t, "webhooks", "create", "fsone", "https://example.com")
+	if r.code != 0 || r.stdout != webhookSecret+"\n" {
+		t.Fatalf("got %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	if calls := api.called(); calls[len(calls)-1] != "POST "+hooksPath || calls[len(calls)-2] != "GET /api/v1/me" {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+// An empty, "." or ".." ID is refused before any request: once the path is
+// normalised, webhooks/.. would be the filesystem itself.
+func TestWebhookDotSegmentIDsAreRefused(t *testing.T) {
+	useAPIKey(t)
+	api := newFakeAPI(t, nil)
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	for _, bad := range []string{"", ".", ".."} {
+		for _, args := range [][]string{
+			{"webhooks", "delete", "fsone", bad},
+			{"webhooks", "enable", "fsone", bad},
+			{"webhooks", "rotate-secret", "fsone", bad},
+			{"webhooks", "list", bad},
+			{"webhooks", "create", bad, "https://example.com"},
+		} {
+			r := runCLI(t, append(args, "--json")...)
+			if e := jsonError(t, r); r.code != 1 || e.Code != "invalid_request" || strings.Contains(e.Hint, "may have") {
+				t.Errorf("%v = %d %+v", args, r.code, e)
+			}
+		}
+	}
+	s := connectMCP(t)
+	for _, tool := range []string{"delete_webhook", "enable_webhook"} {
+		text, isError := callTool(t, s, tool, map[string]any{"filesystem_id": "fsone", "webhook_id": ".."})
+		if !isError || !strings.Contains(text, `"invalid_request"`) {
+			t.Errorf("%s = %v %s", tool, isError, text)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("calls = %v", calls)
+	}
+}

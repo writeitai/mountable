@@ -123,7 +123,8 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 | `idempotency_conflict` | An identical request is in progress; retry shortly with the same key. |
 | `key_limited_to_filesystem` | A key limited to one filesystem cannot create filesystems or change limits; use an organisation-wide key. |
 | `precondition_failed` | The file changed (or exists, with `--if-none-match`); the error's `current_etag` is its ETag, `null` when nothing exists. Read it again before writing. |
-| `bad_path` | Drop `.` and `..` segments from the path. |
+| `bad_path` | Drop `.` and `..` segments from the path; a webhook's path prefix is `/` or a directory. |
+| `bad_url`, `webhook_limit`, `access_revoked` | Webhooks: use an `https://` URL on port 443; delete one of the 5 webhooks first; create a new webhook. |
 | `network_error`, `outcome_unknown` | Retry reads; for `ticket create`, retry with the error's `idempotency_key`. |
 
 ## Retries
@@ -163,7 +164,9 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 `mountable mcp` serves the same operations as MCP tools over stdio
 (`list_organizations`, `list_filesystems`, `create_filesystem`,
 `filesystem_usage`, `create_mount_ticket`, `list_mount_sessions`,
-`revoke_mount_session`). Mounting stays a command in the sandbox:
+`revoke_mount_session`, `list_webhooks`, `delete_webhook`,
+`enable_webhook`; creating a webhook or rotating its secret returns the
+secret, so those stay CLI and SDK calls). Mounting stays a command in the sandbox:
 `create_mount_ticket` returns the ticket and the exact `mount_command`, and
 takes an optional `max_duration_seconds`.
 
