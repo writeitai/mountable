@@ -64,7 +64,10 @@ The API checks the limits' ranges: `--spending-cap-cents` 0 to 1,000,000,000
 `fs create` and `fs update` refuse an API key limited to one filesystem
 (`key_limited_to_filesystem`) and need the key's creator to be an owner or
 admin. `fs update` and every `webhooks` command need read-write access to the
-filesystem. An API key lists and revokes only its own sessions.
+filesystem. A webhook URL must be `https://` on port 443 with a public host
+(`bad_url`), a path prefix `/` or a directory (`bad_path`); a filesystem has at
+most 5 webhooks (`webhook_limit`), and a webhook whose creator lost access
+cannot be enabled again (`access_revoked`): create a new one. An API key lists and revokes only its own sessions.
 
 The `files` commands use the files API without mounting, with your login or
 the API key: each creates a token session for itself (`ro` for `read`, `list`
@@ -247,11 +250,15 @@ It lives in [`skills/mountable/SKILL.md`](skills/mountable/SKILL.md).
 
 `mountable mcp` serves the tools `list_organizations`, `list_filesystems`,
 `create_filesystem`, `filesystem_usage`, `create_mount_ticket`,
-`list_mount_sessions` and `revoke_mount_session` over stdio
-(`create_mount_ticket` takes an optional `max_duration_seconds`). It
-authenticates like the CLI. Results are the API's JSON; errors return the
-code and hint. Mounting stays a process in the sandbox:
-`create_mount_ticket` returns the ticket and the command that mounts with it.
+`list_mount_sessions`, `revoke_mount_session`, `list_webhooks`,
+`delete_webhook` and `enable_webhook` over stdio (`create_mount_ticket`
+takes an optional `max_duration_seconds`). It authenticates like the CLI.
+Results are the API's JSON; errors return the code and hint. Mounting stays
+a process in the sandbox: `create_mount_ticket` returns the ticket and the
+command that mounts with it. Creating a webhook and rotating its secret are
+not tools: their result is the signing secret, which belongs in the backend
+that receives the deliveries, not in a model's context. Run
+`mountable webhooks create` there, or use the SDKs.
 
 Give the server `MOUNTABLE_API_KEY` through its environment: inherited from
 the environment the MCP client starts in, or set in the client's MCP
@@ -292,7 +299,8 @@ from the environment Claude Code runs in, so the key stays out of the file):
 
 Backends that read and write files without mounting use the files API through
 the SDKs, which create and refresh their own short token sessions from an API
-key.
+key. In a webhook receiver, `verify_webhook` / `verifyWebhook` checks a
+delivery's signature and returns its message.
 
 Both are published as `mountable-sdk`, Python 3.10+ on PyPI and TypeScript on
 npm (Node 18+, Bun, or Deno):

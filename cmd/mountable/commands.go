@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -439,9 +440,16 @@ func webhooksCreate(o *output, args []string) error {
 		if f.given()["path-prefix"] {
 			pathPrefix = prefix
 		}
+		// A bad ID fails before the organisation is resolved.
+		if _, err := webhooksPath(args[0]); err != nil {
+			return err
+		}
+		if err := c.resolveOrg(ctx); err != nil {
+			return err
+		}
 		raw, err := c.createWebhook(ctx, args[0], args[1], pathPrefix)
 		if err != nil {
-			return err
+			return webhookError(err, "the webhook may have been created: run `mountable webhooks list FS_ID` and look for the URL before creating it again")
 		}
 		return printSecret(o, raw, "webhook %s created")
 	})
@@ -449,12 +457,45 @@ func webhooksCreate(o *output, args []string) error {
 
 func webhooksRotateSecret(o *output, args []string) error {
 	return apiCommand(args, 2, "webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		if _, err := webhooksPath(args[0], args[1]); err != nil {
+			return err
+		}
+		if err := c.resolveOrg(ctx); err != nil {
+			return err
+		}
 		raw, err := c.webhook(ctx, "POST", args[0], args[1], ":rotate-secret")
 		if err != nil {
-			return err
+			return webhookError(err, "the secret may have changed and is not shown again: rotate again and store the new secret")
 		}
 		return printSecret(o, raw, "new secret for webhook %s")
 	})
+}
+
+// webhookError gives the webhook commands' errors their own next steps.
+// unknown is the next step when the outcome is unknown (the request or its
+// answer was lost, or the API failed with a 5xx); empty keeps the default.
+// A command that passes one resolves the organisation first, so the error
+// is the webhook request's.
+func webhookError(err error, unknown string) error {
+	if err == nil {
+		return nil
+	}
+	e := toCLIError(err)
+	var api *apiError
+	var own *cliError
+	if unknown != "" && !errors.As(err, &own) && (!errors.As(err, &api) || api.Status >= 500) {
+		e.Hint = unknown
+		return e
+	}
+	switch e.Code {
+	case "no_grant":
+		e.Hint = "webhooks need read-write access to the filesystem; ask an owner or admin for a read-write grant"
+	case "not_found":
+		e.Hint = "check the filesystem ID with `mountable fs list` and the webhook ID with `mountable webhooks list FS_ID`"
+	case "bad_path":
+		e.Message, e.Hint = "the path prefix is not a directory path", "use / or a directory such as /tickets"
+	}
+	return e
 }
 
 // printSecret writes a webhook's signing secret alone on stdout, and what
@@ -478,7 +519,7 @@ func webhooksList(o *output, args []string) error {
 	return apiCommand(args, 1, "webhooks list FS_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
 		raw, err := c.listWebhooks(ctx, args[0])
 		if err != nil {
-			return err
+			return webhookError(err, "")
 		}
 		return o.result(raw, func(w io.Writer) error {
 			var list []struct {
@@ -508,7 +549,7 @@ func webhooksList(o *output, args []string) error {
 func webhooksDelete(o *output, args []string) error {
 	return apiCommand(args, 2, "webhooks delete FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
 		if _, err := c.webhook(ctx, "DELETE", args[0], args[1], ""); err != nil {
-			return err
+			return webhookError(err, "")
 		}
 		return o.result(map[string]any{"id": args[1], "deleted": true}, func(w io.Writer) error {
 			_, err := fmt.Fprintf(w, "deleted %s\n", args[1])
@@ -521,7 +562,7 @@ func webhooksEnable(o *output, args []string) error {
 	return apiCommand(args, 2, "webhooks enable FS_ID WEBHOOK_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
 		raw, err := c.webhook(ctx, "POST", args[0], args[1], ":enable")
 		if err != nil {
-			return err
+			return webhookError(err, "")
 		}
 		return o.result(raw, func(w io.Writer) error {
 			var hook struct {

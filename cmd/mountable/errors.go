@@ -65,6 +65,9 @@ var explanations = map[string]struct{ message, hint string }{
 	"invalid_request":           {"the API rejected the request", "check the command's arguments"},
 	"bad_path":                  {"the path is not valid", "use a path without `.` or `..` segments"},
 	"precondition_failed":       {"the file's ETag does not match", "read the file again, then retry with its current ETag"},
+	"bad_url":                   {"the webhook URL is not allowed", "use an https:// URL on port 443 with a public host, and no user name, password or fragment"},
+	"webhook_limit":             {"the filesystem already has 5 webhooks", "delete one first (`mountable webhooks list FS_ID`)"},
+	"access_revoked":            {"the webhook's creator can no longer read the filesystem", "create a new webhook"},
 	"key_limited_to_filesystem": {"an API key limited to one filesystem may not do this", "use a key for the whole organisation, or a person's login"},
 	"network_error":             {"the API could not be reached", "check the network and MOUNTABLE_API_URL; reads and revoking sessions are safe to retry"},
 }

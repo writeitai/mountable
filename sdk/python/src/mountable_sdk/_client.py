@@ -6,9 +6,16 @@ SDK.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import json
 import os
 import re
 import secrets
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -27,6 +34,8 @@ TIMEOUT = 60.0
 # A token session lasts an hour and is replaced this close to its expiry.
 SESSION_SECONDS = 3600
 REFRESH_BEFORE = timedelta(seconds=60)
+# Seconds a webhook's timestamp may be from now.
+WEBHOOK_TOLERANCE = 300
 
 Mode = Literal["ro", "rw"]
 FileType = Literal["file", "directory", "symlink"]
@@ -169,6 +178,23 @@ class Webhook:
     failing_since: datetime | None
     # The signing secret, only from create and rotate: kept out of repr.
     secret: str | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class WebhookMessage:
+    """A verified webhook delivery."""
+
+    # The webhook-id header: the same on every retry of a message.
+    id: str
+    # files.changed, or files.resync (no events: list what you need again).
+    type: str
+    timestamp: datetime
+    webhook_id: str
+    filesystem_id: str
+    events: list[Change]
+    # The ordering key: apply a message only if its cursor, compared as an
+    # integer, is greater than the last one applied.
+    cursor: str
 
 
 class _Unset:
@@ -349,9 +375,7 @@ class Mountable:
 
     def revoke_mount_session(self, session_id: str) -> None:
         """Ends a session; revoking an ended one succeeds too."""
-        self._call(
-            "DELETE", f"/api/v1/mount-sessions/{quote(session_id, safe='')}", retry=True
-        )
+        self._call("DELETE", f"/api/v1/mount-sessions/{_id(session_id)}", retry=True)
 
     def create_webhook(
         self, fs_id: str, url: str, *, path_prefix: str | None = None
@@ -395,13 +419,14 @@ class Mountable:
                     None, "org_required", "pass org_id or set MOUNTABLE_ORG"
                 )
             self._org_id = org_id
-        return f"/api/v1/orgs/{quote(self._org_id, safe='')}{path}"
+        return f"/api/v1/orgs/{_id(self._org_id)}{path}"
 
     def _fs_path(self, fs_id: str, path: str = "") -> str:
-        return self._org_path(f"/filesystems/{quote(fs_id, safe='')}{path}")
+        return self._org_path(f"/filesystems/{_id(fs_id)}{path}")
 
     def _webhook_path(self, fs_id: str, webhook_id: str) -> str:
-        return self._fs_path(fs_id, f"/webhooks/{quote(webhook_id, safe='')}")
+        # Both IDs are checked before the organisation is looked up.
+        return self._fs_path(fs_id, f"/webhooks/{_id(webhook_id)}")
 
     def _call(
         self, method: str, path: str, *, retry: bool, **kwargs: Any
@@ -572,14 +597,7 @@ class Filesystem:
         )
         body = _json(response)
         return ChangeBatch(
-            events=[
-                Change(
-                    type=event["type"],
-                    path=event["path"],
-                    file=_file_info(event["file"]) if event.get("file") else None,
-                )
-                for event in body["events"]
-            ],
+            events=[_change(event) for event in body["events"]],
             cursor=body["cursor"],
         )
 
@@ -638,6 +656,15 @@ def _quote_etag(etag: str) -> str:
 _FRACTION = re.compile(r"\.(\d+)")
 
 
+def _id(value: str) -> str:
+    """One management ID as a path segment. An empty, "." or ".." ID would
+    name another resource once the URL is normalised (…/webhooks/.. is the
+    filesystem), so it raises ``invalid_request`` before any request."""
+    if value in ("", ".", ".."):
+        raise MountableError(None, "invalid_request", f"invalid ID: {value!r}")
+    return quote(value, safe="")
+
+
 def _parse_time(value: str) -> datetime:
     """Parses RFC 3339, which Python 3.10's fromisoformat only partly reads."""
     value = value.replace("Z", "+00:00").replace("z", "+00:00")
@@ -659,6 +686,14 @@ def _file_info(raw: dict[str, Any]) -> FileInfo:
         size=raw["size"],
         etag=raw.get("etag"),
         modified_at=_parse_time(raw["modified_at"]),
+    )
+
+
+def _change(raw: dict[str, Any]) -> Change:
+    return Change(
+        type=raw["type"],
+        path=raw["path"],
+        file=_file_info(raw["file"]) if raw.get("file") else None,
     )
 
 
@@ -689,6 +724,107 @@ def _webhook(raw: dict[str, Any]) -> Webhook:
         last_failure=raw.get("last_failure"),
         failing_since=_parse_optional_time(raw.get("failing_since")),
         secret=raw.get("secret"),
+    )
+
+
+def verify_webhook(
+    secret: str, headers: Mapping[str, str], body: bytes | str
+) -> WebhookMessage:
+    """Checks a delivery's signature and returns its message.
+
+    ``headers`` are the request's (names in any case) and ``body`` its exact
+    bytes, not JSON parsed and encoded again. Raises ``MountableError`` with
+    code ``invalid_webhook`` unless a ``v1`` signature in ``webhook-signature``
+    is by ``secret`` (Standard Webhooks) and ``webhook-timestamp`` is within
+    five minutes of now. A message can arrive more than once; see
+    ``WebhookMessage.cursor``.
+    """
+
+    def invalid(reason: str) -> MountableError:
+        return MountableError(None, "invalid_webhook", reason)
+
+    lower = {name.lower(): value for name, value in headers.items()}
+    msg_id = lower.get("webhook-id", "")
+    timestamp = lower.get("webhook-timestamp", "")
+    if not msg_id or not timestamp.isascii() or not timestamp.isdigit():
+        raise invalid("webhook-id or webhook-timestamp is missing")
+    # More digits than any timestamp would overflow, or exceed int's limit.
+    if len(timestamp) > 12 or abs(time.time() - int(timestamp)) > WEBHOOK_TOLERANCE:
+        raise invalid("webhook-timestamp is more than five minutes from now")
+    try:
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+    except (ValueError, binascii.Error):
+        key = b""
+    if not secret.startswith("whsec_") or not key:
+        raise invalid("the secret is not a whsec_ secret")
+    data = body.encode() if isinstance(body, str) else body
+    signed = f"{msg_id}.{timestamp}.".encode() + data
+    expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest())
+    # Signatures are separated by spaces; a repeated header is joined with ", ".
+    if not any(
+        hmac.compare_digest(signature[3:].removesuffix(",").encode(), expected)
+        for signature in lower.get("webhook-signature", "").split()
+        if signature.startswith("v1,")
+    ):
+        raise invalid("no signature matches")
+    try:
+        message = json.loads(data)
+        payload = message["data"]
+        fields = (
+            message["type"],
+            message["timestamp"],
+            payload["webhook_id"],
+            payload["filesystem_id"],
+            payload["cursor"],
+        )
+        events = payload["events"]
+        cursor = payload["cursor"]
+        if (
+            not all(isinstance(value, str) for value in fields)
+            # A decimal integer: the ordering key.
+            or not (cursor.isascii() and cursor.isdigit())
+            or not isinstance(events, list)
+            or not all(_is_event(event) for event in cast(list[Any], events))
+        ):
+            raise TypeError
+        return WebhookMessage(
+            id=msg_id,
+            type=message["type"],
+            timestamp=_parse_time(message["timestamp"]),
+            webhook_id=payload["webhook_id"],
+            filesystem_id=payload["filesystem_id"],
+            events=[_change(event) for event in payload["events"]],
+            cursor=payload["cursor"],
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise invalid("the body is not a mountable.io webhook message") from None
+
+
+def _is_event(value: Any) -> bool:
+    """Whether value is shaped like a change event: type and path strings,
+    and file a FileInfo or null."""
+    if not isinstance(value, dict):
+        return False
+    event = cast(dict[str, Any], value)
+    return (
+        isinstance(event.get("type"), str)
+        and isinstance(event.get("path"), str)
+        and (event.get("file") is None or _is_file_info(event["file"]))
+    )
+
+
+def _is_file_info(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    info = cast(dict[str, Any], value)
+    size = info.get("size")
+    return (
+        isinstance(info.get("path"), str)
+        and isinstance(info.get("type"), str)
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and isinstance(info.get("modified_at"), str)
+        and (info.get("etag") is None or isinstance(info.get("etag"), str))
     )
 
 

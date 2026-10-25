@@ -113,6 +113,44 @@ These calls use the API key, and the API checks what it may do:
   (no cap), `mutationsPerMinute` 1–1,000 or `null` (the platform default),
   `byteQuota` 1 GiB–100 GiB, `entryQuota` 10,000–1,000,000. The two quotas
   cannot be removed.
+- An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
+  organisation ID, rejects with `invalid_request` before any request: URL
+  normalisation would send it to another resource. An empty `orgId` counts
+  as not given.
+
+## Receiving webhooks
+
+In the endpoint, verify the signature on the raw body before anything else:
+
+```ts
+import { MountableError, verifyWebhook } from "mountable-sdk";
+
+export async function POST(request: Request): Promise<Response> {
+  let message;
+  try {
+    message = await verifyWebhook(secret, request.headers, await request.text());
+  } catch (e) {
+    if (e instanceof MountableError && e.code === "invalid_webhook") return new Response(null, { status: 400 });
+    throw e;
+  }
+  // A duplicate or a late message:
+  if (BigInt(message.cursor) <= (await lastAppliedCursor())) return new Response(null, { status: 204 });
+  if (message.type === "files.resync") {
+    // list what you need again; events after message.cursor follow
+  }
+  for (const event of message.events) console.log(event.type, event.path, event.file?.etag);
+  await saveAppliedCursor(message.cursor);
+  return new Response(null, { status: 204 });
+}
+```
+
+`verifyWebhook` takes `Headers` or Node's `req.headers`, and the body as a
+string or bytes, and resolves to a `WebhookMessage` (`id`, the `webhook-id`
+that a retry repeats; `type`; `timestamp`; `webhookId`; `filesystemId`;
+`events` as `Change`; `cursor`). It accepts either signature a rotation sends
+and refuses a timestamp more than five minutes from now. Answer within 10
+seconds; a message can arrive more than once, so apply it only when its
+`cursor`, compared as an integer, is greater than the last one applied.
 
 ## Behaviour
 

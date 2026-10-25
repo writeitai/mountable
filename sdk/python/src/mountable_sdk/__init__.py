@@ -14,6 +14,8 @@ from mountable_sdk._client import (
     MountSession,
     MountTicket,
     Webhook,
+    WebhookMessage,
+    verify_webhook,
 )
 
 __all__ = [
@@ -30,4 +32,6 @@ __all__ = [
     "Mountable",
     "MountableError",
     "Webhook",
+    "WebhookMessage",
+    "verify_webhook",
 ]

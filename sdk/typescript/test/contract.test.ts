@@ -1,11 +1,12 @@
 // The cases of sdk/contract.md, one test per case ID.
 
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { Mountable, MountableError, Webhook } from "../src/index.ts";
+import { Mountable, MountableError, verifyWebhook, Webhook } from "../src/index.ts";
 import {
   API_KEY,
   CHANGES,
@@ -890,6 +891,165 @@ test("C46 management errors propagate", async () => {
   assert.deepEqual([e.status, e.code, e.message], [403, "forbidden", "needs read-write"]);
   e = await rejects(client.deleteWebhook(FS, "wh_gone"));
   assert.deepEqual([e.status, e.code], [404, "not_found"]);
+});
+
+test("C47 dot-segment IDs are refused", async () => {
+  const calls: (() => Promise<unknown>)[] = [];
+  for (const bad of ["", ".", ".."]) {
+    calls.push(
+      () => client.getFilesystem(bad),
+      () => client.updateFilesystem(bad, { byteQuota: 1 }),
+      () => client.filesystemUsage(bad),
+      () => client.listMountSessions(bad),
+      () => client.revokeMountSession(bad),
+      () => client.listWebhooks(bad),
+      () => client.createWebhook(bad, "https://x.example"),
+      () => client.deleteWebhook(FS, bad),
+      () => client.rotateWebhookSecret(FS, bad),
+      () => client.enableWebhook(FS, bad),
+    );
+  }
+  for (const call of calls) {
+    const e = await rejects(call);
+    assert.deepEqual([e.status, e.code], [null, "invalid_request"]);
+  }
+  const badOrg = new Mountable({ apiKey: API_KEY, baseUrl: api.url, orgId: ".." });
+  assert.equal((await rejects(badOrg.listWebhooks(FS))).code, "invalid_request");
+  assert.deepEqual(api.requests, []); // nothing sent, not even the /me lookup
+});
+
+// --- webhook deliveries ----------------------------------------------------
+
+const HOOK = "33333333-3333-3333-3333-333333333333";
+const VECTOR = JSON.parse(readFileSync(new URL("../../testdata/webhook.json", import.meta.url), "utf8")) as {
+  secret: string;
+  id: string;
+  timestamp: number;
+  reference_body: string;
+  reference_signature: string;
+  body: string;
+  signature: string;
+};
+
+function signedHeaders(signature = VECTOR.signature): Record<string, string> {
+  return {
+    "Webhook-Id": VECTOR.id,
+    "WEBHOOK-TIMESTAMP": String(VECTOR.timestamp),
+    "webhook-signature": signature,
+  };
+}
+
+test("C48 verifyWebhook accepts a signed delivery", async (t) => {
+  t.mock.method(Date, "now", () => (VECTOR.timestamp + 10) * 1000);
+  const message = await verifyWebhook(VECTOR.secret, signedHeaders(), new TextEncoder().encode(VECTOR.body));
+  assert.deepEqual(message, {
+    id: VECTOR.id,
+    type: "files.changed",
+    timestamp: new Date("2021-02-25T15:02:10.123Z"),
+    webhookId: HOOK,
+    filesystemId: FS,
+    events: [
+      {
+        type: "created",
+        path: "/tickets/AB-42.md",
+        file: {
+          path: "/tickets/AB-42.md",
+          type: "file",
+          size: 1234,
+          etag: '"3f2a"',
+          modifiedAt: new Date("2021-02-25T15:02:09Z"),
+        },
+      },
+      { type: "deleted", path: "/tickets/AB-41.md", file: null },
+    ],
+    cursor: "48213",
+  });
+  // A string body, Headers, and a rotation's two signatures with ours second.
+  const other = `v1,${"A".repeat(43)}=`;
+  const rotation = new Headers(signedHeaders(`${other} ${VECTOR.signature}`));
+  assert.deepEqual(await verifyWebhook(VECTOR.secret, rotation, VECTOR.body), message);
+  // Ours first: in one header, in a repeated header (Headers joins it with
+  // ", "), and as Node's array of values in either order.
+  const repeated = new Headers(signedHeaders(VECTOR.signature));
+  repeated.append("webhook-signature", other);
+  const variants: Parameters<typeof verifyWebhook>[1][] = [
+    signedHeaders(`${VECTOR.signature} ${other}`),
+    repeated,
+    { ...signedHeaders(), "webhook-signature": [VECTOR.signature, other] },
+    { ...signedHeaders(), "webhook-signature": [other, VECTOR.signature] },
+  ];
+  for (const headers of variants) {
+    assert.equal((await verifyWebhook(VECTOR.secret, headers, VECTOR.body)).cursor, "48213");
+  }
+});
+
+test("C49 verifyWebhook refuses anything else", async (t) => {
+  const now = t.mock.method(Date, "now", () => (VECTOR.timestamp + 10) * 1000);
+  const { secret, body } = VECTOR;
+  const headers = signedHeaders();
+  const { "Webhook-Id": _, ...missing } = headers;
+  const cases: [string, Record<string, string>, string][] = [
+    [secret, headers, `${body} `],
+    [`whsec_${"A".repeat(43)}=`, headers, body],
+    [secret, missing, body],
+    [secret, signedHeaders(VECTOR.signature.slice(3)), body],
+    ["MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", headers, body],
+    ["whsec_not base64!", headers, body],
+  ];
+  for (const digits of [13, 400, 5000]) {
+    cases.push([secret, { ...headers, "WEBHOOK-TIMESTAMP": "9".repeat(digits) }, body]);
+  }
+  for (const [caseSecret, caseHeaders, caseBody] of cases) {
+    const e = await rejects(verifyWebhook(caseSecret, caseHeaders, caseBody));
+    assert.deepEqual([e.status, e.code], [null, "invalid_webhook"]);
+    assert.ok(!String(e).includes("MfKQ9r8") && !inspect(e).includes("MfKQ9r8"));
+  }
+  // Signed, but its events are not change events or its cursor is not a
+  // decimal integer.
+  const file = { path: "/a", type: "file", size: 1, modified_at: "2021-02-25T15:02:09Z" };
+  const malformed = [
+    [{}],
+    [42],
+    [{ type: 1, path: "/a" }],
+    [{ type: "x", path: "/a", file: [1] }],
+    [{ type: "x", path: "/a", file: {} }],
+    [{ type: "x", path: "/a", file: { path: "/a", type: "file", size: 1 } }],
+    [{ type: "x", path: "/a", file: { ...file, modified_at: "yesterday" } }],
+    [{ type: "x", path: "/a", file: { ...file, size: "1" } }],
+  ];
+  const changes: [string, unknown][] = [
+    ...malformed.map((events): [string, unknown] => ["events", events]),
+    ...["", "1.5", "-1", "not-a-cursor", "٣"].map((cursor): [string, unknown] => ["cursor", cursor]),
+  ];
+  for (const [name, value] of changes) {
+    const message = JSON.parse(body);
+    message.data[name] = value;
+    const signedBody = JSON.stringify(message);
+    const key = Buffer.from(secret.slice("whsec_".length), "base64");
+    const digest = createHmac("sha256", key).update(`${VECTOR.id}.${VECTOR.timestamp}.${signedBody}`).digest("base64");
+    const e = await rejects(verifyWebhook(secret, signedHeaders(`v1,${digest}`), signedBody));
+    assert.equal(e.code, "invalid_webhook");
+    assert.ok(e.message.includes("not a mountable.io webhook"), e.message);
+  }
+  // The gateway's own signature of a body that is not a message: the
+  // signature passes, the body does not.
+  const reference = { ...headers, "webhook-signature": VECTOR.reference_signature };
+  const e = await rejects(verifyWebhook(secret, reference, VECTOR.reference_body));
+  assert.equal(e.code, "invalid_webhook");
+  assert.ok(e.message.includes("not a mountable.io webhook"), e.message);
+  for (const [offset, ok] of [
+    [-300, true],
+    [300, true],
+    [-301, false],
+    [301, false],
+  ] as const) {
+    now.mock.mockImplementation(() => (VECTOR.timestamp + offset) * 1000);
+    if (ok) {
+      assert.equal((await verifyWebhook(secret, headers, body)).cursor, "48213");
+    } else {
+      assert.equal((await rejects(verifyWebhook(secret, headers, body))).code, "invalid_webhook");
+    }
+  }
 });
 
 // --- parity ----------------------------------------------------------------

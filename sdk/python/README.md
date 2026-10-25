@@ -103,6 +103,40 @@ These calls use the API key, and the API checks what it may do:
   (no cap), `mutations_per_minute` 1–1,000 or `None` (the platform default),
   `byte_quota` 1 GiB–100 GiB, `entry_quota` 10,000–1,000,000. The two quotas
   cannot be removed.
+- An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
+  organisation ID, raises `invalid_request` before any request: URL
+  normalisation would send it to another resource. An empty `org_id` counts
+  as not given.
+
+## Receiving webhooks
+
+In the endpoint, verify the signature on the raw body before anything else:
+
+```python
+from mountable_sdk import MountableError, verify_webhook
+
+
+def receive(headers, body: bytes) -> int:
+    try:
+        message = verify_webhook(secret, headers, body)
+    except MountableError:  # code "invalid_webhook"
+        return 400
+    if int(message.cursor) <= last_applied_cursor():  # a duplicate or a late message
+        return 204
+    if message.type == "files.resync":
+        ...  # list what you need again; events after message.cursor follow
+    for event in message.events:  # invalidations, as from fs.changes()
+        print(event.type, event.path, event.file and event.file.etag)
+    save_applied_cursor(message.cursor)
+    return 204
+```
+
+`verify_webhook` returns a `WebhookMessage` (`id`, the `webhook-id` that a
+retry repeats; `type`; `timestamp`; `webhook_id`; `filesystem_id`; `events` as
+`Change`; `cursor`). It accepts either signature a rotation sends and refuses
+a timestamp more than five minutes from now. Answer within 10 seconds; a
+message can arrive more than once, so apply it only when its `cursor`,
+compared as an integer, is greater than the last one applied.
 
 ## Behaviour
 
