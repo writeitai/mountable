@@ -457,7 +457,7 @@ func TestFilesUsageErrors(t *testing.T) {
 }
 
 // An --if-match given empty (an unset variable) is a usage error, not an
-// unconditional write or delete.
+// unconditional write or delete, refused before stdin is read.
 func TestFilesEmptyIfMatch(t *testing.T) {
 	useAPIKey(t)
 	api := newFilesAPI(t, nil)
@@ -465,7 +465,9 @@ func TestFilesEmptyIfMatch(t *testing.T) {
 		{"files", "write", "fsone", "a", "--if-match", ""},
 		{"files", "write", "fsone", "a", "--if-match="},
 		{"files", "delete", "fsone", "a", "--if-match", ""},
+		{"files", "delete", "fsone", "a", "--if-match="},
 	} {
+		stdin := unreadStdin(t)
 		r := runFiles(t, args...)
 		if r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, "--if-match needs an ETag") {
 			t.Errorf("%v = %d %q %q", args, r.code, r.stdout, r.stderr)
@@ -474,8 +476,27 @@ func TestFilesEmptyIfMatch(t *testing.T) {
 		if e := jsonError(t, r); r.code != 2 || e.Code != "usage" {
 			t.Errorf("%v --json = %d %+v", args, r.code, e)
 		}
+		if data, _ := io.ReadAll(stdin); string(data) != "unread" {
+			t.Errorf("%v read stdin: %q left", args, data)
+		}
 	}
 	if calls := api.called(); len(calls) != 0 {
 		t.Fatalf("an empty --if-match called the API: %v", calls)
 	}
+}
+
+// unreadStdin makes stdin a pipe holding "unread" and returns it, so a test
+// can check that a command left it alone.
+func unreadStdin(t *testing.T) *os.File {
+	t.Helper()
+	stdin, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(w, "unread")
+	w.Close()
+	saved := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() { os.Stdin = saved })
+	return stdin
 }
