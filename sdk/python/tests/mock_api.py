@@ -19,6 +19,11 @@ FILES = f"/api/v1/filesystems/{FS}/files"
 LIST = f"/api/v1/filesystems/{FS}/list"
 CHANGES = f"/api/v1/filesystems/{FS}/changes"
 SESSIONS = "/api/v1/mount-sessions"
+ME = "/api/v1/me"
+ORG = "org_one"
+FILESYSTEMS = f"/api/v1/orgs/{ORG}/filesystems"
+WEBHOOKS = f"{FILESYSTEMS}/{FS}/webhooks"
+WEBHOOK_SECRET = "whsec_c2VjcmV0K2tleQ+/="
 
 
 @dataclass
@@ -64,15 +69,69 @@ def file_info(path: str, etag: str | None = '"e1"', **overrides: Any) -> dict[st
     return info
 
 
+def me(**overrides: Any) -> dict[str, Any]:
+    """GET /api/v1/me for the test API key, which belongs to ORG."""
+    answer: dict[str, Any] = {
+        "id": "u1",
+        "email": "dev@example.test",
+        "name": "Dev",
+        "organisations": [{"id": ORG, "name": "One"}],
+        "api_key": {"id": "k1", "org_id": ORG},
+    }
+    answer.update(overrides)
+    return answer
+
+
+def filesystem_view(**overrides: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "id": FS,
+        "name": "notes",
+        "byte_quota": 2**30,
+        "entry_quota": 10_000,
+        "spending_cap_cents": None,
+        "mutations_per_minute": None,
+        "created_at": "2026-10-01T09:30:00Z",
+    }
+    view.update(overrides)
+    return view
+
+
+def webhook_view(**overrides: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "id": "wh_one",
+        "filesystem_id": FS,
+        "url": "https://example.test/hook",
+        "path_prefix": "/",
+        "state": "active",
+        "disabled_reason": None,
+        "created_by": "api key test",
+        "created_at": "2026-10-01T09:30:00Z",
+        "last_success_at": None,
+        "last_failure_at": None,
+        "last_failure": None,
+        "failing_since": None,
+    }
+    view.update(overrides)
+    return view
+
+
 def iso(moment: datetime) -> str:
     return moment.isoformat().replace("+00:00", "Z")
+
+
+class _Server(ThreadingHTTPServer):
+    # close() joins the handler threads, so none outlives its test or writes
+    # during shutdown.
+    daemon_threads = False
+    block_on_close = True
 
 
 class MockAPI:
     """Answers "METHOD /path" routes and records every request.
 
     Token sessions are issued by default: mtblst_token1secret, then
-    mtblst_token2secret, …, each expiring after session_lifetime.
+    mtblst_token2secret, …, each expiring after session_lifetime. GET
+    /api/v1/me answers me() by default.
     """
 
     def __init__(self) -> None:
@@ -84,8 +143,16 @@ class MockAPI:
         api = self
 
         class Handle(BaseHTTPRequestHandler):
+            # Seconds a read or write may block, so a client that stops
+            # mid-request cannot keep close() waiting.
+            timeout = 5
+
             def log_message(self, format: str, *args: Any) -> None:
                 pass
+
+            def handle(self) -> None:
+                # One request per connection, whatever the reply's headers say.
+                self.handle_one_request()
 
             def _serve(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -103,6 +170,12 @@ class MockAPI:
                 reply = api.answer(request)
                 if reply.delay:
                     time.sleep(reply.delay)
+                try:
+                    self._reply(reply)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # the client went away first (it timed out): expected
+
+            def _reply(self, reply: Reply) -> None:
                 if reply.fault == "drop":
                     self.close_connection = True
                     self.connection.shutdown(socket.SHUT_RDWR)
@@ -128,10 +201,9 @@ class MockAPI:
                 if self.command != "HEAD":
                     self.wfile.write(data)
 
-            do_GET = do_PUT = do_DELETE = do_POST = _serve
+            do_GET = do_PUT = do_DELETE = do_POST = do_PATCH = _serve
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handle)
-        self._server.daemon_threads = True
+        self._server = _Server(("127.0.0.1", 0), Handle)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(
             target=self._server.serve_forever, args=(0.01,), daemon=True
@@ -154,6 +226,8 @@ class MockAPI:
             return handler(request)
         if request.method == "POST" and request.path == SESSIONS:
             return self.issue_session(request)
+        if request.method == "GET" and request.path == ME:
+            return Reply(200, me())
         return error(404, "not_found")
 
     def issue_session(self, request: Request) -> Reply:
@@ -188,9 +262,9 @@ class MockAPI:
             return [f"{r.method} {r.path}" for r in self.requests]
 
     def operations(self) -> list[Request]:
-        """The requests other than session creation."""
+        """The requests other than session creation and GET /api/v1/me."""
         with self._lock:
-            return [r for r in self.requests if r.path != SESSIONS]
+            return [r for r in self.requests if r.path not in (SESSIONS, ME)]
 
     def sessions(self) -> list[Request]:
         with self._lock:

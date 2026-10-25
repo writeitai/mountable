@@ -1,4 +1,4 @@
-"""The Mountable files API and mount tickets over HTTPS.
+"""The Mountable files API, mount tickets and management over HTTPS.
 
 The behaviour is the contract in sdk/contract.md, shared with the TypeScript
 SDK.
@@ -33,8 +33,9 @@ FileType = Literal["file", "directory", "symlink"]
 ChangeType = Literal["created", "updated", "deleted"]
 
 # Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-# tokens (mtblst_), tickets (mtbltk_) and login tokens.
-_SECRET = re.compile(r"(mtbl[a-z]*)_[A-Za-z0-9_.-]+")
+# tokens (mtblst_), tickets (mtbltk_) and login tokens; except webhook signing
+# secrets: whsec_ and Base64.
+_SECRET = re.compile(r"(mtbl[a-z]*|whsec)_[A-Za-z0-9_.+/=-]+")
 
 
 def _redact(text: str) -> str:
@@ -117,14 +118,80 @@ class MountTicket:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class FilesystemInfo:
+    id: str
+    name: str
+    byte_quota: int
+    entry_quota: int
+    spending_cap_cents: int | None
+    mutations_per_minute: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class FilesystemUsage:
+    retained_bytes: int
+    byte_quota: int
+    entries: int
+    entry_quota: int
+    bytes_read_30d: int
+    bytes_written_30d: int
+    reserved_cents: int
+    currency: str | None
+
+
+@dataclass(frozen=True)
+class MountSession:
+    id: str
+    filesystem_id: str
+    mode: Mode
+    credential: str
+    state: str
+    created_by: str
+    expires_at: datetime
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class Webhook:
+    id: str
+    filesystem_id: str
+    url: str
+    path_prefix: str
+    state: str
+    disabled_reason: str | None
+    created_by: str
+    created_at: datetime
+    last_success_at: datetime | None
+    last_failure_at: datetime | None
+    last_failure: str | None
+    failing_since: datetime | None
+    # The signing secret, only from create and rotate: kept out of repr.
+    secret: str | None = field(repr=False)
+
+
+class _Unset:
+    """The default of an update_filesystem field that is not sent."""
+
+
+_UNSET = _Unset()
+
+
 class Mountable:
     """A client authenticated with an API key.
 
     ``api_key`` defaults to ``MOUNTABLE_API_KEY``; ``base_url`` to
-    ``MOUNTABLE_API_URL``, then https://mountable.io.
+    ``MOUNTABLE_API_URL``, then https://mountable.io; ``org_id`` to
+    ``MOUNTABLE_ORG``, then the API key's organisation.
     """
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        org_id: str | None = None,
+    ):
         key = api_key or os.environ.get("MOUNTABLE_API_KEY")
         if not key:
             raise MountableError(
@@ -133,6 +200,8 @@ class Mountable:
         self._api_key = key
         url = base_url or os.environ.get("MOUNTABLE_API_URL") or DEFAULT_BASE_URL
         self.base_url = url.rstrip("/")
+        # Read from GET /api/v1/me on the first organisation call when unset.
+        self._org_id = org_id or os.environ.get("MOUNTABLE_ORG")
         self._http = httpx.Client()
 
     def __repr__(self) -> str:
@@ -189,6 +258,165 @@ class Mountable:
             else None,
             expires_at=_parse_time(session["expires_at"]),
         )
+
+    def list_filesystems(self) -> list[FilesystemInfo]:
+        response = self._call("GET", self._org_path("/filesystems"), retry=True)
+        return [_filesystem_info(raw) for raw in _json(response)]
+
+    def create_filesystem(
+        self,
+        name: str,
+        *,
+        spending_cap_cents: int | None = None,
+        mutations_per_minute: int | None = None,
+        byte_quota: int | None = None,
+        entry_quota: int | None = None,
+    ) -> FilesystemInfo:
+        """Creates a filesystem; limits not given take the API's defaults.
+
+        Never retried: a retry after an unknown outcome could create two.
+        """
+        limits = {
+            "spending_cap_cents": spending_cap_cents,
+            "mutations_per_minute": mutations_per_minute,
+            "byte_quota": byte_quota,
+            "entry_quota": entry_quota,
+        }
+        body: dict[str, Any] = {"name": name}
+        body.update({k: v for k, v in limits.items() if v is not None})
+        response = self._call(
+            "POST", self._org_path("/filesystems"), retry=False, json=body
+        )
+        return _filesystem_info(_json(response))
+
+    def get_filesystem(self, fs_id: str) -> FilesystemInfo:
+        response = self._call("GET", self._fs_path(fs_id), retry=True)
+        return _filesystem_info(_json(response))
+
+    def update_filesystem(
+        self,
+        fs_id: str,
+        *,
+        spending_cap_cents: int | None | _Unset = _UNSET,
+        mutations_per_minute: int | None | _Unset = _UNSET,
+        byte_quota: int | _Unset = _UNSET,
+        entry_quota: int | _Unset = _UNSET,
+    ) -> FilesystemInfo:
+        """Changes the limits passed; ``None`` removes the spending cap or the
+        mutation rate. Never retried."""
+        limits = {
+            "spending_cap_cents": spending_cap_cents,
+            "mutations_per_minute": mutations_per_minute,
+            "byte_quota": byte_quota,
+            "entry_quota": entry_quota,
+        }
+        body = {k: v for k, v in limits.items() if v is not _UNSET}
+        response = self._call("PATCH", self._fs_path(fs_id), retry=False, json=body)
+        return _filesystem_info(_json(response))
+
+    def filesystem_usage(self, fs_id: str) -> FilesystemUsage:
+        response = self._call("GET", self._fs_path(fs_id, "/usage"), retry=True)
+        raw = _json(response)
+        return FilesystemUsage(
+            retained_bytes=raw["retained_bytes"],
+            byte_quota=raw["byte_quota"],
+            entries=raw["entries"],
+            entry_quota=raw["entry_quota"],
+            bytes_read_30d=raw["bytes_read_30d"],
+            bytes_written_30d=raw["bytes_written_30d"],
+            reserved_cents=raw["reserved_cents"],
+            currency=raw.get("currency"),
+        )
+
+    def list_mount_sessions(self, fs_id: str) -> list[MountSession]:
+        """The filesystem's live sessions; an API key sees only its own."""
+        response = self._call(
+            "GET", self._fs_path(fs_id, "/mount-sessions"), retry=True
+        )
+        return [
+            MountSession(
+                id=raw["id"],
+                filesystem_id=raw["filesystem_id"],
+                mode=raw["mode"],
+                credential=raw["credential"],
+                state=raw["state"],
+                created_by=raw["created_by"],
+                expires_at=_parse_time(raw["expires_at"]),
+                created_at=_parse_time(raw["created_at"]),
+            )
+            for raw in _json(response)
+        ]
+
+    def revoke_mount_session(self, session_id: str) -> None:
+        """Ends a session; revoking an ended one succeeds too."""
+        self._call(
+            "DELETE", f"/api/v1/mount-sessions/{quote(session_id, safe='')}", retry=True
+        )
+
+    def create_webhook(
+        self, fs_id: str, url: str, *, path_prefix: str | None = None
+    ) -> Webhook:
+        """Creates a webhook; its signing secret is in ``.secret``, only here.
+
+        Never retried.
+        """
+        body = {"url": url}
+        if path_prefix is not None:
+            body["path_prefix"] = path_prefix
+        response = self._call(
+            "POST", self._fs_path(fs_id, "/webhooks"), retry=False, json=body
+        )
+        return _webhook(_json(response))
+
+    def list_webhooks(self, fs_id: str) -> list[Webhook]:
+        response = self._call("GET", self._fs_path(fs_id, "/webhooks"), retry=True)
+        return [_webhook(raw) for raw in _json(response)]
+
+    def delete_webhook(self, fs_id: str, webhook_id: str) -> None:
+        """Never retried: a retry after a lost answer would find nothing."""
+        self._call("DELETE", self._webhook_path(fs_id, webhook_id), retry=False)
+
+    def rotate_webhook_secret(self, fs_id: str, webhook_id: str) -> Webhook:
+        """A new signing secret, in ``.secret``. Never retried."""
+        path = self._webhook_path(fs_id, webhook_id) + ":rotate-secret"
+        return _webhook(_json(self._call("POST", path, retry=False)))
+
+    def enable_webhook(self, fs_id: str, webhook_id: str) -> Webhook:
+        path = self._webhook_path(fs_id, webhook_id) + ":enable"
+        return _webhook(_json(self._call("POST", path, retry=True)))
+
+    def _org_path(self, path: str) -> str:
+        if self._org_id is None:
+            me = _json(self._call("GET", "/api/v1/me", retry=True))
+            key: dict[str, Any] = me.get("api_key") or {}
+            org_id = key.get("org_id")
+            if not isinstance(org_id, str) or not org_id:
+                raise MountableError(
+                    None, "org_required", "pass org_id or set MOUNTABLE_ORG"
+                )
+            self._org_id = org_id
+        return f"/api/v1/orgs/{quote(self._org_id, safe='')}{path}"
+
+    def _fs_path(self, fs_id: str, path: str = "") -> str:
+        return self._org_path(f"/filesystems/{quote(fs_id, safe='')}{path}")
+
+    def _webhook_path(self, fs_id: str, webhook_id: str) -> str:
+        return self._fs_path(fs_id, f"/webhooks/{quote(webhook_id, safe='')}")
+
+    def _call(
+        self, method: str, path: str, *, retry: bool, **kwargs: Any
+    ) -> httpx.Response:
+        """Sends one call with the API key; a repeatable one is sent once more
+        after a network error."""
+        try:
+            response = self._send(method, path, self._api_key, **kwargs)
+        except MountableError:
+            if not retry:
+                raise
+            response = self._send(method, path, self._api_key, **kwargs)
+        if not response.is_success:
+            raise _api_error(response)
+        return response
 
     def _post_session(self, body: dict[str, Any]) -> dict[str, Any]:
         response = self._send(
@@ -420,6 +648,10 @@ def _parse_time(value: str) -> datetime:
     return parsed
 
 
+def _parse_optional_time(value: str | None) -> datetime | None:
+    return _parse_time(value) if value else None
+
+
 def _file_info(raw: dict[str, Any]) -> FileInfo:
     return FileInfo(
         path=raw["path"],
@@ -430,9 +662,39 @@ def _file_info(raw: dict[str, Any]) -> FileInfo:
     )
 
 
-def _json(response: httpx.Response) -> dict[str, Any]:
+def _filesystem_info(raw: dict[str, Any]) -> FilesystemInfo:
+    return FilesystemInfo(
+        id=raw["id"],
+        name=raw["name"],
+        byte_quota=raw["byte_quota"],
+        entry_quota=raw["entry_quota"],
+        spending_cap_cents=raw.get("spending_cap_cents"),
+        mutations_per_minute=raw.get("mutations_per_minute"),
+        created_at=_parse_time(raw["created_at"]),
+    )
+
+
+def _webhook(raw: dict[str, Any]) -> Webhook:
+    return Webhook(
+        id=raw["id"],
+        filesystem_id=raw["filesystem_id"],
+        url=raw["url"],
+        path_prefix=raw["path_prefix"],
+        state=raw["state"],
+        disabled_reason=raw.get("disabled_reason"),
+        created_by=raw["created_by"],
+        created_at=_parse_time(raw["created_at"]),
+        last_success_at=_parse_optional_time(raw.get("last_success_at")),
+        last_failure_at=_parse_optional_time(raw.get("last_failure_at")),
+        last_failure=raw.get("last_failure"),
+        failing_since=_parse_optional_time(raw.get("failing_since")),
+        secret=raw.get("secret"),
+    )
+
+
+def _json(response: httpx.Response) -> Any:
     try:
-        return cast(dict[str, Any], response.json())
+        return response.json()
     except ValueError:
         raise MountableError(
             response.status_code, "api_error", "the API's answer is not JSON"
