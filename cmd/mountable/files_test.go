@@ -319,9 +319,13 @@ func TestFilesChanges(t *testing.T) {
 	if uri := api.last().uri; uri != filesPrefix+"/changes?cursor=41&wait=0" {
 		t.Fatalf("uri = %q", uri)
 	}
+	// Without a cursor, wait is sent only when given.
+	runFiles(t, "files", "changes", "fsone", "--wait", "0")
+	if uri := api.last().uri; uri != filesPrefix+"/changes?wait=0" {
+		t.Fatalf("uri = %q", uri)
+	}
 	calls := len(api.called())
 	for _, args := range [][]string{
-		{"files", "changes", "fsone", "--wait", "5"},
 		{"files", "changes", "fsone", "--cursor", "41", "--wait", "-1"},
 		{"files", "changes"},
 	} {

@@ -178,12 +178,12 @@ func (c *client) listSessions(ctx context.Context, fsID string) (json.RawMessage
 	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/mount-sessions", nil)
 }
 
-// createWebhook sends path_prefix only when one is given. The answer
-// carries the signing secret, once.
-func (c *client) createWebhook(ctx context.Context, fsID, hookURL, pathPrefix string) (json.RawMessage, error) {
+// createWebhook sends path_prefix only when one is given (nil leaves it to
+// the API's default, /). The answer carries the signing secret, once.
+func (c *client) createWebhook(ctx context.Context, fsID, hookURL string, pathPrefix *string) (json.RawMessage, error) {
 	body := map[string]string{"url": hookURL}
-	if pathPrefix != "" {
-		body["path_prefix"] = pathPrefix
+	if pathPrefix != nil {
+		body["path_prefix"] = *pathPrefix
 	}
 	return c.inOrg(ctx, "POST", "/filesystems/"+url.PathEscape(fsID)+"/webhooks", body)
 }

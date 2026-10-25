@@ -434,7 +434,12 @@ func webhooksCreate(o *output, args []string) error {
 	f := newFlags("webhooks create FS_ID URL [--path-prefix PREFIX] [--org ORG_ID]")
 	prefix := f.String("path-prefix", "", "only changes under this path")
 	return apiCommandFlags(f, args, 2, true, func(ctx context.Context, c *client, args []string) error {
-		raw, err := c.createWebhook(ctx, args[0], args[1], *prefix)
+		// A prefix given empty is sent, and the API refuses it.
+		var pathPrefix *string
+		if f.given()["path-prefix"] {
+			pathPrefix = prefix
+		}
+		raw, err := c.createWebhook(ctx, args[0], args[1], pathPrefix)
 		if err != nil {
 			return err
 		}

@@ -1023,6 +1023,11 @@ func TestWebhookCommands(t *testing.T) {
 	if _, sent := api.json[1]["path_prefix"]; sent {
 		t.Errorf("sent path_prefix without --path-prefix: %v", api.json[1])
 	}
+	// A prefix given empty is sent as it is; the API decides.
+	r = runCLI(t, "webhooks", "create", "fsone", "https://example.com/hooks", "--path-prefix", "", "--json")
+	if prefix, sent := api.json[2]["path_prefix"]; r.code != 0 || !sent || prefix != "" {
+		t.Errorf("--path-prefix '' sent %v", api.json[2])
+	}
 
 	r = runCLI(t, "webhooks", "rotate-secret", "fsone", "wh1")
 	if r.code != 0 || r.stdout != webhookSecret+"\n" || !strings.Contains(r.stderr, "wh1") || strings.Contains(r.stderr, "whsec") {

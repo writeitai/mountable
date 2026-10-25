@@ -242,7 +242,7 @@ func filesList(o *output, args []string) error {
 
 // filesChanges asks for changes once. Without --cursor the API answers at
 // once with the current cursor; with one, it waits up to --wait seconds
-// (default 25) for a change.
+// (default 25) for a change. wait is sent with a cursor, or when given.
 func filesChanges(o *output, args []string) error {
 	f := newFlags(filesChangesUsage)
 	cursor := f.String("cursor", "", "the cursor of the last changes seen")
@@ -252,14 +252,12 @@ func filesChanges(o *output, args []string) error {
 		return err
 	}
 	given := f.given()
-	if given["wait"] && !given["cursor"] {
-		// Without a cursor the API does not wait.
-		return usageError(filesChangesUsage)
-	}
 	query := url.Values{}
-	var waited time.Duration
 	if given["cursor"] {
 		query.Set("cursor", *cursor)
+	}
+	var waited time.Duration
+	if given["cursor"] || given["wait"] {
 		query.Set("wait", strconv.FormatUint(*wait, 10))
 		waited = time.Duration(*wait) * time.Second
 	}
