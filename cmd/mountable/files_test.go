@@ -455,3 +455,27 @@ func TestFilesUsageErrors(t *testing.T) {
 		t.Fatalf("usage errors called the API: %v", calls)
 	}
 }
+
+// An --if-match given empty (an unset variable) is a usage error, not an
+// unconditional write or delete.
+func TestFilesEmptyIfMatch(t *testing.T) {
+	useAPIKey(t)
+	api := newFilesAPI(t, nil)
+	for _, args := range [][]string{
+		{"files", "write", "fsone", "a", "--if-match", ""},
+		{"files", "write", "fsone", "a", "--if-match="},
+		{"files", "delete", "fsone", "a", "--if-match", ""},
+	} {
+		r := runFiles(t, args...)
+		if r.code != 2 || r.stdout != "" || !strings.Contains(r.stderr, "--if-match needs an ETag") {
+			t.Errorf("%v = %d %q %q", args, r.code, r.stdout, r.stderr)
+		}
+		r = runFiles(t, append(args, "--json")...)
+		if e := jsonError(t, r); r.code != 2 || e.Code != "usage" {
+			t.Errorf("%v --json = %d %+v", args, r.code, e)
+		}
+	}
+	if calls := api.called(); len(calls) != 0 {
+		t.Fatalf("an empty --if-match called the API: %v", calls)
+	}
+}

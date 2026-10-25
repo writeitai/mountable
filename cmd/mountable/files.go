@@ -50,6 +50,9 @@ func filesWrite(o *output, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkIfMatch(f, *ifMatch); err != nil {
+		return err
+	}
 	path, err := filePath(positional[1])
 	if err != nil {
 		return err
@@ -156,6 +159,9 @@ func filesDelete(o *output, args []string) error {
 	ifMatch := f.String("if-match", "", "delete only if the file's ETag is this")
 	positional, err := f.parse(args, 2)
 	if err != nil {
+		return err
+	}
+	if err := checkIfMatch(f, *ifMatch); err != nil {
 		return err
 	}
 	path, err := filePath(positional[1])
@@ -431,6 +437,17 @@ func queryString(query url.Values) string {
 		return ""
 	}
 	return "?" + query.Encode()
+}
+
+// checkIfMatch refuses an --if-match given empty (say, from an unset
+// variable), which would otherwise make the call unconditional.
+func checkIfMatch(f *flags, etag string) error {
+	if etag != "" || !f.given()["if-match"] {
+		return nil
+	}
+	e := usageError(f.usage)
+	e.Message = "--if-match needs an ETag; leave the flag out for an unconditional call"
+	return e
 }
 
 // quoteETag quotes an ETag unless it already is (or is weak).
