@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mountable": {
+      "command": "npx",
+      "args": ["-y", "mountable-cli@0.8.0", "mcp"],
+      "env": {
+        "MOUNTABLE_API_KEY": "REPLACE_WITH_YOUR_KEY"
+      }
+    }
+  }
+}
