@@ -1,0 +1,11 @@
+{
+  "name": "mountable.io",
+  "description": "Manage persistent AI-agent filesystems, inspect usage and create mount tickets with mountable.io.",
+  "homepage": "https://mountable.io/docs/cursor",
+  "license": "Apache-2.0",
+  "keywords": ["filesystem", "storage", "agents", "mcp"],
+  "author": {
+    "name": "mountable.io",
+    "url": "https://mountable.io"
+  }
+}
