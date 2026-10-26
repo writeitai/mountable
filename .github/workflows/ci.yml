@@ -111,6 +111,12 @@ jobs:
           uv run --locked --python 3.12 ruff format --check .
           uv run --locked --python 3.12 ruff check .
           uv run --locked --python 3.12 pytest -q
+      - name: Claude handoff tools keep the filesystem and note backend-selected
+        working-directory: examples/claude-workspace
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
