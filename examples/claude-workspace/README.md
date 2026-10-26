@@ -10,7 +10,7 @@ We maintain this community example for mountable.io.
 - Python 3.11+, uv, Node.js/npm, and Claude Code.
 - An existing mountable.io account with a saved payment method, a filesystem,
   and an API key granted access to it. File operations use the normal
-  [usage prices](https://mountable.io/docs/billing). This example creates no
+  [usage prices](https://mountable.io/docs/billing?utm_source=trending-ecosystem-integrations&utm_medium=other&utm_content=claude-01-workspace-example). This example creates no
   account, free allowance or credits.
 - Your own Anthropic API credentials, following
   [Anthropic's setup](https://code.claude.com/docs/en/agent-sdk/quickstart).
@@ -75,11 +75,11 @@ untrusted data, and never store credentials in it.
 ## MCP and skills in interactive Claude Code
 
 For interactive filesystem/session management, use the
-[existing MCP setup](https://mountable.io/docs/mcp). MCP manages the
+[existing MCP setup](https://mountable.io/docs/mcp?utm_source=trending-ecosystem-integrations&utm_medium=other&utm_content=claude-01-workspace-example). MCP manages the
 filesystem; file contents in this example use the CLI and SDK.
 The skill explains both mount and Files API workflows. For agents that
 need ordinary local file operations, follow the
-[mount guide](https://mountable.io/docs/sandbox).
+[mount guide](https://mountable.io/docs/sandbox?utm_source=trending-ecosystem-integrations&utm_medium=other&utm_content=claude-01-workspace-example).
 
 ## Offline verification
 
