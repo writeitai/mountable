@@ -338,6 +338,11 @@ AI tools for persistent Markdown notes and a paginated Mem0 record export.
 Both use the Files API through the SDK. Their offline tests exercise the real
 frameworks and SDKs without paid cloud or model calls.
 
+[`examples/langgraph-workspace`](examples/langgraph-workspace) has a LangGraph
+write node and a read node on one mountable.io filesystem. A later process
+reads the same note with a new in-memory checkpoint. The guide is
+<https://mountable.io/docs/langgraph>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
