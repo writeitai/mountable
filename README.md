@@ -265,6 +265,12 @@ the environment the MCP client starts in, or set in the client's MCP
 configuration under `env`. Never pass the key as a command-line argument,
 where it would end up in process listings and shell history.
 
+Root [`mcp.json`](mcp.json) is the public manifest Cursor Directory reads.
+It pins the verified CLI and uses the placeholder `REPLACE_WITH_YOUR_KEY`.
+Replace that placeholder in your private editor config. Do not commit a real key.
+[`.cursor-plugin/plugin.json`](.cursor-plugin/plugin.json) supplies the
+directory listing name mountable.io and the guide URL.
+
 **Claude Code** (`.mcp.json` in the project; `${MOUNTABLE_API_KEY}` is taken
 from the environment Claude Code runs in, so the key stays out of the file):
 
