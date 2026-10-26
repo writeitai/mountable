@@ -51,9 +51,9 @@ def read_note(fs=None) -> str:
 def build_app():
     import gradio as gr
 
-    with gr.Blocks(title="mountable.io: a folder that survives restarts") as demo:
+    with gr.Blocks(title="mountable.io: a filesystem that survives restarts") as demo:
         gr.Markdown(
-            "# A folder that survives restarts\n\n"
+            "# A filesystem that survives restarts\n\n"
             "[mountable.io](https://mountable.io) is a persistent filesystem "
             "for AI agents. This Space writes a note to mountable.io, not to "
             "its own disk. Restart the Space and the note is still here."

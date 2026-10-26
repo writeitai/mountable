@@ -1,5 +1,5 @@
 ---
-title: mountable.io — a folder that survives restarts
+title: mountable.io — a filesystem that survives restarts
 emoji: 📁
 colorFrom: blue
 colorTo: green
@@ -8,7 +8,7 @@ app_file: app.py
 pinned: false
 ---
 
-# A folder that survives restarts
+# A filesystem that survives restarts
 
 [mountable.io](https://mountable.io) is a persistent filesystem for AI agents.
 This Space writes a note to mountable.io, not to its own disk. Restart the
@@ -21,8 +21,8 @@ service is paid. The example and client are open source.
 
 `app.py` saves the note with the Python SDK (`mountable-sdk`) to
 `demo/agent-note.txt` in one mountable.io filesystem. On every load it reads
-that file back. The Space container can restart or be replaced; the file
-stays in mountable.io.
+that file back. The Space container can restart or be replaced.
+The file stays in mountable.io.
 
 ## Space secrets (owner only)
 
@@ -45,4 +45,4 @@ normal [usage prices](https://mountable.io/docs/billing).
 python3 -m unittest test_space -v
 ```
 
-The test uses a fake filesystem. Nothing reaches mountable.io.
+The test uses a fake filesystem.
