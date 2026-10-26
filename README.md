@@ -348,6 +348,11 @@ and reader on one mountable.io filesystem. The writer answers `stored`, and
 the reader reads the file. A later process reads the same note. The guide is
 <https://mountable.io/docs/crewai>.
 
+[`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
+screenshot and a Playwright trace of a local fixture, uploads the closed
+files with the TypeScript SDK, and has a later process check the same bytes.
+The guide is <https://mountable.io/docs/playwright>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox

@@ -159,3 +159,22 @@ jobs:
           node-version: 18
       - name: The built package on the oldest supported Node
         run: node test/smoke.mjs
+
+  playwright-artifacts:
+    name: Playwright artifact example
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: examples/playwright-artifacts
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
