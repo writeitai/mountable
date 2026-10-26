@@ -156,6 +156,13 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm pack --dry-run
+      - name: AI SDK file tools and minimal Next.js app
+        working-directory: examples/vercel-ai-workspace
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
       - uses: actions/setup-node@v5
         with:
           node-version: 18
