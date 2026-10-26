@@ -343,6 +343,11 @@ write node and a read node on one mountable.io filesystem. A later process
 reads the same note with a new in-memory checkpoint. The guide is
 <https://mountable.io/docs/langgraph>.
 
+[`examples/crewai-workspace`](examples/crewai-workspace) has a CrewAI writer
+and reader on one mountable.io filesystem. The writer answers `stored`, and
+the reader reads the file. A later process reads the same note. The guide is
+<https://mountable.io/docs/crewai>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
