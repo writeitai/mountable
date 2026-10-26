@@ -46,6 +46,8 @@ jobs:
         run: python3 examples/research-showcases/multi-agent-harness/test_harness.py
       - name: Mac/Linux handoff takes turns, refuses reuse and times out on wrong bytes
         run: python3 -m unittest discover -s examples/mac-linux-handoff -p 'test_*.py'
+      - name: Slack file webhook verifies signatures and posts once
+        run: python3 -m unittest discover -s examples/slack-file-webhook -p 'test_*.py'
       - name: THIRD_PARTY_NOTICES matches the module graph
         run: |
           go run ./tools/notices > THIRD_PARTY_NOTICES
