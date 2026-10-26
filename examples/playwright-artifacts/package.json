@@ -1,0 +1,15 @@
+{
+  "name": "mountable-playwright-artifacts",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mountable-sdk": "0.3.0",
+    "playwright": "1.64.1"
+  },
+  "scripts": {
+    "test": "node --test test/artifacts.test.mjs"
+  }
+}
