@@ -117,6 +117,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: OpenAI Agents tools bind files to the backend-selected user
+        working-directory: examples/openai-agents
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
