@@ -359,6 +359,10 @@ screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
 The guide is <https://mountable.io/docs/playwright>.
 
+[`examples/slack-file-webhook`](examples/slack-file-webhook) checks a signed
+`files.changed` webhook and posts the path to a Slack incoming webhook. The
+guide is <https://mountable.io/docs/slack-file-webhook>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
