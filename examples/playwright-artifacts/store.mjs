@@ -56,7 +56,7 @@ export function assertClosedArtifacts(files) {
   assertTraceZip(files.trace);
 }
 
-function assertTraceZip(bytes) {
+export function assertTraceZip(bytes) {
   if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
     throw new RecipeError(
       "bad_trace",
