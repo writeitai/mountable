@@ -432,6 +432,11 @@ batch only after its upload reads back with the right checksum, so a fresh
 process resumes without redoing or duplicating a batch. Its offline tests
 need no credentials.
 
+[`examples/dspy-evaluation`](examples/dspy-evaluation) saves a tiny model-free
+DSPy evaluation as checked JSON files. A fresh process verifies the bundle
+and recomputes the same fixture score. The guide is
+<https://mountable.io/docs/dspy>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
