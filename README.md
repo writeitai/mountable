@@ -416,6 +416,11 @@ materializes a tiny local Dagster asset, uploads the closed JSON report, and
 has a fresh process check the run id, asset key, row count and checksums.
 The guide is <https://mountable.io/docs/dagster>.
 
+[`examples/airflow-task-report`](examples/airflow-task-report) runs an
+Airflow TaskFlow DAG that uploads a closed report and passes only an id
+through XCom. A fresh process checks the same bytes. The guide is
+<https://mountable.io/docs/airflow>.
+
 [`examples/csv-parquet-batches`](examples/csv-parquet-batches) commits small
 CSV-to-Parquet batches one at a time through the SDK. A manifest records a
 batch only after its upload reads back with the right checksum, so a fresh
