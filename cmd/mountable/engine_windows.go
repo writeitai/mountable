@@ -204,9 +204,11 @@ func (e *engine) abort() error {
 	}
 }
 
-// closing refuses every open from now on, then commits every file still
-// open for writing, and returns how many there were. A failed commit is
-// the error: the clean unmount then turns into an abort.
+// closing refuses every open from now on (for good: an unmount that fails
+// after it turns into an abort), then commits every file still open for
+// writing, and returns how many there were. A failed commit is the error:
+// the clean unmount then turns into an abort. A file released meanwhile
+// was committed by its release.
 func (p *privateFS) closing() (int, error) {
 	p.mu.Lock()
 	p.isClosing = true
@@ -218,7 +220,11 @@ func (p *privateFS) closing() (int, error) {
 	}
 	p.mu.Unlock()
 	for _, fh := range writers {
-		if errc := p.FileSystemInterface.Fsync("", false, fh); errc != 0 {
+		errc := p.FileSystemInterface.Fsync("", false, fh)
+		if errc == -cgofuse.ENOENT || errc != 0 && !p.isOpen(fh) {
+			continue // released meanwhile, and committed there
+		}
+		if errc != 0 {
 			return len(writers), fmt.Errorf("committing a file open for writing: %v", cgofuse.Error(errc))
 		}
 	}
@@ -274,6 +280,13 @@ const noHandle = ^uint64(0)
 // writes reports whether open flags ask for writing.
 func writes(flags int) bool {
 	return flags&cgofuse.O_ACCMODE != cgofuse.O_RDONLY || flags&(cgofuse.O_TRUNC|cgofuse.O_APPEND) != 0
+}
+
+// isOpen reports whether fh has opens not yet released.
+func (p *privateFS) isOpen(fh uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.handles[fh] != nil
 }
 
 // admit refuses an open once a clean unmount has begun.

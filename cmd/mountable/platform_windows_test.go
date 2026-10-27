@@ -365,6 +365,28 @@ func TestPrivateFS(t *testing.T) {
 	}
 }
 
+// releasingFS releases the file its fsync is asked for first, as a
+// program closing it during a clean unmount does.
+type releasingFS struct {
+	fakeFS
+	p *privateFS
+}
+
+func (f *releasingFS) Fsync(path string, datasync bool, fh uint64) int {
+	f.p.Release(path, fh)
+	return -cgofuse.ENOENT // the engine no longer has the handle
+}
+
+func TestClosingSkipsFilesReleasedMeanwhile(t *testing.T) {
+	inner := &releasingFS{}
+	p := newPrivateFS(inner, false, make(chan struct{}))
+	inner.p = p
+	p.Open("/w", cgofuse.O_WRONLY)
+	if n, err := p.closing(); n != 1 || err != nil {
+		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, err)
+	}
+}
+
 func TestReadOnlyRefusesWriteOpens(t *testing.T) {
 	inner := &fakeFS{}
 	p := newPrivateFS(inner, true, make(chan struct{}))
