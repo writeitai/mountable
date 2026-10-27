@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // credentials are kept in an owner-only file.
@@ -63,13 +61,7 @@ func withCredentials(fn func() error) error {
 		return err
 	}
 	defer lock.Close() // closing releases the lock
-	for {
-		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX)
-		if err != unix.EINTR {
-			break
-		}
-	}
-	if err != nil {
+	if err := lockFile(lock); err != nil {
 		return fmt.Errorf("locking %s: %w", lock.Name(), err)
 	}
 	return fn()

@@ -23,7 +23,6 @@ import (
 
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
-	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
 
@@ -94,9 +93,9 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 
 // mount mounts until the mount ends. With --json it writes the events
 // "mounted" and "unmounted" as JSON lines.
-func mount(o *output, ticket, dir string) error {
+func mount(o *output, ticket, dir string) (err error) {
 	defer flushEngineLog()
-	dir, err := canonicalDir(dir)
+	dir, err = canonicalDir(dir)
 	if err != nil {
 		return err
 	}
@@ -105,13 +104,20 @@ func mount(o *output, ticket, dir string) error {
 	if err := prepareMountPoint(dir); err != nil {
 		return err
 	}
-	if err := withTimeout(helperTimeout, func() error { return isDirectory(dir) }); err != nil {
-		return &cliError{Code: "mount_failed", Message: fmt.Sprintf("mount directory %s: %v", dir, err), Hint: "create it first: mkdir -p " + dir}
+	if err := checkMountDir(dir); err != nil {
+		return err
 	}
 	// Signals are ours from here on, including while the mount starts.
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
+	// Where `mountable unmount` reaches this mount, if it needs a way to
+	// (Windows); a request arrives as a signal.
+	finishControl, err := serveControl(dir, signals)
+	if err != nil {
+		return err
+	}
+	defer func() { finishControl(err) }()
 
 	// Caches live in a private directory removed on exit.
 	cacheDir, release, err := mountCacheDir()
@@ -161,7 +167,7 @@ func mount(o *output, ticket, dir string) error {
 			mode = "ro"
 		}
 		if err := o.emit(map[string]string{
-			"event": "mounted", "path": e.dir, "filesystem_id": path.Base(session.root), "mode": mode,
+			"event": "mounted", "path": mountedPath(e.dir), "filesystem_id": path.Base(session.root), "mode": mode,
 		}); err != nil {
 			note(o.stderr, "writing the mounted event: %v", err)
 		}
@@ -274,6 +280,15 @@ func untilSignal(signals <-chan os.Signal, fn func(ctx context.Context) error) (
 	}
 }
 
+// checkMountDirectory checks that dir is a directory, bounded: dir may be a
+// stale mount.
+func checkMountDirectory(dir string) error {
+	if err := withTimeout(helperTimeout, func() error { return isDirectory(dir) }); err != nil {
+		return &cliError{Code: "mount_failed", Message: fmt.Sprintf("mount directory %s: %v", dir, err), Hint: "create it first: mkdir -p " + dir}
+	}
+	return nil
+}
+
 func isDirectory(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -326,7 +341,7 @@ func mountCacheDir() (string, func(), error) {
 		return unmarked() // no root lock to be had: nothing is pruned
 	}
 	defer root.Close()
-	if flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+	if tryLock(root) != nil {
 		return unmarked() // another mount is creating or pruning, or no flock
 	}
 	pruneCacheDirs(base)
@@ -339,7 +354,7 @@ func mountCacheDir() (string, func(), error) {
 		os.RemoveAll(dir)
 		return "", nil, err
 	}
-	if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+	if tryLock(lock) != nil {
 		lock.Close()
 		os.Remove(lock.Name()) // left unmarked: never pruned
 		return dir, func() {}, nil
@@ -353,8 +368,8 @@ func mountCacheDir() (string, func(), error) {
 // its process.
 const cacheLockName = "lock"
 
-// flock is unix.Flock, replaceable in tests.
-var flock = unix.Flock
+// tryLock is tryLockFile, replaceable in tests.
+var tryLock = tryLockFile
 
 // pruneCacheDirs removes the marked cache directories in base whose lock
 // is free. The caller holds the root's lock. A directory with no lock file
@@ -374,7 +389,7 @@ func pruneCacheDirs(base string) {
 		if err != nil {
 			continue
 		}
-		if flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) == nil && namesFile(lock) {
+		if tryLock(lock) == nil && namesFile(lock) {
 			os.RemoveAll(dir)
 		}
 		lock.Close()

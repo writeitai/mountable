@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // The first poll's connection is dropped mid-request, the second is still
@@ -294,7 +292,7 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := unix.Flock(int(other.Fd()), unix.LOCK_EX); err != nil {
+	if err := lockFile(other); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -306,7 +304,7 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 		t.Fatal("saved while another holder had the lock")
 	case <-time.After(200 * time.Millisecond):
 	}
-	if err := unix.Flock(int(other.Fd()), unix.LOCK_UN); err != nil {
+	if err := unlockFile(other); err != nil {
 		t.Fatal(err)
 	}
 	select {

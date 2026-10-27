@@ -15,9 +15,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/user"
 	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
@@ -56,6 +54,14 @@ type mountConfig struct {
 	cacheDir string
 }
 
+// owner is who the mount shows as the owner of the mount point, and the
+// local ids the filesystem owner's are mapped to.
+type owner struct {
+	uid, gid           uint32 // the mount point's
+	localUID, localGID int    // the local user's
+	ctime              time.Time
+}
+
 // startEngine mounts. Every step that talks to the gateway runs before the
 // mount is attached and ends with ctx or startupTimeout, even where the
 // engine's own calls ignore their context; once attached, a failure or
@@ -81,23 +87,12 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	}
 
 	dir := c.dir
-	info, err := os.Stat(dir)
+	owner, err := mountOwner(dir)
 	if err != nil {
 		return nil, err
 	}
-	uid, gid := util.GetFileUidGid(info)
-	if uid == 0 {
-		if u, err := user.Current(); err == nil {
-			if id, err := strconv.ParseUint(u.Uid, 10, 32); err == nil {
-				uid = uint32(id)
-			}
-			if id, err := strconv.ParseUint(u.Gid, 10, 32); err == nil {
-				gid = uint32(id)
-			}
-		}
-	}
 	mapper, err := meta_cache.NewUidGidMapper(
-		fmt.Sprintf("%d:%d", os.Getuid(), ownerID), fmt.Sprintf("%d:%d", os.Getgid(), ownerID))
+		fmt.Sprintf("%d:%d", owner.localUID, ownerID), fmt.Sprintf("%d:%d", owner.localGID, ownerID))
 	if err != nil {
 		return nil, err
 	}
@@ -116,10 +111,10 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		CacheDirForWrite:      c.cacheDir,
 		CacheMetaTTlSec:       60,
 		CacheDirMaxEntries:    100000,
-		MountUid:              uid,
-		MountGid:              gid,
+		MountUid:              owner.uid,
+		MountGid:              owner.gid,
 		MountMode:             os.ModeDir | 0o777&^umask,
-		MountCtime:            info.ModTime(),
+		MountCtime:            owner.ctime,
 		MountMtime:            time.Now(),
 		Umask:                 umask,
 		VolumeServerAccess:    "filerProxy",

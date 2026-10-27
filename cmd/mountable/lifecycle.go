@@ -3,7 +3,6 @@ package main
 // What ends a mount, and how the mount ends for each.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -193,18 +192,4 @@ func reason(ev event) string {
 		return "the mount session expired"
 	}
 	return "the mount session was revoked"
-}
-
-// abortMount aborts the connection behind dir, then detaches dir. An error
-// means the connection was not aborted (a lazy detach alone leaves open
-// files working) or dir was not detached.
-func abortMount(dir string) error {
-	var errs []error
-	if err := abortConnection(dir); err != nil {
-		errs = append(errs, err)
-	}
-	if err := detach(dir); err != nil {
-		errs = append(errs, fmt.Errorf("detaching: %w", err))
-	}
-	return errors.Join(errs...)
 }

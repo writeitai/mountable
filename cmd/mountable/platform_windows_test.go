@@ -1,0 +1,345 @@
+package main
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	cgofuse "github.com/winfsp/cgofuse/fuse"
+	"golang.org/x/sys/windows"
+)
+
+func TestDriveLetter(t *testing.T) {
+	for in, want := range map[string]string{"x:": "X:", `X:\`: "X:", "z:/": "Z:"} {
+		if got, ok := driveLetter(in); !ok || got != want {
+			t.Errorf("driveLetter(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "x", `x:\dir`, "1:", `\\server\share`, "xy:"} {
+		if got, ok := driveLetter(in); ok {
+			t.Errorf("driveLetter(%q) = %q, want none", in, got)
+		}
+	}
+	if got, err := canonicalDir("q:"); err != nil || got != "Q:" {
+		t.Errorf("canonicalDir(q:) = %q, %v", got, err)
+	}
+}
+
+func TestCheckMountDir(t *testing.T) {
+	base := t.TempDir()
+	if err := checkMountDir(filepath.Join(base, "new")); err != nil {
+		t.Errorf("a directory that does not exist yet: %v", err)
+	}
+	if err := checkMountDir(base); err == nil {
+		t.Error("an existing directory was accepted")
+	}
+	if err := checkMountDir(filepath.Join(base, "missing", "new")); err == nil {
+		t.Error("a missing parent was accepted")
+	}
+	if err := checkMountDir(`\\server\share`); err == nil {
+		t.Error("a network name was accepted")
+	}
+	system, _ := driveLetter(os.Getenv("SystemDrive"))
+	if err := checkMountDir(system); err == nil {
+		t.Errorf("the system drive %s was accepted", system)
+	}
+}
+
+func TestCheckPrivate(t *testing.T) {
+	dir := t.TempDir() // under %LOCALAPPDATA%\Temp, so it inherits a private access list
+	if err := checkPrivate(dir); err != nil {
+		t.Fatalf("a fresh temporary directory: %v", err)
+	}
+	open := filepath.Join(dir, "open")
+	if err := os.Mkdir(open, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("icacls", open, "/grant", "*S-1-1-0:(R)").CombinedOutput(); err != nil {
+		t.Fatalf("icacls: %v: %s", err, out)
+	}
+	if err := checkPrivate(open); err == nil {
+		t.Error("a directory everyone can read was accepted")
+	}
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkPrivate(file); err == nil {
+		t.Error("a file was accepted")
+	}
+}
+
+func TestLockFileIsPerOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	a, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := tryLockFile(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := tryLockFile(b); err == nil {
+		t.Fatal("a second open took a held lock")
+	}
+	if err := unlockFile(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := tryLockFile(b); err != nil {
+		t.Fatalf("after unlocking: %v", err)
+	}
+	b.Close()
+	if err := lockFile(a); err != nil {
+		t.Fatalf("after the holder closed: %v", err)
+	}
+}
+
+func TestControlSocket(t *testing.T) {
+	t.Setenv("LocalAppData", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "mnt")
+	signals := make(chan os.Signal, 2)
+	finish, err := serveControl(dir, signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serveControl(dir, make(chan os.Signal, 2)); err == nil {
+		t.Fatal("a second mount at the same mount point was accepted")
+	}
+	// Windows names are case-insensitive; the peer is this process.
+	m, err := connectMount(strings.ToUpper(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := windows.GetProcessId(m.process); err != nil || int(pid) != os.Getpid() {
+		t.Fatalf("the peer process is %d (%v), want %d", pid, err, os.Getpid())
+	}
+	m.close()
+	answered := make(chan error, 1)
+	go func() { answered <- cleanUnmount(dir) }()
+	select {
+	case <-signals:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unmount did not arrive as a signal")
+	}
+	select {
+	case err := <-answered:
+		t.Fatalf("answered before the mount ended: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	finish(nil)
+	if err := <-answered; err != nil {
+		t.Fatalf("unmount: %v", err)
+	}
+	if _, err := connectMount(dir); !notMounted(err) {
+		t.Fatalf("after the mount ended: %v, want not mounted", err)
+	}
+}
+
+func TestControlSocketReportsAFailedEnd(t *testing.T) {
+	t.Setenv("LocalAppData", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "mnt")
+	signals := make(chan os.Signal, 2)
+	finish, err := serveControl(dir, signals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := make(chan error, 1)
+	go func() { answered <- abortMount(dir) }()
+	for range 2 {
+		select {
+		case <-signals:
+		case <-time.After(5 * time.Second):
+			t.Fatal("abort did not arrive as two signals")
+		}
+	}
+	finish(errors.New("aborted"))
+	if err := <-answered; err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+}
+
+func TestStaleControlSocketIsNotMounted(t *testing.T) {
+	t.Setenv("LocalAppData", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "mnt")
+	path, err := controlPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil { // left by a killed mount
+		t.Fatal(err)
+	}
+	if err := cleanUnmount(dir); !notMounted(err) {
+		t.Fatalf("cleanUnmount: %v, want not mounted", err)
+	}
+	finish, err := serveControl(dir, make(chan os.Signal, 2))
+	if err != nil {
+		t.Fatalf("mounting over a stale socket: %v", err)
+	}
+	finish(nil)
+}
+
+// fakeFS records what reaches the adapter.
+type fakeFS struct {
+	cgofuse.FileSystemBase
+	mode    uint32
+	chmoded uint32
+	created uint32
+	made    uint32
+	calls   int
+}
+
+func (f *fakeFS) Getattr(path string, stat *cgofuse.Stat_t, fh uint64) int {
+	f.calls++
+	stat.Mode = f.mode
+	return 0
+}
+
+func (f *fakeFS) Chmod(path string, mode uint32) int {
+	f.calls++
+	f.chmoded = mode
+	return 0
+}
+
+func (f *fakeFS) Create(path string, flags int, mode uint32) (int, uint64) {
+	f.calls++
+	f.created = mode
+	return 0, 7
+}
+
+func (f *fakeFS) Mkdir(path string, mode uint32) int {
+	f.calls++
+	f.made = mode
+	return 0
+}
+
+// Open hands every open of a file the same handle, as the engine does.
+func (f *fakeFS) Open(path string, flags int) (int, uint64) {
+	f.calls++
+	return 0, 9
+}
+
+func (f *fakeFS) Release(path string, fh uint64) int {
+	f.calls++
+	return 0
+}
+
+func TestPrivateFS(t *testing.T) {
+	inner := &fakeFS{mode: cgofuse.S_IFREG | 0o4755}
+	p := newPrivateFS(inner, false, make(chan struct{}))
+	if p.Chmod("/f", 0o600); inner.chmoded != 0o4655 {
+		t.Errorf("Chmod stored %o, want the owner's bits changed only (4655)", inner.chmoded)
+	}
+	if p.Create("/f", cgofuse.O_RDWR|cgofuse.O_CREAT, cgofuse.S_IFREG|0o700); inner.created != cgofuse.S_IFREG|0o644 {
+		t.Errorf("Create stored mode %o, want 100644", inner.created)
+	}
+	if p.Mkdir("/d", 0o700); inner.made != 0o755 {
+		t.Errorf("Mkdir stored mode %o, want 755", inner.made)
+	}
+	if n := p.openWriters(); n != 1 {
+		t.Errorf("after a create, %d open for writing, want 1", n)
+	}
+	p.Release("/f", 7)
+	// A read open and a write open of one file share a handle; it is open
+	// for writing until both are released.
+	p.Open("/g", cgofuse.O_RDONLY)
+	p.Open("/g", cgofuse.O_WRONLY)
+	p.Release("/g", 9)
+	if n := p.openWriters(); n != 1 {
+		t.Errorf("with one of two opens released, %d open for writing, want 1", n)
+	}
+	p.Release("/g", 9)
+	if n := p.openWriters(); n != 0 {
+		t.Errorf("all released, %d open for writing", n)
+	}
+	p.Init()
+	select {
+	case <-p.initialized:
+	default:
+		t.Error("Init did not report the mount")
+	}
+	p.end()
+	before := inner.calls
+	var stat cgofuse.Stat_t
+	if errc := p.Getattr("/f", &stat, noHandle); errc != -cgofuse.EIO {
+		t.Errorf("Getattr after the end: %d", errc)
+	}
+	if errc, _ := p.Open("/f", 0); errc != -cgofuse.EIO {
+		t.Errorf("Open after the end: %d", errc)
+	}
+	if errc := p.Release("/f", 1); errc != -cgofuse.EIO {
+		t.Errorf("Release after the end: %d", errc)
+	}
+	if inner.calls != before {
+		t.Error("an operation after the end reached the adapter")
+	}
+}
+
+func TestReadOnlyRefusesWriteOpens(t *testing.T) {
+	inner := &fakeFS{}
+	p := newPrivateFS(inner, true, make(chan struct{}))
+	for _, flags := range []int{cgofuse.O_WRONLY, cgofuse.O_RDWR, cgofuse.O_RDONLY | cgofuse.O_TRUNC, cgofuse.O_RDONLY | cgofuse.O_APPEND} {
+		if errc, _ := p.Open("/f", flags); errc != -cgofuse.EROFS {
+			t.Errorf("Open(%#x) = %d, want EROFS", flags, errc)
+		}
+	}
+	if errc, _ := p.Create("/f", cgofuse.O_RDWR|cgofuse.O_CREAT, 0o644); errc != -cgofuse.EROFS {
+		t.Errorf("Create = %d, want EROFS", errc)
+	}
+	if inner.calls != 0 {
+		t.Error("a write reached the adapter")
+	}
+	if errc, _ := p.Open("/f", cgofuse.O_RDONLY); errc != 0 {
+		t.Errorf("a read-only open: %d", errc)
+	}
+}
+
+func TestFileSecurity(t *testing.T) {
+	me, err := currentUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sddl := fileSecurity(me)
+	if want := "D:P(A;;FA;;;" + me.String() + ")(A;;FA;;;SY)"; sddl != want {
+		t.Fatalf("fileSecurity = %s, want %s", sddl, want)
+	}
+	if _, err := windows.SecurityDescriptorFromString(sddl); err != nil {
+		t.Fatalf("%s does not parse: %v", sddl, err)
+	}
+}
+
+func TestWinFspVersion(t *testing.T) {
+	for _, c := range []struct {
+		version [3]uint16
+		ok      bool
+	}{
+		{[3]uint16{2, 1, 25156}, false},
+		{[3]uint16{2, 2, 26215}, false},
+		{[3]uint16{2, 2, 26286}, true},
+		{[3]uint16{2, 3, 1}, true},
+		{[3]uint16{3, 0, 0}, true},
+	} {
+		if got := atLeast(c.version, minWinFsp); got != c.ok {
+			t.Errorf("atLeast(%v) = %v, want %v", c.version, got, c.ok)
+		}
+	}
+}
+
+// With WinFsp installed (CI installs it), it is found, checked and loaded
+// from its own directory.
+func TestLoadWinFsp(t *testing.T) {
+	if _, err := winfspInstallDir(); err != nil && os.Getenv("MOUNTABLE_TEST_WINFSP") == "" {
+		t.Skip("WinFsp is not installed:", err)
+	}
+	if err := findAndLoadWinFsp(); err != nil {
+		t.Fatal(err)
+	}
+}
