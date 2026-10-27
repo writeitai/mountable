@@ -199,6 +199,12 @@ jobs:
           uv run --locked --python 3.12 ruff format --check .
           uv run --locked --python 3.12 ruff check .
           uv run --locked --python 3.12 pytest -q
+      - name: DSPy evaluation bundles verify before accepting a score
+        working-directory: examples/dspy-evaluation
+        run: |
+          uv run --locked --python 3.12 ruff format --check .
+          uv run --locked --python 3.12 ruff check .
+          uv run --locked --python 3.12 pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
