@@ -139,6 +139,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: FastAPI returns a report after the API process restarts
+        working-directory: examples/fastapi-reports
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Git source history and generated output handoff
         working-directory: examples/git-and-output
         run: |

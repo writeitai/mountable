@@ -379,6 +379,11 @@ guide is <https://mountable.io/docs/slack-file-webhook>.
 local Git history and hands its generated report to a fresh read-only worker
 through the SDK. Its offline tests need no credentials.
 
+[`examples/fastapi-reports`](examples/fastapi-reports) generates a small
+report in a FastAPI process, uploads it, and returns it from a second
+process. The caller receives an id only after the upload succeeds. The guide
+is <https://mountable.io/docs/fastapi>.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
