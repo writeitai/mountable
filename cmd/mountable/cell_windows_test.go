@@ -357,7 +357,7 @@ func TestCellGit(t *testing.T) {
 // not through the volume's device path.
 func TestCellOtherUserIsRefused(t *testing.T) {
 	c := newCell(t)
-	user, password := "mqual"+randomHex(2), "Q1!"+randomHex(8)
+	user, password := "mqual"+randomHex(2), "Q1!"+randomHex(4) // net user asks before longer than 14
 	if out, err := exec.Command("net", "user", user, password, "/add").CombinedOutput(); err != nil {
 		t.Skipf("cannot create a local user: %v: %s", err, out)
 	}

@@ -160,19 +160,22 @@ jobs:
           go mod download github.com/seaweedfs/seaweedfs
           src=$(go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' github.com/seaweedfs/seaweedfs)
           (cd "$src" && go build -o "$RUNNER_TEMP/weed.exe" ./weed)
-      - name: Start a local cell
+      # One step: the runner ends a step's background processes with it.
+      - name: Qualification against a local cell
         run: |
           New-Item -ItemType Directory "$env:RUNNER_TEMP\cell" | Out-Null
-          Start-Process -FilePath "$env:RUNNER_TEMP\weed.exe" -WindowStyle Hidden `
+          $weed = Start-Process -PassThru -FilePath "$env:RUNNER_TEMP\weed.exe" -WindowStyle Hidden `
             -ArgumentList 'server', '-ip=127.0.0.1', "-dir=$env:RUNNER_TEMP\cell", '-filer', '-master.volumeSizeLimitMB=64', '-volume.max=16' `
             -RedirectStandardError "$env:RUNNER_TEMP\weed.log" -RedirectStandardOutput "$env:RUNNER_TEMP\weed.out"
-          for ($i = 0; $i -lt 90; $i++) {
-            try { Invoke-WebRequest http://127.0.0.1:8888/ -UseBasicParsing | Out-Null; exit 0 } catch { Start-Sleep 1 }
+          $ready = $false
+          for ($i = 0; $i -lt 90 -and -not $ready; $i++) {
+            try { Invoke-WebRequest http://127.0.0.1:8888/ -UseBasicParsing | Out-Null; $ready = $true } catch { Start-Sleep 1 }
           }
-          Get-Content "$env:RUNNER_TEMP\weed.log" -Tail 50
-          throw "the cell did not start"
-      - name: Qualification against the cell
-        run: go test ./cmd/mountable -run '^TestCell|^TestWinFsp' -count=1 -v
+          if (-not $ready) { Get-Content "$env:RUNNER_TEMP\weed.log" -Tail 50; throw "the cell did not start" }
+          go test ./cmd/mountable -run '^TestCell|^TestWinFsp' -count=1 -v
+          $code = $LASTEXITCODE
+          if ($weed.HasExited) { "the cell exited with $($weed.ExitCode)" }
+          exit $code
         env:
           MOUNTABLE_TEST_CELL: 127.0.0.1:8888
           MOUNTABLE_TEST_WINFSP: "1"
