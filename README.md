@@ -339,6 +339,10 @@ and the sandbox receives the one-time ticket on stdin. The guide is
 
 ## Framework and memory examples
 
+[`examples/llamaindex-snapshot`](examples/llamaindex-snapshot) saves a small
+LlamaIndex index as checked JSON files and loads it in a fresh process. Follow
+[the snapshot guide](https://mountable.io/docs/llamaindex).
+
 [`examples/external-integrations`](examples/external-integrations) has Pydantic
 AI tools for persistent Markdown notes and a paginated Mem0 record export.
 Both use the Files API through the SDK. Their offline tests exercise the real

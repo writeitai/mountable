@@ -139,6 +139,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: LlamaIndex closed snapshots verify before loading
+        working-directory: examples/llamaindex-snapshot
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
