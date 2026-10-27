@@ -382,6 +382,12 @@ through the validated tool-use stream, and reads the note in a fresh process
 without a model call. mountable.io maintains it separately from AWS and the
 Strands project. [Guide](https://mountable.io/docs/strands).
 
+[`examples/deno-note`](examples/deno-note) saves one note with the released
+`mountable-sdk` package inside Deno 2.9.8, then reads it from a fresh process.
+The script asks only for the API key, filesystem id, note path and
+`mountable.io`. mountable.io maintains it separately from Deno. It is a local
+Deno script, not Deno Deploy. [Guide](https://mountable.io/docs/deno).
+
 [`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
 screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
