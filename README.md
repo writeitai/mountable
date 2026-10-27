@@ -366,6 +366,11 @@ and `read_note` reads it from a later process. The example calls the
 framework's tool interface and does not call a model. The guide is
 <https://mountable.io/docs/smolagents>.
 
+[`examples/semantic-kernel-workspace`](examples/semantic-kernel-workspace) calls
+two native functions through `Kernel.invoke`, then reads the note in a fresh
+process without a model call. mountable.io maintains it separately from Microsoft.
+[Guide](https://mountable.io/docs/semantic-kernel).
+
 [`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
 screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
