@@ -59,8 +59,8 @@ they fail with `org_required`.
 Deleting a filesystem is done in the console.
 
 The API checks the limits' ranges: `--spending-cap-cents` 0 to 1,000,000,000
-(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 GiB to
-100 GiB, `--entry-quota` 10,000 to 1,000,000; the quotas cannot be removed.
+(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 byte
+to 100 GiB, `--entry-quota` 1 to 1,000,000; the quotas cannot be removed.
 `fs create` and `fs update` refuse an API key limited to one filesystem
 (`key_limited_to_filesystem`) and need the key's creator to be an owner or
 admin. `fs update` and every `webhooks` command need read-write access to the
