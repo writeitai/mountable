@@ -371,6 +371,12 @@ two native functions through `Kernel.invoke`, then reads the note in a fresh
 process without a model call. mountable.io maintains it separately from Microsoft.
 [Guide](https://mountable.io/docs/semantic-kernel).
 
+[`examples/strands-workspace`](examples/strands-workspace) binds two Strands
+`@tool` functions to a backend-chosen filesystem and path, invokes them
+through the validated tool-use stream, and reads the note in a fresh process
+without a model call. mountable.io maintains it separately from AWS and the
+Strands project. [Guide](https://mountable.io/docs/strands).
+
 [`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
 screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
