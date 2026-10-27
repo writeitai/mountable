@@ -108,7 +108,7 @@ func serviceContext() bool {
 // mount FS_ID DIR` creates a session, which a machine without WinFsp would
 // otherwise leave behind.
 func checkBeforeSession(dir string) error {
-	dir, err := canonicalDir(dir)
+	dir, err := canonicalPoint(dir)
 	if err != nil {
 		return err
 	}

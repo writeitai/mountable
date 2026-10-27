@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/signal"
@@ -98,7 +99,7 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 // "mounted" and "unmounted" as JSON lines.
 func mount(o *output, ticket, dir string) (err error) {
 	defer flushEngineLog()
-	dir, err = canonicalDir(dir)
+	dir, err = canonicalPoint(dir)
 	if err != nil {
 		return err
 	}
@@ -288,6 +289,18 @@ func untilSignal(signals <-chan os.Signal, fn func(ctx context.Context) error) (
 		cancel()
 		return true, <-result
 	}
+}
+
+// canonicalPoint is canonicalDir for a mount point, which says what to
+// create when a directory leading to it is missing.
+func canonicalPoint(given string) (string, error) {
+	dir, err := canonicalDir(given)
+	if errors.Is(err, fs.ErrNotExist) {
+		if checkErr := checkMountDir(given); checkErr != nil {
+			return "", checkErr
+		}
+	}
+	return dir, err
 }
 
 // checkMountDirectory checks that dir is a directory, bounded: dir may be a
