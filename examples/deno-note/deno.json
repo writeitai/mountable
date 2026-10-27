@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "@std/assert": "jsr:@std/assert@1.0.14",
+    "mountable-sdk": "npm:mountable-sdk@0.3.0"
+  },
+  "tasks": {
+    "write": "deno run --no-prompt --allow-env=MOUNTABLE_API_KEY,MOUNTABLE_FILESYSTEM_ID,MOUNTABLE_NOTE_PATH --allow-net=mountable.io main.ts write",
+    "read": "deno run --no-prompt --allow-env=MOUNTABLE_API_KEY,MOUNTABLE_FILESYSTEM_ID,MOUNTABLE_NOTE_PATH --allow-net=mountable.io main.ts read",
+    "cleanup": "deno run --no-prompt --allow-env=MOUNTABLE_API_KEY,MOUNTABLE_FILESYSTEM_ID,MOUNTABLE_NOTE_PATH --allow-net=mountable.io main.ts cleanup",
+    "readonly-write": "deno run --no-prompt --allow-env=MOUNTABLE_API_KEY,MOUNTABLE_FILESYSTEM_ID,MOUNTABLE_NOTE_PATH --allow-net=mountable.io main.ts readonly-write",
+    "test": "deno test --frozen --no-prompt --allow-net=127.0.0.1 --allow-run --allow-env=MOUNTABLE_API_KEY,MOUNTABLE_FILESYSTEM_ID,MOUNTABLE_NOTE_PATH,MOUNTABLE_API_URL"
+  }
+}

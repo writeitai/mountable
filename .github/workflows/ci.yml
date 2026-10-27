@@ -262,3 +262,22 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  deno-note:
+    name: Deno note uses the released TypeScript SDK
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: examples/deno-note
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Deno 2.9.8
+        run: |
+          curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$RUNNER_TEMP/deno" sh -s v2.9.8
+          echo "$RUNNER_TEMP/deno/bin" >> "$GITHUB_PATH"
+      - name: Offline tests with the pinned lockfile
+        run: deno task test
