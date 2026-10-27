@@ -375,6 +375,10 @@ The guide is <https://mountable.io/docs/playwright>.
 `files.changed` webhook and posts the path to a Slack incoming webhook. The
 guide is <https://mountable.io/docs/slack-file-webhook>.
 
+[`examples/git-and-output`](examples/git-and-output) keeps a source change in
+local Git history and hands its generated report to a fresh read-only worker
+through the SDK. Its offline tests need no credentials.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox
