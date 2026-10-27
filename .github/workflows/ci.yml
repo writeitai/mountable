@@ -158,6 +158,12 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm pack --dry-run
+      - name: Mastra tools use backend-selected files across fresh workflows
+        working-directory: examples/mastra-workspace
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
       - name: AI SDK file tools and minimal Next.js app
         working-directory: examples/vercel-ai-workspace
         run: |
