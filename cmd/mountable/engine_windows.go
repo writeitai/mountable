@@ -127,10 +127,14 @@ func (e *engine) waitForRoot(timeout time.Duration) error {
 	}
 }
 
-// notThereYet reports whether err is a mount point that does not exist (yet).
+// notThereYet reports whether err is a mount point that does not exist
+// (yet). While WinFsp turns a new directory into the volume's reparse
+// point, it holds the directory open without sharing deletion, so an open
+// in that moment is a sharing violation.
 func notThereYet(err error) bool {
 	return errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) ||
-		errors.Is(err, windows.ERROR_INVALID_DRIVE) || errors.Is(err, os.ErrNotExist)
+		errors.Is(err, windows.ERROR_INVALID_DRIVE) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, os.ErrNotExist)
 }
 
 // abandon ends a mount whose start was cancelled before WinFsp reported it
