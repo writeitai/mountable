@@ -167,8 +167,18 @@ func TestWinFspMount(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("x"), 0o644); err == nil {
 				t.Error("a read-only mount accepted a new file")
 			}
-			if canonical, err := canonicalDir(dir); err != nil || !strings.EqualFold(canonical, dir) {
-				t.Errorf("canonicalDir(%s) = %s, %v", dir, canonical, err)
+			// The mounted directory itself is not followed; its parent is
+			// resolved (here the runner's short name RUNNER~1, too).
+			want := dir
+			if _, ok := driveLetter(dir); !ok {
+				parent, err := filepath.EvalSymlinks(filepath.Dir(dir))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = filepath.Join(parent, filepath.Base(dir))
+			}
+			if canonical, err := canonicalDir(dir); err != nil || !strings.EqualFold(canonical, want) {
+				t.Errorf("canonicalDir(%s) = %s, %v; want %s", dir, canonical, err, want)
 			}
 			if err := e.unmount(); err != nil {
 				t.Fatalf("unmount: %v", err)
