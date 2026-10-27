@@ -302,6 +302,11 @@ func (f *fakeFS) Release(path string, fh uint64) int {
 	return 0
 }
 
+func (f *fakeFS) Rename(oldpath, newpath string) int {
+	f.calls++
+	return 0
+}
+
 func TestPrivateFS(t *testing.T) {
 	inner := &fakeFS{mode: cgofuse.S_IFREG | 0o4654}
 	p := newPrivateFS(inner, false, make(chan struct{}))
@@ -388,6 +393,22 @@ func TestClosingSkipsFilesReleasedMeanwhile(t *testing.T) {
 	p.Open("/w", cgofuse.O_WRONLY)
 	if n, err := p.closing(func(string) {}); n != 1 || err != nil {
 		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, err)
+	}
+}
+
+// A clean unmount writes out Windows' cache for an open file by the name
+// it has then: renamed itself, as git renames its index.lock, or with its
+// directory.
+func TestClosingFlushesRenamedFiles(t *testing.T) {
+	inner := &fakeFS{}
+	p := newPrivateFS(inner, false, make(chan struct{}))
+	p.Create("/.git/index.lock", cgofuse.O_RDWR|cgofuse.O_CREAT, 0o644)
+	p.Rename("/.git/index.lock", "/.git/index")
+	p.Rename("/.git", "/.git2")
+	p.Rename("/.git2x", "/other") // a sibling sharing the prefix moves nothing
+	var flushed []string
+	if _, err := p.closing(func(path string) { flushed = append(flushed, path) }); err != nil || len(flushed) != 1 || flushed[0] != "/.git2/index" {
+		t.Errorf("closing flushed %q (%v), want /.git2/index", flushed, err)
 	}
 }
 

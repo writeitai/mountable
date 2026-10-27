@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -332,7 +333,7 @@ type privateFS struct {
 type openFile struct {
 	opens   int
 	writing bool
-	path    string // as WinFsp opened it
+	path    string // as WinFsp opened it, then renamed
 }
 
 func newPrivateFS(adapter cgofuse.FileSystemInterface, readOnly bool, initialized chan struct{}) *privateFS {
@@ -484,7 +485,27 @@ func (p *privateFS) Rename(oldpath, newpath string) int {
 	if p.ended.Load() {
 		return -cgofuse.EIO
 	}
-	return p.FileSystemInterface.Rename(oldpath, newpath)
+	errc := p.FileSystemInterface.Rename(oldpath, newpath)
+	if errc == 0 {
+		p.renamed(oldpath, newpath)
+	}
+	return errc
+}
+
+// renamed moves the files open under oldpath, a file's or a directory's,
+// to newpath: a clean unmount writes out what Windows caches for them by
+// the name they have then. Git renames its index.lock while Windows still
+// holds the file open.
+func (p *privateFS) renamed(oldpath, newpath string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, f := range p.handles {
+		if f.path == oldpath {
+			f.path = newpath
+		} else if rest, ok := strings.CutPrefix(f.path, oldpath+"/"); ok {
+			f.path = newpath + "/" + rest
+		}
+	}
 }
 
 // Chmod applies the owner's read and write bits from Windows and keeps the
