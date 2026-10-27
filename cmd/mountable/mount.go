@@ -124,8 +124,11 @@ func mount(o *output, ticket, dir string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer release()
-	defer os.RemoveAll(cacheDir)
+	// Released first: Windows cannot remove the lock file while it is open.
+	defer func() {
+		release()
+		os.RemoveAll(cacheDir)
+	}()
 
 	var (
 		e       *engine

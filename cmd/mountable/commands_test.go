@@ -135,6 +135,7 @@ func captureDiagnostics(t *testing.T) *syncBuffer {
 func isolateConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AppData", t.TempDir()) // Windows
 }
 
 type result struct {

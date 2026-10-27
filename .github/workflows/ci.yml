@@ -108,7 +108,8 @@ jobs:
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', "$env:RUNNER_TEMP\winfsp.msi", '/qn'
           if ($p.ExitCode -ne 0) { throw "msiexec exited $($p.ExitCode)" }
       - run: go vet ./...
-      - run: go test ./...
+      # internal/nfs is the macOS adapter, not built into the Windows CLI.
+      - run: go test . ./cmd/... ./tools/...
         env:
           MOUNTABLE_TEST_WINFSP: "1"
       - name: The packages run on Windows

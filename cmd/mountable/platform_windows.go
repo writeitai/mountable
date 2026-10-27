@@ -141,7 +141,8 @@ func filesystemName(path string) (string, error) {
 func mountedPath(dir string) string { return mountRoot(dir) }
 
 // controlPath is the mount point's control socket:
-// %LOCALAPPDATA%\mountable\mounts\<hash>.sock, in directories only this
+// %LOCALAPPDATA%\mountable\mounts\<hash>.sock (12 bytes of SHA-256, in
+// hex), in directories only this
 // user can open. canonicalDir has resolved the parent's links, case and
 // short names; Windows names are case-insensitive, so the hash is of the
 // upper-cased mount point.
@@ -160,7 +161,7 @@ func controlPath(dir string) (string, error) {
 		}
 	}
 	sum := sha256.Sum256([]byte(strings.ToUpper(dir)))
-	path := filepath.Join(mounts, hex.EncodeToString(sum[:16])+".sock")
+	path := filepath.Join(mounts, hex.EncodeToString(sum[:12])+".sock")
 	if len(path) > maxSocketPath {
 		return "", fmt.Errorf("the control socket's path %s is longer than Windows allows (%d bytes)", path, maxSocketPath)
 	}

@@ -13,6 +13,49 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// shortTempDir is a temporary directory with a short path: a control
+// socket's path must fit in 107 bytes, and t.TempDir's are long.
+func shortTempDir(t *testing.T) string {
+	dir, err := os.MkdirTemp("", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// A mount's cache directory goes under %LOCALAPPDATA%, is removed when the
+// mount ends, and a dead mount's is pruned by the next.
+func TestCacheDirs(t *testing.T) {
+	t.Setenv("LocalAppData", shortTempDir(t))
+	dead, releaseDead, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(dead, os.Getenv("LocalAppData")) {
+		t.Fatalf("cache directory %s is not under %%LOCALAPPDATA%%", dead)
+	}
+	running, releaseRunning, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseRunning()
+	releaseDead() // its process is gone
+	dir, release, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{dead: false, running: true, dir: true} {
+		if _, err := os.Stat(path); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", path, err == nil, want)
+		}
+	}
+	release()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Errorf("removing a released cache directory: %v", err)
+	}
+}
+
 func TestDriveLetter(t *testing.T) {
 	for in, want := range map[string]string{"x:": "X:", `X:\`: "X:", "z:/": "Z:"} {
 		if got, ok := driveLetter(in); !ok || got != want {
@@ -104,7 +147,7 @@ func TestLockFileIsPerOpen(t *testing.T) {
 }
 
 func TestControlSocket(t *testing.T) {
-	t.Setenv("LocalAppData", t.TempDir())
+	t.Setenv("LocalAppData", shortTempDir(t))
 	dir := filepath.Join(t.TempDir(), "mnt")
 	signals := make(chan os.Signal, 2)
 	finish, err := serveControl(dir, signals)
@@ -145,7 +188,7 @@ func TestControlSocket(t *testing.T) {
 }
 
 func TestControlSocketReportsAFailedEnd(t *testing.T) {
-	t.Setenv("LocalAppData", t.TempDir())
+	t.Setenv("LocalAppData", shortTempDir(t))
 	dir := filepath.Join(t.TempDir(), "mnt")
 	signals := make(chan os.Signal, 2)
 	finish, err := serveControl(dir, signals)
@@ -168,7 +211,7 @@ func TestControlSocketReportsAFailedEnd(t *testing.T) {
 }
 
 func TestStaleControlSocketIsNotMounted(t *testing.T) {
-	t.Setenv("LocalAppData", t.TempDir())
+	t.Setenv("LocalAppData", shortTempDir(t))
 	dir := filepath.Join(t.TempDir(), "mnt")
 	path, err := controlPath(dir)
 	if err != nil {
