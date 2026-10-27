@@ -401,6 +401,12 @@ guide is <https://mountable.io/docs/slack-file-webhook>.
 local Git history and hands its generated report to a fresh read-only worker
 through the SDK. Its offline tests need no credentials.
 
+[`examples/two-editors`](examples/two-editors) has two processes edit one
+task file. The second write sends the ETag both of them read, so it is
+refused and the first edit stays. The second process reads again and sets
+only its own field. Its offline tests need no credentials. The guide is
+<https://mountable.io/docs/stale-edit>.
+
 [`examples/fastapi-reports`](examples/fastapi-reports) generates a small
 report in a FastAPI process, uploads it, and returns it from a second
 process. The caller receives an id only after the upload succeeds. The guide
