@@ -108,6 +108,11 @@ func (e *engine) waitForRoot(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		err := withTimeout(time.Until(deadline), func() error { return readRoot(mountRoot(e.dir)) })
+		if _, drive := driveLetter(e.dir); err == nil && !drive && !isMountPoint(e.dir) {
+			// WinFsp creates a mount directory as a plain one first, then
+			// makes it the volume's reparse point.
+			err = os.ErrNotExist
+		}
 		if err == nil {
 			return nil
 		}
@@ -192,7 +197,7 @@ func (e *engine) unmount() error {
 	if held > 0 {
 		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", held)
 	}
-	if err := e.removeVolume(); err != nil {
+	if err := e.removeVolume(time.Now().Add(abortTimeout)); err != nil {
 		return err
 	}
 	<-e.done
@@ -206,14 +211,14 @@ func (e *engine) unmount() error {
 // removeVolume asks WinFsp to remove the volume. WinFsp refuses a second
 // request once the first has begun, which is no failure while the volume
 // then goes.
-func (e *engine) removeVolume() error {
+func (e *engine) removeVolume(deadline time.Time) error {
 	if e.host.Unmount() {
 		return nil
 	}
 	select {
 	case <-e.done:
 		return nil
-	case <-time.After(abortTimeout):
+	case <-time.After(time.Until(deadline)):
 		return errors.New("WinFsp did not accept the unmount")
 	}
 }
@@ -238,13 +243,14 @@ func (e *engine) abort() error {
 		return nil
 	default:
 	}
-	if err := e.removeVolume(); err != nil {
+	deadline := time.Now().Add(abortTimeout)
+	if err := e.removeVolume(deadline); err != nil {
 		return err
 	}
 	select {
 	case <-e.done:
 		return nil
-	case <-time.After(abortTimeout):
+	case <-time.After(time.Until(deadline)):
 		return fmt.Errorf("the volume was still mounted after %s", abortTimeout)
 	}
 }
@@ -331,6 +337,9 @@ func writes(flags int) bool {
 // volume. Only after a clean unmount: after the end nothing reaches the
 // engine.
 func (p *privateFS) releaseAll() {
+	if p.ended.Load() {
+		return // an abort overtook the clean unmount
+	}
 	p.mu.Lock()
 	handles := p.handles
 	p.handles = map[uint64]*openFile{}
