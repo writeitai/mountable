@@ -92,7 +92,7 @@ sessions; these normally expire after one hour. Backend operators may revoke
 sessions through the management API when a job ends.
 
 Storage, retained versions and downloads follow the normal
-[usage prices](https://mountable.io/docs/billing). Logical deletion can leave
+[usage prices](https://mountable.io/docs/billing?utm_source=data-science-and-ml-workspaces&utm_medium=other&utm_content=dspy-01-evaluation-bundle). Logical deletion can leave
 retained bytes billed until reclamation. Existing caps and quotas stay in force.
 No model calls or new paid service are involved.
 

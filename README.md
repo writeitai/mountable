@@ -440,8 +440,8 @@ need no credentials.
 
 [`examples/dspy-evaluation`](examples/dspy-evaluation) saves a tiny model-free
 DSPy evaluation as checked JSON files. A fresh process verifies the bundle
-and recomputes the same fixture score. The guide is
-<https://mountable.io/docs/dspy>.
+and recomputes the same fixture score. Follow the
+[DSPy guide](https://mountable.io/docs/dspy?utm_source=data-science-and-ml-workspaces&utm_medium=other&utm_content=dspy-01-evaluation-bundle).
 
 ## Showcase demos
 
