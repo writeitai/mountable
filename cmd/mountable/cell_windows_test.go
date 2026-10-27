@@ -261,6 +261,38 @@ func TestCellWrites(t *testing.T) {
 	}
 }
 
+// A file written and closed in the mount reaches the cell, where other
+// mounts read it, while the mount goes on: WinFsp commits it at its Close,
+// which Windows sends once it no longer holds the file. The test records
+// how long that takes.
+func TestCellClosedFilesReachTheCell(t *testing.T) {
+	c := newCell(t)
+	dir := filepath.Join(t.TempDir(), "mnt")
+	e := c.mount(dir, false)
+	defer c.stop(e)
+	const files = 5
+	start := time.Now()
+	for i := range files {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("closed%d.txt", i)), []byte(fmt.Sprintf("closed %d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	written := time.Since(start)
+	for i := range files {
+		name, want := fmt.Sprintf("closed%d.txt", i), fmt.Sprintf("closed %d", i)
+		for {
+			if got, ok := c.stored(name); ok && got == want {
+				t.Logf("%s reached the cell %v after it was written", name, time.Since(start)-written)
+				break
+			}
+			if time.Since(start) > 2*time.Minute {
+				t.Fatalf("%s did not reach the cell within two minutes of its close", name)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
 // Changes made past the mount (another mount, the files API) appear in it,
 // including in a file whose data Windows has cached.
 func TestCellRemoteChanges(t *testing.T) {
