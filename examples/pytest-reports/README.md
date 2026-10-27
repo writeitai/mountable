@@ -99,8 +99,14 @@ test returns exit code 1, the JUnit XML parses with two tests and one
 failure, a second upload to the same run is refused, changed bytes are
 detected, and cleanup leaves no files.
 
-## Live check
+## Read the report later
 
-No production check is recorded for this example yet. The offline checks
-above are the current evidence. A production run needs a scoped API key
-for an existing billed filesystem.
+You do not need the worker's files to read the report. From any machine:
+
+```sh
+mountable files read "$FS_ID" pytest/run1/junit.xml > junit.xml
+mountable files read "$FS_ID" pytest/run1/failure.txt
+```
+
+Use `check` above when `./out` is still on your machine and you want the
+byte-for-byte comparison.
