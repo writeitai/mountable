@@ -1,7 +1,8 @@
 # Clean up one finished job without deleting the other
 
-Two agent jobs can share one filesystem. Job A finishes. A recursive
-delete of its directory can also remove job B.
+Two agent jobs can share one filesystem. Each job writes under its own
+prefix. A recursive delete of the shared run directory can also remove
+job B.
 
 mountable.io is a persistent filesystem for AI agents. This example
 writes a completion manifest for job A: the exact paths it created and
