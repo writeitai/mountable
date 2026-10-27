@@ -421,6 +421,11 @@ Airflow TaskFlow DAG that uploads a closed report and passes only an id
 through XCom. A fresh process checks the same bytes. The guide is
 <https://mountable.io/docs/airflow>.
 
+[`examples/huggingface-datasets`](examples/huggingface-datasets) saves a
+two-row Hugging Face dataset with `save_to_disk`, uploads that closed file
+set, and has a fresh process check the hashes before `load_from_disk`.
+The guide is <https://mountable.io/docs/huggingface-datasets>.
+
 [`examples/csv-parquet-batches`](examples/csv-parquet-batches) commits small
 CSV-to-Parquet batches one at a time through the SDK. A manifest records a
 batch only after its upload reads back with the right checksum, so a fresh
