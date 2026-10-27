@@ -395,10 +395,13 @@ func pruneCacheDirs(base string) {
 		if err != nil {
 			continue
 		}
-		if tryLock(lock) == nil && namesFile(lock) {
+		dead := tryLock(lock) == nil && namesFile(lock)
+		// Closed first: Windows cannot remove the lock file while it is
+		// open. The root's lock keeps every other mount out meanwhile.
+		lock.Close()
+		if dead {
 			os.RemoveAll(dir)
 		}
-		lock.Close()
 	}
 }
 

@@ -13,6 +13,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// testMountPoint is a mount point the CLI accepts: a directory that does
+// not exist yet.
+func testMountPoint(t *testing.T) string { return filepath.Join(t.TempDir(), "mnt") }
+
+// missingMountPoint is one it refuses for want of a directory: its parent
+// does not exist.
+func missingMountPoint(t *testing.T) string { return filepath.Join(t.TempDir(), "missing", "mnt") }
+
+// engineCacheDir is a cache directory for an engine a test leaves running.
+// Windows cannot remove the files it still holds open, so the directory is
+// removed as far as it can be.
+func engineCacheDir(t *testing.T) string {
+	dir, err := os.MkdirTemp("", "cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // shortTempDir is a temporary directory with a short path: a control
 // socket's path must fit in 107 bytes, and t.TempDir's are long.
 func shortTempDir(t *testing.T) string {

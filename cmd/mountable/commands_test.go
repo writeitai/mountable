@@ -647,7 +647,7 @@ func TestMountJSONReportsStartupErrors(t *testing.T) {
 	fmt.Fprintln(w, "mtbltk_usedticket")
 	w.Close()
 
-	r := runCLI(t, "mount", "--ticket-stdin", "--json", t.TempDir())
+	r := runCLI(t, "mount", "--ticket-stdin", "--json", testMountPoint(t))
 	e := jsonError(t, r)
 	if r.code != 1 || e.Code != "ticket_invalid" || strings.Count(r.stdout, "\n") != 1 {
 		t.Fatalf("got %d %q", r.code, r.stdout)
@@ -846,9 +846,9 @@ func TestMountChecksTheDirectoryBeforeUsingTheTicket(t *testing.T) {
 	fmt.Fprintln(w, "mtbltk_unusedticket")
 	w.Close()
 
-	r := runCLI(t, "mount", "--ticket-stdin", "--json", t.TempDir()+"/missing")
+	r := runCLI(t, "mount", "--ticket-stdin", "--json", missingMountPoint(t))
 	e := jsonError(t, r)
-	if r.code != 1 || e.Code != "mount_failed" || !strings.Contains(e.Hint, "mkdir -p") {
+	if r.code != 1 || e.Code != "mount_failed" || !strings.Contains(e.Hint, "mkdir") {
 		t.Fatalf("got %d %+v", r.code, e)
 	}
 	if calls := api.called(); len(calls) != 0 {
