@@ -389,6 +389,12 @@ report in a FastAPI process, uploads it, and returns it from a second
 process. The caller receives an id only after the upload succeeds. The guide
 is <https://mountable.io/docs/fastapi>.
 
+[`examples/csv-parquet-batches`](examples/csv-parquet-batches) commits small
+CSV-to-Parquet batches one at a time through the SDK. A manifest records a
+batch only after its upload reads back with the right checksum, so a fresh
+process resumes without redoing or duplicating a batch. Its offline tests
+need no credentials.
+
 ## Showcase demos
 
 [`examples/showcase`](examples/showcase) runs two demos: a planner sandbox

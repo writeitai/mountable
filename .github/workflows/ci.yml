@@ -151,6 +151,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: CSV-to-Parquet batches resume after a restart
+        working-directory: examples/csv-parquet-batches
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Git source history and generated output handoff
         working-directory: examples/git-and-output
         run: |
