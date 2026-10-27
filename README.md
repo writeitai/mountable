@@ -356,6 +356,12 @@ and reader on one mountable.io filesystem. The writer answers `stored`, and
 the reader reads the file. A later process reads the same note. The guide is
 <https://mountable.io/docs/crewai>.
 
+[`examples/smolagents-workspace`](examples/smolagents-workspace) has two
+smolagents tools on one mountable.io filesystem. `write_note` stores a note
+and `read_note` reads it from a later process. The example calls the
+framework's tool interface and does not call a model. The guide is
+<https://mountable.io/docs/smolagents>.
+
 [`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
 screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
