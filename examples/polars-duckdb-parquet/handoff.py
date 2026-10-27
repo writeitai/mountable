@@ -3,8 +3,8 @@
 ``write`` builds a small deterministic table with Polars, closes it as a
 local Parquet file, then uploads those bytes create-only. The writer can
 exit. ``check`` is a fresh process: it downloads the file read-only, opens
-the downloaded local file with DuckDB, and verifies the schema, the row
-count, the SHA-256 and one known aggregate. ``cleanup`` deletes the file.
+the downloaded local file with DuckDB, and checks the schema, the row
+count and one known aggregate, and prints the SHA-256. ``cleanup`` deletes the file.
 Credentials stay in the caller's secrets; the API key is never printed.
 """
 
