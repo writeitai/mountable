@@ -25,6 +25,7 @@ def main() -> None:
         # closing the console reach the binary directly, as it shares this
         # console; this process only waits for it and passes on its exit code.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
         sys.exit(subprocess.call([str(binary), *sys.argv[1:]]))
     if not os.access(binary, os.X_OK):
         # Installers that drop the wheel's file modes.

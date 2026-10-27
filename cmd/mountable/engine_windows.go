@@ -89,9 +89,7 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		e.abandon()
 		return nil, ctx.Err()
 	}
-	err = unlessCancelled(ctx, func() error {
-		return withTimeout(helperTimeout, func() error { return readRoot(mountRoot(c.dir)) })
-	})
+	err = unlessCancelled(ctx, func() error { return e.waitForRoot(helperTimeout) })
 	if err != nil {
 		// Attached but not serving: never leave it behind.
 		if abortErr := e.abort(); abortErr != nil {
@@ -100,6 +98,34 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		return nil, fmt.Errorf("mounting %s: %w", c.dir, err)
 	}
 	return e, nil
+}
+
+// waitForRoot waits, up to timeout, until the mount's root can be read.
+// WinFsp calls Init before it creates the volume and sets its mount point,
+// so for a moment after Init the path does not exist yet. A volume that
+// stops being served meanwhile reports WinFsp's error.
+func (e *engine) waitForRoot(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := withTimeout(time.Until(deadline), func() error { return readRoot(mountRoot(e.dir)) })
+		if err == nil {
+			return nil
+		}
+		if !notThereYet(err) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-e.done:
+			return e.servedError()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// notThereYet reports whether err is a mount point that does not exist (yet).
+func notThereYet(err error) bool {
+	return errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND) ||
+		errors.Is(err, windows.ERROR_INVALID_DRIVE) || errors.Is(err, os.ErrNotExist)
 }
 
 // abandon ends a mount whose start was cancelled before WinFsp reported it
@@ -166,11 +192,30 @@ func (e *engine) unmount() error {
 	if held > 0 {
 		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", held)
 	}
-	if !e.host.Unmount() {
-		return errors.New("WinFsp did not accept the unmount")
+	if err := e.removeVolume(); err != nil {
+		return err
 	}
 	<-e.done
+	// WinFsp dropped the handles still open without their Close: release
+	// them, so their writer locks go now rather than when their leases
+	// lapse.
+	e.fs.releaseAll()
 	return nil
+}
+
+// removeVolume asks WinFsp to remove the volume. WinFsp refuses a second
+// request once the first has begun, which is no failure while the volume
+// then goes.
+func (e *engine) removeVolume() error {
+	if e.host.Unmount() {
+		return nil
+	}
+	select {
+	case <-e.done:
+		return nil
+	case <-time.After(abortTimeout):
+		return errors.New("WinFsp did not accept the unmount")
+	}
 }
 
 // flush runs once serving has stopped: it waits for pending writes, then
@@ -193,8 +238,8 @@ func (e *engine) abort() error {
 		return nil
 	default:
 	}
-	if !e.host.Unmount() {
-		return errors.New("WinFsp did not accept the unmount")
+	if err := e.removeVolume(); err != nil {
+		return err
 	}
 	select {
 	case <-e.done:
@@ -280,6 +325,21 @@ const noHandle = ^uint64(0)
 // writes reports whether open flags ask for writing.
 func writes(flags int) bool {
 	return flags&cgofuse.O_ACCMODE != cgofuse.O_RDONLY || flags&(cgofuse.O_TRUNC|cgofuse.O_APPEND) != 0
+}
+
+// releaseAll releases, in the engine, every open WinFsp dropped with the
+// volume. Only after a clean unmount: after the end nothing reaches the
+// engine.
+func (p *privateFS) releaseAll() {
+	p.mu.Lock()
+	handles := p.handles
+	p.handles = map[uint64]*openFile{}
+	p.mu.Unlock()
+	for fh, f := range handles {
+		for range f.opens {
+			p.FileSystemInterface.Release("", fh)
+		}
+	}
 }
 
 // isOpen reports whether fh has opens not yet released.

@@ -161,7 +161,7 @@ func mount(o *output, ticket, dir string) (err error) {
 	})
 	if err != nil {
 		if interrupted {
-			return errors.New("interrupted while mounting")
+			return errInterrupted
 		}
 		return err
 	}
@@ -210,6 +210,10 @@ func mount(o *output, ticket, dir string) (err error) {
 	}
 	return nil
 }
+
+// errInterrupted is a mount a signal or `mountable unmount` ended while it
+// started.
+var errInterrupted = errors.New("interrupted while mounting")
 
 // startedSession is a session exchanged for its first certificate, with
 // where and how to mount it.

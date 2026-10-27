@@ -58,7 +58,7 @@ func findAndLoadWinFsp() error {
 			return missing(err.Error())
 		}
 	}
-	for _, path := range []string{bin, dll, driver} {
+	for _, path := range []string{dir, bin, dll, driver} {
 		if err := adminOnly(path); err != nil {
 			return &cliError{Code: "winfsp_unsafe", Message: err.Error(), Hint: "reinstall WinFsp in its default location, under Program Files"}
 		}

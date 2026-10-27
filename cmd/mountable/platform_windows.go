@@ -49,9 +49,17 @@ func mountOwner(string) (owner, error) {
 	return owner{uid: ownerID, gid: ownerID, localUID: ownerID, localGID: ownerID, ctime: time.Now()}, nil
 }
 
-// isMountPoint: canonicalDir may read a link at a Windows mount point; a
-// mounted directory is a reparse point WinFsp answers locally.
-func isMountPoint(string) bool { return false }
+// isMountPoint keeps canonicalDir from following a reparse point at the
+// mount point itself: a mounted directory is one, whose target is WinFsp's
+// volume (\Device\Volume{…}), which is no path to resolve.
+func isMountPoint(path string) bool {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	attrs, err := windows.GetFileAttributes(p)
+	return err == nil && attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
 
 // prepareMountPoint checks that WinFsp is there before a ticket is used,
 // and says where the mount will not be seen.
@@ -390,8 +398,11 @@ type control struct {
 	signals  chan<- os.Signal
 	finished chan struct{}
 	result   error
-	answers  sync.WaitGroup
 	once     sync.Once
+
+	mu      sync.Mutex
+	closed  bool // finish has begun: no more answers are counted
+	answers sync.WaitGroup
 }
 
 func (c *control) serve() {
@@ -400,7 +411,14 @@ func (c *control) serve() {
 		if err != nil {
 			return
 		}
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			conn.Close()
+			return
+		}
 		c.answers.Add(1)
+		c.mu.Unlock()
 		go c.handle(conn)
 	}
 }
@@ -424,7 +442,8 @@ func (c *control) handle(conn net.Conn) {
 		return
 	}
 	<-c.finished
-	if c.result != nil {
+	// A mount interrupted while it started has ended as asked.
+	if c.result != nil && !errors.Is(c.result, errInterrupted) {
 		fmt.Fprintln(conn, "error: "+oneLine(c.result))
 		return
 	}
@@ -444,6 +463,9 @@ func sendSignal(signals chan<- os.Signal, sig os.Signal, n int) {
 
 func (c *control) finish(err error) {
 	c.once.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
 		c.listener.Close() // also removes the socket file
 		c.result = err
 		close(c.finished)
