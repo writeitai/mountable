@@ -181,6 +181,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: Prefect task report is read by a fresh flow process
+        working-directory: examples/prefect-task-report
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: Tests on the oldest supported Python
         run: uv run --locked --isolated --python 3.10 pytest
       - run: uv build
