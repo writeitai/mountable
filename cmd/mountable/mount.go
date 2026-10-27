@@ -55,6 +55,9 @@ func mountCommand(o *output, args []string) error {
 		ticket = strings.TrimSpace(line)
 	case !*ticketStdin && len(positional) == 2:
 		dir = positional[1]
+		if err := checkBeforeSession(dir); err != nil {
+			return err
+		}
 		var err error
 		if ticket, err = createSession(positional[0], *readOnly); err != nil {
 			return err

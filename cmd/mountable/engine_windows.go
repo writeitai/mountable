@@ -81,8 +81,8 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 	}()
 	select {
 	case <-initialized:
-		// Registered after WinFsp's own, so it is asked first (design §5).
-		takeConsole()
+		// Kept above WinFsp's own handler while the mount lasts (design §5).
+		keepConsole(e.done)
 	case <-e.done:
 		return nil, fmt.Errorf("mounting %s: %w", c.dir, e.servedError())
 	case <-ctx.Done():
@@ -146,17 +146,25 @@ func (e *engine) mountPoint() string { return e.dir }
 
 func (e *engine) served() <-chan struct{} { return e.done }
 
-// unmount removes the volume and waits for serving to stop. It fails while
-// a file is open for writing: WinFsp would discard the handle without its
-// close, so its writes would never be committed (design §5).
+// unmount removes the volume and waits for serving to stop. WinFsp
+// discards the handles still open without their Close, which is where a
+// closed file's writes are committed (design §5). So from now on opens are
+// refused, and every file still open for writing is first committed
+// through the engine: all its program has written out so far. A program
+// that still holds such a file loses what it writes after that, which the
+// warning says.
 func (e *engine) unmount() error {
 	select {
 	case <-e.done:
 		return nil
 	default:
 	}
-	if n := e.fs.openWriters(); n > 0 {
-		return fmt.Errorf("busy: %d files open for writing", n)
+	held, err := e.fs.closing()
+	if err != nil {
+		return err
+	}
+	if held > 0 {
+		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", held)
 	}
 	if !e.host.Unmount() {
 		return errors.New("WinFsp did not accept the unmount")
@@ -196,6 +204,27 @@ func (e *engine) abort() error {
 	}
 }
 
+// closing refuses every open from now on, then commits every file still
+// open for writing, and returns how many there were. A failed commit is
+// the error: the clean unmount then turns into an abort.
+func (p *privateFS) closing() (int, error) {
+	p.mu.Lock()
+	p.isClosing = true
+	var writers []uint64
+	for fh, f := range p.handles {
+		if f.writing {
+			writers = append(writers, fh)
+		}
+	}
+	p.mu.Unlock()
+	for _, fh := range writers {
+		if errc := p.FileSystemInterface.Fsync("", false, fh); errc != 0 {
+			return len(writers), fmt.Errorf("committing a file open for writing: %v", cgofuse.Error(errc))
+		}
+	}
+	return len(writers), nil
+}
+
 // fileSecurity is the access list every file in the mount gets, in SDDL:
 // protected (nothing inherited), full access for user and SYSTEM.
 func fileSecurity(user *windows.SID) string {
@@ -203,15 +232,16 @@ func fileSecurity(user *windows.SID) string {
 }
 
 // privateFS is the adapter as WinFsp is served it (design §3, §4, §5):
-//   - a chmod changes only the owner's bits, keeping the stored group and
-//     other bits other mounts see, which Windows cannot express;
+//   - a chmod changes only the owner's read and write bits, keeping the
+//     stored execute, group and other bits other mounts see, which Windows
+//     cannot express;
 //   - files and directories created from Windows are stored 0644 and 0755,
 //     as on other mounts, not with the mode WinFsp derives from the
 //     owner-only access list;
 //   - a read-only session refuses opens for writing before they reach the
 //     engine, which would take the file's writer lock;
-//   - it counts the files open for writing, which a clean unmount waits
-//     for;
+//   - it counts the files open for writing, which a clean unmount commits
+//     first, refusing new opens meanwhile;
 //   - once the mount has ended (revocation, expiry), every operation fails
 //     at once without reaching the engine.
 type privateFS struct {
@@ -224,8 +254,9 @@ type privateFS struct {
 	// The engine gives repeated opens of one file the same handle, and a
 	// release does not say which open it ends; so a handle counts as open
 	// for writing from its first open for writing until its last release.
-	mu      sync.Mutex
-	handles map[uint64]*openFile
+	mu        sync.Mutex
+	handles   map[uint64]*openFile
+	isClosing bool // a clean unmount has begun: opens are refused
 }
 
 type openFile struct {
@@ -243,6 +274,16 @@ const noHandle = ^uint64(0)
 // writes reports whether open flags ask for writing.
 func writes(flags int) bool {
 	return flags&cgofuse.O_ACCMODE != cgofuse.O_RDONLY || flags&(cgofuse.O_TRUNC|cgofuse.O_APPEND) != 0
+}
+
+// admit refuses an open once a clean unmount has begun.
+func (p *privateFS) admit() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.isClosing {
+		return -cgofuse.EBUSY
+	}
+	return 0
 }
 
 func (p *privateFS) opened(fh uint64, writing bool) {
@@ -350,8 +391,9 @@ func (p *privateFS) Rename(oldpath, newpath string) int {
 	return p.FileSystemInterface.Rename(oldpath, newpath)
 }
 
-// Chmod applies the owner's bits from Windows and keeps the stored rest:
-// Windows has no group and others to set, and reports them cleared.
+// Chmod applies the owner's read and write bits from Windows and keeps the
+// stored rest: Windows has no group and others to set, and its access
+// list's full access would read as execute on every file.
 func (p *privateFS) Chmod(path string, mode uint32) int {
 	if p.ended.Load() {
 		return -cgofuse.EIO
@@ -360,7 +402,7 @@ func (p *privateFS) Chmod(path string, mode uint32) int {
 	if errc := p.FileSystemInterface.Getattr(path, &stat, noHandle); errc != 0 {
 		return errc
 	}
-	return p.FileSystemInterface.Chmod(path, stat.Mode&0o7077|mode&0o700)
+	return p.FileSystemInterface.Chmod(path, stat.Mode&0o7177|mode&0o600)
 }
 
 func (p *privateFS) Chown(path string, uid, gid uint32) int {
@@ -391,6 +433,9 @@ func (p *privateFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	if p.readOnly {
 		return -cgofuse.EROFS, noHandle
 	}
+	if errc := p.admit(); errc != 0 {
+		return errc, noHandle
+	}
 	errc, fh := p.FileSystemInterface.Create(path, flags, mode&^0o7777|0o644)
 	if errc == 0 {
 		p.opened(fh, true)
@@ -404,6 +449,9 @@ func (p *privateFS) Open(path string, flags int) (int, uint64) {
 	}
 	if p.readOnly && writes(flags) {
 		return -cgofuse.EROFS, noHandle
+	}
+	if errc := p.admit(); errc != 0 {
+		return errc, noHandle
 	}
 	errc, fh := p.FileSystemInterface.Open(path, flags)
 	if errc == 0 {

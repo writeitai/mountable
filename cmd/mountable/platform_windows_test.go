@@ -237,7 +237,14 @@ type fakeFS struct {
 	chmoded uint32
 	created uint32
 	made    uint32
+	synced  []uint64
 	calls   int
+}
+
+func (f *fakeFS) Fsync(path string, datasync bool, fh uint64) int {
+	f.calls++
+	f.synced = append(f.synced, fh)
+	return 0
 }
 
 func (f *fakeFS) Getattr(path string, stat *cgofuse.Stat_t, fh uint64) int {
@@ -276,10 +283,14 @@ func (f *fakeFS) Release(path string, fh uint64) int {
 }
 
 func TestPrivateFS(t *testing.T) {
-	inner := &fakeFS{mode: cgofuse.S_IFREG | 0o4755}
+	inner := &fakeFS{mode: cgofuse.S_IFREG | 0o4654}
 	p := newPrivateFS(inner, false, make(chan struct{}))
-	if p.Chmod("/f", 0o600); inner.chmoded != 0o4655 {
-		t.Errorf("Chmod stored %o, want the owner's bits changed only (4655)", inner.chmoded)
+	// Windows' full access reads as rwx: only read and write are taken.
+	if p.Chmod("/f", 0o700); inner.chmoded != 0o4654 {
+		t.Errorf("Chmod 700 stored %o, want 4654: no execute bit from Windows", inner.chmoded)
+	}
+	if p.Chmod("/f", 0o400); inner.chmoded != 0o4454 {
+		t.Errorf("Chmod 400 stored %o, want 4454: the owner's write bit cleared only", inner.chmoded)
 	}
 	if p.Create("/f", cgofuse.O_RDWR|cgofuse.O_CREAT, cgofuse.S_IFREG|0o700); inner.created != cgofuse.S_IFREG|0o644 {
 		t.Errorf("Create stored mode %o, want 100644", inner.created)
@@ -302,6 +313,14 @@ func TestPrivateFS(t *testing.T) {
 	p.Release("/g", 9)
 	if n := p.openWriters(); n != 0 {
 		t.Errorf("all released, %d open for writing", n)
+	}
+	// A clean unmount commits what is open for writing, and refuses opens.
+	p.Open("/w", cgofuse.O_WRONLY)
+	if n, err := p.closing(); n != 1 || err != nil || len(inner.synced) != 1 || inner.synced[0] != 9 {
+		t.Errorf("closing: %d, %v; synced %v", n, err, inner.synced)
+	}
+	if errc, _ := p.Open("/f", cgofuse.O_RDONLY); errc != -cgofuse.EBUSY {
+		t.Errorf("Open while closing: %d, want EBUSY", errc)
 	}
 	p.Init()
 	select {

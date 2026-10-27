@@ -62,8 +62,8 @@ func prepareMountPoint(string) error {
 	if windows.GetCurrentProcessToken().IsElevated() {
 		diagnose("this prompt is elevated: the mount is visible to elevated programs only, not to Explorer or an ordinary prompt")
 	}
-	if inSessionZero() {
-		diagnose("running as a service (session 0): WinFsp defines the drive for every logon session")
+	if serviceContext() {
+		diagnose("running as a service account or SYSTEM: WinFsp defines the drive for every logon session")
 	}
 	return nil
 }
@@ -71,6 +71,43 @@ func prepareMountPoint(string) error {
 func inSessionZero() bool {
 	var session uint32
 	return windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session) == nil && session == 0
+}
+
+// serviceContext is WinFsp's own test (FspServiceContextCheck) for when it
+// defines a drive for every logon session: session 0, and SYSTEM or a
+// member of SERVICE. An SSH session also runs in session 0, as neither.
+func serviceContext() bool {
+	if !inSessionZero() {
+		return false
+	}
+	user, err := currentUserSID()
+	if err != nil {
+		return false
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err == nil && user.Equals(system) {
+		return true
+	}
+	service, err := windows.CreateWellKnownSid(windows.WinServiceSid)
+	if err != nil {
+		return false
+	}
+	member, err := windows.Token(0).IsMember(service)
+	return err == nil && member
+}
+
+// checkBeforeSession checks WinFsp and the mount point before `mountable
+// mount FS_ID DIR` creates a session, which a machine without WinFsp would
+// otherwise leave behind.
+func checkBeforeSession(dir string) error {
+	dir, err := canonicalDir(dir)
+	if err != nil {
+		return err
+	}
+	if err := loadWinFsp(); err != nil {
+		return err
+	}
+	return checkMountDir(dir)
 }
 
 // checkMountDir checks the mount point before the ticket is exchanged: a
@@ -235,7 +272,10 @@ func peerProcess(conn net.Conn) (windows.Handle, error) {
 	if ioctlErr != nil {
 		return 0, fmt.Errorf("finding the mounting process: %w", ioctlErr)
 	}
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	// Without the right to end it, which a mount started elevated does not
+	// grant an ordinary prompt; end asks for that when it is needed. Held
+	// open, the handle keeps the process ID from being reused.
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return 0, fmt.Errorf("opening the mounting process %d: %w", pid, err)
 	}
@@ -245,11 +285,27 @@ func peerProcess(conn net.Conn) (windows.Handle, error) {
 		windows.CloseHandle(h)
 		return 0, err
 	}
-	if image := filepath.Base(windows.UTF16ToString(name[:size])); !strings.HasPrefix(strings.ToLower(image), "mountable") {
+	if image := filepath.Base(windows.UTF16ToString(name[:size])); !mountableImage(image) {
 		windows.CloseHandle(h)
 		return 0, fmt.Errorf("the control socket is served by %s, not mountable", image)
 	}
 	return h, nil
+}
+
+// mountableImage reports whether a process image is the CLI: under one of
+// the names it ships as, or this binary's own.
+func mountableImage(image string) bool {
+	names := []string{"mountable.exe", "mountable-windows-amd64.exe", "mountable-windows-arm64.exe",
+		"mountable-win32-x64.exe", "mountable-win32-arm64.exe"}
+	if self, err := os.Executable(); err == nil {
+		names = append(names, filepath.Base(self))
+	}
+	for _, n := range names {
+		if strings.EqualFold(image, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // ask sends one control line and reads the one-line answer within timeout.
@@ -271,9 +327,19 @@ func (m *mountProcess) close() {
 }
 
 // end ends the mounting process and waits for it to exit, which removes
-// its volume.
+// its volume. The handle held since connecting keeps its process ID from
+// naming another process.
 func (m *mountProcess) end() error {
-	if err := windows.TerminateProcess(m.process, 1); err != nil {
+	pid, err := windows.GetProcessId(m.process)
+	if err != nil {
+		return err
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pid)
+	if err != nil {
+		return fmt.Errorf("ending the mounting process %d (a mount started from an elevated prompt is ended from one): %w", pid, err)
+	}
+	defer windows.CloseHandle(h)
+	if err := windows.TerminateProcess(h, 1); err != nil {
 		return fmt.Errorf("ending the mounting process: %w", err)
 	}
 	if event, err := windows.WaitForSingleObject(m.process, uint32(abortTimeout/time.Millisecond)); err != nil || event != windows.WAIT_OBJECT_0 {
@@ -403,20 +469,46 @@ const (
 )
 
 var (
-	consoleOnce            sync.Once
-	setConsoleCtrlHandler  = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCtrlHandler")
-	consoleHandlerCallback uintptr
+	setConsoleCtrlHandler = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCtrlHandler")
+	// Two callbacks for the one handler, so that one of them is always
+	// registered while the other moves on top (keepConsole).
+	consoleCallbacks = [2]uintptr{windows.NewCallback(consoleHandler), windows.NewCallback(consoleHandler)}
 )
 
-// takeConsole puts this process's console handler first. WinFsp registers
-// its own as the mount starts; that one would delete the volume on Ctrl-C
-// or a close without the lifecycle's clean stop. Windows asks the handler
-// registered last first, and this one answers every event it handles.
-func takeConsole() {
-	consoleOnce.Do(func() { consoleHandlerCallback = windows.NewCallback(consoleHandler) })
-	if r, _, err := setConsoleCtrlHandler.Call(consoleHandlerCallback, 1); r == 0 {
+// keepConsole keeps this process's console handler first until done is
+// closed. WinFsp registers its own once per process, from a thread it
+// starts after the mount has started, at a moment this process cannot
+// see; that one would delete the volume on Ctrl-C or a close, without the
+// lifecycle's clean stop. Windows asks the handler registered last first,
+// so this one is registered again on top, often at first and then every
+// few seconds: the other of the two callbacks is added before the current
+// one is removed, so there is never a moment without one on top.
+func keepConsole(done <-chan struct{}) {
+	current := 0
+	if r, _, err := setConsoleCtrlHandler.Call(consoleCallbacks[current], 1); r == 0 {
 		diagnose("taking the console's Ctrl-C: %v", err)
+		return
 	}
+	go func() {
+		start := time.Now()
+		for {
+			interval := 3 * time.Second
+			if time.Since(start) < 10*time.Second {
+				interval = 100 * time.Millisecond
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(interval):
+			}
+			next := 1 - current
+			if r, _, _ := setConsoleCtrlHandler.Call(consoleCallbacks[next], 1); r == 0 {
+				continue
+			}
+			setConsoleCtrlHandler.Call(consoleCallbacks[current], 0)
+			current = next
+		}
+	}()
 }
 
 // consoleHandler turns Ctrl-C and Break into SIGINT and a close, logoff or
@@ -435,7 +527,7 @@ func consoleHandler(event uint32) uintptr {
 		sendSignal(signals, syscall.SIGINT, 1)
 		return 1
 	case ctrlLogoff:
-		if inSessionZero() {
+		if serviceContext() {
 			return 1
 		}
 		fallthrough

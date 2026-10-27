@@ -37,6 +37,10 @@ func mountOwner(dir string) (owner, error) {
 	return owner{uid: uid, gid: gid, localUID: os.Getuid(), localGID: os.Getgid(), ctime: info.ModTime()}, nil
 }
 
+// checkBeforeSession has nothing to check before a session is created; the
+// mount point is checked before its ticket is exchanged.
+func checkBeforeSession(string) error { return nil }
+
 // mountedPath is the path the mounted event reports.
 func mountedPath(dir string) string { return dir }
 
