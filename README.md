@@ -343,6 +343,11 @@ and the sandbox receives the one-time ticket on stdin. The guide is
 LlamaIndex index as checked JSON files and loads it in a fresh process. Follow
 [the snapshot guide](https://mountable.io/docs/llamaindex).
 
+[`examples/haystack-pipeline`](examples/haystack-pipeline) saves a small
+Haystack pipeline as YAML, verifies it in a fresh process and loads it with
+Haystack's default protections, without a model call. mountable.io maintains
+it separately from Haystack. [Guide](https://mountable.io/docs/haystack).
+
 [`examples/external-integrations`](examples/external-integrations) has Pydantic
 AI tools for persistent Markdown notes and a paginated Mem0 record export.
 Both use the Files API through the SDK. Their offline tests exercise the real
