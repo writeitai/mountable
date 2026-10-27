@@ -411,6 +411,11 @@ flow that uploads a closed report and returns an id. A second process runs
 a reader flow and checks the same bytes. The guide is
 <https://mountable.io/docs/prefect>.
 
+[`examples/dagster-materialization`](examples/dagster-materialization)
+materializes a tiny local Dagster asset, uploads the closed JSON report, and
+has a fresh process check the run id, asset key, row count and checksums.
+The guide is <https://mountable.io/docs/dagster>.
+
 [`examples/csv-parquet-batches`](examples/csv-parquet-batches) commits small
 CSV-to-Parquet batches one at a time through the SDK. A manifest records a
 batch only after its upload reads back with the right checksum, so a fresh
