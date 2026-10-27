@@ -409,6 +409,7 @@ def delete_dataset(dataset_id: str) -> None:
             mapped = _mapped(exc)
             if mapped is None or mapped.code != "not_found":
                 raise
+    _remove_empty_parents(store, dataset_id)
 
 
 def _remove_empty_parents(store: Store, dataset_id: str) -> None:

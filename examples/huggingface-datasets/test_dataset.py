@@ -12,8 +12,10 @@ from dataset import (
     REQUIRED,
     USER,
     RecipeError,
+    SdkStore,
     bind_store,
     build_features,
+    delete_dataset,
     live_roundtrip,
     open_store,
     overwrite_dataset,
@@ -165,6 +167,28 @@ def test_extra_local_file_refuses_the_upload(monkeypatch, tmp_path):
     with pytest.raises(RecipeError) as refused:
         save_closed(tmp_path / "extra")
     assert refused.value.code == "unexpected_files"
+
+
+def test_cleanup_removes_empty_sdk_parents():
+    class Recording(Fake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[str] = []
+
+        def delete(self, path: str) -> None:
+            self.deleted.append(path)
+            super().delete(path)
+
+    recorded = Recording()
+    bind_store(SdkStore(recorded))
+    dataset_id = publish_dataset("78" * 8)
+    delete_dataset(dataset_id)
+    assert piece_path(dataset_id, MARKER) not in recorded.files
+    assert recorded.deleted[-3:] == [
+        f"datasets/{USER}/{dataset_id}",
+        f"datasets/{USER}",
+        "datasets",
+    ]
 
 
 def test_two_processes_match_then_preserve_and_delete(tmp_path, monkeypatch):
