@@ -129,6 +129,57 @@ jobs:
           path: dist/mountable-windows-amd64.exe
           retention-days: 14
 
+  windows-qualification:
+    name: Windows qualification (${{ matrix.os }})
+    # Never run fork pull requests, as above.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install WinFsp 2.2 Beta 5
+        run: |
+          Invoke-WebRequest https://github.com/winfsp/winfsp/releases/download/v2.2B5/winfsp-2.2.26286.msi -OutFile "$env:RUNNER_TEMP\winfsp.msi"
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', "$env:RUNNER_TEMP\winfsp.msi", '/qn'
+          if ($p.ExitCode -ne 0) { throw "msiexec exited $($p.ExitCode)" }
+      # The cell's server, built from the engine fork go.mod pins.
+      - name: Build the cell's server
+        shell: bash
+        run: |
+          go mod download github.com/seaweedfs/seaweedfs
+          src=$(go list -m -f '{{if .Replace}}{{.Replace.Dir}}{{else}}{{.Dir}}{{end}}' github.com/seaweedfs/seaweedfs)
+          (cd "$src" && go build -o "$RUNNER_TEMP/weed.exe" ./weed)
+      - name: Start a local cell
+        run: |
+          New-Item -ItemType Directory "$env:RUNNER_TEMP\cell" | Out-Null
+          Start-Process -FilePath "$env:RUNNER_TEMP\weed.exe" -WindowStyle Hidden `
+            -ArgumentList 'server', '-ip=127.0.0.1', "-dir=$env:RUNNER_TEMP\cell", '-filer', '-master.volumeSizeLimitMB=64', '-volume.max=16' `
+            -RedirectStandardError "$env:RUNNER_TEMP\weed.log" -RedirectStandardOutput "$env:RUNNER_TEMP\weed.out"
+          for ($i = 0; $i -lt 90; $i++) {
+            try { Invoke-WebRequest http://127.0.0.1:8888/ -UseBasicParsing | Out-Null; exit 0 } catch { Start-Sleep 1 }
+          }
+          Get-Content "$env:RUNNER_TEMP\weed.log" -Tail 50
+          throw "the cell did not start"
+      - name: Qualification against the cell
+        run: go test ./cmd/mountable -run '^TestCell|^TestWinFsp' -count=1 -v
+        env:
+          MOUNTABLE_TEST_CELL: 127.0.0.1:8888
+          MOUNTABLE_TEST_WINFSP: "1"
+      - name: The cell's log
+        if: failure()
+        run: Get-Content "$env:RUNNER_TEMP\weed.log" -Tail 200
+
   sdk-python:
     name: Python SDK
     # Never run fork pull requests: CI may use a self-hosted runner.
