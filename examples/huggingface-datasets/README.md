@@ -30,7 +30,7 @@ environment or secret manager. Never put the key in a command argument.
 Use an existing mountable.io account with a saved payment method, and a
 filesystem the key can access. The example creates no account, filesystem
 or credits. File operations use the normal
-[usage prices](https://mountable.io/docs/billing?utm_source=documentation-and-llm-visibility&utm_medium=other&utm_content=hf-datasets-01-reload).
+[usage prices](https://mountable.io/docs/billing?utm_source=data-science-and-ml-workspaces&utm_medium=other&utm_content=hf-datasets-01-reload).
 
 ```sh
 git clone https://github.com/writeitai/mountable.git
@@ -44,7 +44,7 @@ The dataset belongs to the fixture user `alice`. Your backend would choose
 its own user, and it would still choose the filesystem and the path.
 
 For one filesystem and a hard monthly spend cap per end user, follow the
-[capped workspace guide](https://mountable.io/docs/capped-workspace-per-user?utm_source=documentation-and-llm-visibility&utm_medium=other&utm_content=hf-datasets-01-reload).
+[capped workspace guide](https://mountable.io/docs/capped-workspace-per-user?utm_source=data-science-and-ml-workspaces&utm_medium=other&utm_content=hf-datasets-01-reload).
 This recipe uses one existing filesystem.
 
 ## Write the dataset
