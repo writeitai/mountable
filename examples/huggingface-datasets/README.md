@@ -19,9 +19,9 @@ Hugging Face. It is not an official Hugging Face integration. The hosted
 mountable.io service is paid. The example and client are open source.
 
 Pinned: `datasets` 5.1.0 and `mountable-sdk` 0.3.0. The one-shard file
-names come from
-[Dataset](https://huggingface.co/docs/datasets/package_reference/main_classes),
-read on 2026-10-27.
+names were observed from `datasets` 5.1.0 `save_to_disk` on 2026-10-27.
+The API reference is
+[Dataset](https://huggingface.co/docs/datasets/package_reference/main_classes).
 
 ## Setup
 
