@@ -133,6 +133,12 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: smolagents tools keep a note across a fresh process
+        working-directory: examples/smolagents-workspace
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: LlamaIndex closed snapshots verify before loading
         working-directory: examples/llamaindex-snapshot
         run: |
