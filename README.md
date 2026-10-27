@@ -407,6 +407,11 @@ refused and the first edit stays. The second process reads again and sets
 only its own field. Its offline tests need no credentials. The guide is
 <https://mountable.io/docs/stale-edit>.
 
+[`examples/job-cleanup`](examples/job-cleanup) records the files one job
+created and deletes a file only when its path and ETag still match. A
+second job's prefix stays. Its offline tests need no credentials. The
+guide is <https://mountable.io/docs/job-cleanup>.
+
 [`examples/fastapi-reports`](examples/fastapi-reports) generates a small
 report in a FastAPI process, uploads it, and returns it from a second
 process. The caller receives an id only after the upload succeeds. The guide
