@@ -104,8 +104,8 @@ detected, and cleanup leaves no files.
 You do not need the worker's files to read the report. From any machine:
 
 ```sh
-mountable files read "$FS_ID" pytest/run1/junit.xml > junit.xml
-mountable files read "$FS_ID" pytest/run1/failure.txt
+mountable files read "$FS_ID" "pytest/$RUN/junit.xml" > junit.xml
+mountable files read "$FS_ID" "pytest/$RUN/failure.txt"
 ```
 
 Use `check` above when `./out` is still on your machine and you want the
