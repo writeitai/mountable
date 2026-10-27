@@ -194,7 +194,7 @@ func (e *engine) unmount() error {
 		return nil
 	default:
 	}
-	held, err := e.fs.closing()
+	held, err := e.fs.closing(func(path string) { e.host.FlushCached(path) })
 	if err != nil {
 		return err
 	}
@@ -261,19 +261,28 @@ func (e *engine) abort() error {
 
 // closing refuses every open from now on (for good: an unmount that fails
 // after it turns into an abort), then commits every file still open for
-// writing, and returns how many there were. A failed commit is the error:
-// the clean unmount then turns into an abort. A file released meanwhile
-// was committed by its release.
-func (p *privateFS) closing() (int, error) {
+// writing, and returns how many there were. Windows may still hold such a
+// file's data in its cache manager, which the engine cannot see, so first
+// flush asks WinFsp to write it out (a change notification for the path
+// does: WinFsp flushes the file's cache before it reports the change);
+// committing the engine's view alone would store the file's size with
+// zeros. A failed commit is the error: the clean unmount then turns into an
+// abort. A file released meanwhile was committed by its release.
+func (p *privateFS) closing(flush func(path string)) (int, error) {
 	p.mu.Lock()
 	p.isClosing = true
 	var writers []uint64
+	var paths []string
 	for fh, f := range p.handles {
 		if f.writing {
 			writers = append(writers, fh)
+			paths = append(paths, f.path)
 		}
 	}
 	p.mu.Unlock()
+	for _, path := range paths {
+		flush(path)
+	}
 	for _, fh := range writers {
 		errc := p.FileSystemInterface.Fsync("", false, fh)
 		if errc == -cgofuse.ENOENT || errc != 0 && !p.isOpen(fh) {
@@ -323,6 +332,7 @@ type privateFS struct {
 type openFile struct {
 	opens   int
 	writing bool
+	path    string // as WinFsp opened it
 }
 
 func newPrivateFS(adapter cgofuse.FileSystemInterface, readOnly bool, initialized chan struct{}) *privateFS {
@@ -372,12 +382,12 @@ func (p *privateFS) admit() int {
 	return 0
 }
 
-func (p *privateFS) opened(fh uint64, writing bool) {
+func (p *privateFS) opened(fh uint64, path string, writing bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	f := p.handles[fh]
 	if f == nil {
-		f = &openFile{}
+		f = &openFile{path: path}
 		p.handles[fh] = f
 	}
 	f.opens++
@@ -524,7 +534,7 @@ func (p *privateFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	}
 	errc, fh := p.FileSystemInterface.Create(path, flags, mode&^0o7777|0o644)
 	if errc == 0 {
-		p.opened(fh, true)
+		p.opened(fh, path, true)
 	}
 	return errc, fh
 }
@@ -541,7 +551,7 @@ func (p *privateFS) Open(path string, flags int) (int, uint64) {
 	}
 	errc, fh := p.FileSystemInterface.Open(path, flags)
 	if errc == 0 {
-		p.opened(fh, writes(flags))
+		p.opened(fh, path, writes(flags))
 	}
 	return errc, fh
 }

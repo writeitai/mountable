@@ -336,8 +336,12 @@ func TestPrivateFS(t *testing.T) {
 	}
 	// A clean unmount commits what is open for writing, and refuses opens.
 	p.Open("/w", cgofuse.O_WRONLY)
-	if n, err := p.closing(); n != 1 || err != nil || len(inner.synced) != 1 || inner.synced[0] != 9 {
+	var flushed []string
+	if n, err := p.closing(func(path string) { flushed = append(flushed, path) }); n != 1 || err != nil || len(inner.synced) != 1 || inner.synced[0] != 9 {
 		t.Errorf("closing: %d, %v; synced %v", n, err, inner.synced)
+	}
+	if len(flushed) != 1 || flushed[0] != "/w" {
+		t.Errorf("Windows' cache was flushed for %q before the commit, want /w", flushed)
 	}
 	if errc, _ := p.Open("/f", cgofuse.O_RDONLY); errc != -cgofuse.EBUSY {
 		t.Errorf("Open while closing: %d, want EBUSY", errc)
@@ -382,7 +386,7 @@ func TestClosingSkipsFilesReleasedMeanwhile(t *testing.T) {
 	p := newPrivateFS(inner, false, make(chan struct{}))
 	inner.p = p
 	p.Open("/w", cgofuse.O_WRONLY)
-	if n, err := p.closing(); n != 1 || err != nil {
+	if n, err := p.closing(func(string) {}); n != 1 || err != nil {
 		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, err)
 	}
 }

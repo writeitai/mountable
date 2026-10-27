@@ -12,10 +12,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -119,7 +121,19 @@ func (c *cell) stored(name string) (string, bool) {
 // files API does.
 func (c *cell) put(name, content string) {
 	c.t.Helper()
-	resp, err := http.Post(c.url(name), "application/octet-stream", strings.NewReader(content))
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", path.Base(name))
+	if err == nil {
+		_, err = part.Write([]byte(content))
+	}
+	if err == nil {
+		err = form.Close()
+	}
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	resp, err := http.Post(c.url(name), form.FormDataContentType(), &body)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -200,6 +214,19 @@ func TestCellWrites(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "gone")); err != nil {
 		t.Fatal(err)
 	}
+	// Saved the way editors and git save: written under a temporary name,
+	// closed, renamed over the file, and the temporary name used again at
+	// once. WinFsp commits a closed file at its Close, which can come after
+	// the rename.
+	for i := range 10 {
+		tmp := filepath.Join(dir, "saved.tmp")
+		if err := os.WriteFile(tmp, []byte(fmt.Sprintf("version %d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, "saved.txt")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	held, err := os.Create(filepath.Join(dir, "held.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -215,6 +242,7 @@ func TestCellWrites(t *testing.T) {
 		"closed.txt": "written and closed",
 		"d/new":      "renamed",
 		"held.txt":   "still open at the unmount",
+		"saved.txt":  "version 9",
 	} {
 		if got, ok := c.stored(name); !ok || got != want {
 			t.Errorf("after the clean stop, %s holds %q (%v), want %q", name, got, ok, want)
@@ -329,7 +357,7 @@ func TestCellGit(t *testing.T) {
 		t.Skip("no git")
 	}
 	dir := filepath.Join(t.TempDir(), "mnt")
-	c.mount(dir, false)
+	e := c.mount(dir, false)
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command(git, args...)
@@ -350,6 +378,23 @@ func TestCellGit(t *testing.T) {
 	}
 	run("gc", "-q")
 	run("fsck", "--full")
+	run("status", "--porcelain")
+	c.stop(e)
+
+	// What the cell stored is a whole repository: mounted again, it lists
+	// every file in HEAD with nothing to commit.
+	dir = filepath.Join(t.TempDir(), "again")
+	c.mount(dir, false)
+	out, err := exec.Command(git, "-C", dir, "ls-tree", "-r", "--name-only", "HEAD").Output()
+	if err != nil || strings.Count(string(out), "\n") != 20 {
+		t.Errorf("the stored repository's HEAD lists %q (%v), want 20 files", out, err)
+	}
+	if out, err := exec.Command(git, "-C", dir, "status", "--porcelain").Output(); err != nil || len(out) != 0 {
+		t.Errorf("the stored repository has changes %q (%v): its index was not stored", out, err)
+	}
+	if out, err := exec.Command(git, "-C", dir, "fsck", "--full").CombinedOutput(); err != nil {
+		t.Errorf("git fsck of the stored repository: %v\n%s", err, out)
+	}
 }
 
 // Another local user, logged on at the same time, can open nothing in the
