@@ -12,6 +12,13 @@ import (
 // serving stopping, and pending writes.
 const shutdownTimeout = 30 * time.Second
 
+// sameSignal is how soon after the signal that began a shutdown another one
+// is the same request delivered twice, not a second request to abort: a
+// terminal's Ctrl-C reaches the whole foreground process group, so a
+// launcher that forwards it (npm's) delivers it again, as does systemd
+// signalling every process of a unit.
+const sameSignal = time.Second
+
 type event int
 
 const (
@@ -76,6 +83,10 @@ type lifecycle struct {
 	renewed  <-chan struct{}
 	notAfter func() time.Time
 	timeout  time.Duration // for the ordinary shutdown
+	// sameSignal: a signal this soon after the one that began the shutdown
+	// is ignored.
+	sameSignal time.Duration
+	signaled   time.Time // when the signal that began the shutdown arrived
 	// ended is the event that ended the mount, once run returns.
 	ended event
 }
@@ -102,6 +113,7 @@ func (l *lifecycle) wait() event {
 		case <-l.e.served():
 			return eventUnmounted
 		case <-l.signals:
+			l.signaled = time.Now()
 			return eventSignal
 		case <-l.revoked:
 			return eventRevoked
@@ -115,8 +127,8 @@ func (l *lifecycle) wait() event {
 
 // shutdown ends the mount the ordinary way within l.timeout: unmount
 // cleanly (unless the mount is already gone), wait for serving to stop and
-// for pending writes. Failure, the deadline, a second signal, revocation or
-// expiry turn it into an abort.
+// for pending writes. Failure, the deadline, a second signal (not the first
+// delivered again), revocation or expiry turn it into an abort.
 func (l *lifecycle) shutdown(unmount bool) error {
 	done := make(chan error, 1)
 	go func() {
@@ -143,6 +155,9 @@ func (l *lifecycle) shutdown(unmount bool) error {
 		case <-deadline.C:
 			return l.abort(fmt.Sprintf("the mount did not shut down within %s", l.timeout))
 		case <-l.signals:
+			if !l.signaled.IsZero() && time.Since(l.signaled) < l.sameSignal {
+				continue // the first one again
+			}
 			return l.abort("a second signal arrived during shutdown")
 		case <-l.revoked:
 			return l.abort(reason(eventRevoked))

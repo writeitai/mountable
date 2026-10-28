@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -259,10 +261,17 @@ type fakeFS struct {
 	made    uint32
 	synced  []uint64
 	calls   int
+	// handles, when set, gives each path its own handle; failSync fails
+	// those handles' fsyncs.
+	handles  map[string]uint64
+	failSync map[uint64]int
 }
 
 func (f *fakeFS) Fsync(path string, datasync bool, fh uint64) int {
 	f.calls++
+	if errc := f.failSync[fh]; errc != 0 {
+		return errc
+	}
 	f.synced = append(f.synced, fh)
 	return 0
 }
@@ -294,6 +303,9 @@ func (f *fakeFS) Mkdir(path string, mode uint32) int {
 // Open hands every open of a file the same handle, as the engine does.
 func (f *fakeFS) Open(path string, flags int) (int, uint64) {
 	f.calls++
+	if fh, ok := f.handles[path]; ok {
+		return 0, fh
+	}
 	return 0, 9
 }
 
@@ -342,8 +354,8 @@ func TestPrivateFS(t *testing.T) {
 	// A clean unmount commits what is open for writing, and refuses opens.
 	p.Open("/w", cgofuse.O_WRONLY)
 	var flushed []string
-	if n, err := p.closing(func(path string) { flushed = append(flushed, path) }); n != 1 || err != nil || len(inner.synced) != 1 || inner.synced[0] != 9 {
-		t.Errorf("closing: %d, %v; synced %v", n, err, inner.synced)
+	if n, problems := p.closing(func(path string) bool { flushed = append(flushed, path); return true }); n != 1 || problems != nil || len(inner.synced) != 1 || inner.synced[0] != 9 {
+		t.Errorf("closing: %d, %v; synced %v", n, problems, inner.synced)
 	}
 	if len(flushed) != 1 || flushed[0] != "/w" {
 		t.Errorf("Windows' cache was flushed for %q before the commit, want /w", flushed)
@@ -391,24 +403,59 @@ func TestClosingSkipsFilesReleasedMeanwhile(t *testing.T) {
 	p := newPrivateFS(inner, false, make(chan struct{}))
 	inner.p = p
 	p.Open("/w", cgofuse.O_WRONLY)
-	if n, err := p.closing(func(string) {}); n != 1 || err != nil {
-		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, err)
+	if n, problems := p.closing(func(string) bool { return true }); n != 1 || problems != nil {
+		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, problems)
 	}
 }
 
 // A clean unmount writes out Windows' cache for an open file by the name
-// it has then: renamed itself, as git renames its index.lock, or with its
-// directory.
+// it has then: renamed itself, as git renames its index.lock over the
+// index, or with its directory. The index it replaced, still open, now
+// shares that name; an unlinked file keeps its last one.
 func TestClosingFlushesRenamedFiles(t *testing.T) {
-	inner := &fakeFS{}
+	inner := &fakeFS{handles: map[string]uint64{"/.git/index": 1, "/.git/index.lock": 2, "/gone": 3}}
 	p := newPrivateFS(inner, false, make(chan struct{}))
-	p.Create("/.git/index.lock", cgofuse.O_RDWR|cgofuse.O_CREAT, 0o644)
+	p.Open("/.git/index", cgofuse.O_WRONLY)
+	p.Open("/.git/index.lock", cgofuse.O_WRONLY)
+	p.Open("/gone", cgofuse.O_WRONLY)
+	p.Unlink("/gone")
 	p.Rename("/.git/index.lock", "/.git/index")
 	p.Rename("/.git", "/.git2")
-	p.Rename("/.git2x", "/other") // a sibling sharing the prefix moves nothing
+	p.Rename("/.git", "/other") // a string prefix of /.git2/index, not a path prefix
 	var flushed []string
-	if _, err := p.closing(func(path string) { flushed = append(flushed, path) }); err != nil || len(flushed) != 1 || flushed[0] != "/.git2/index" {
-		t.Errorf("closing flushed %q (%v), want /.git2/index", flushed, err)
+	_, problems := p.closing(func(path string) bool { flushed = append(flushed, path); return true })
+	slices.Sort(flushed)
+	if want := []string{"/.git2/index", "/.git2/index", "/gone"}; problems != nil || !slices.Equal(flushed, want) {
+		t.Errorf("closing flushed %q (%v), want %q", flushed, problems, want)
+	}
+	if errc := p.Rename("/.git2/index", "/x"); errc != -cgofuse.EBUSY {
+		t.Errorf("a rename while closing: %d, want EBUSY: the flushes go by name", errc)
+	}
+}
+
+// A file whose cache WinFsp will not flush is not committed, which would
+// store zeros where its cached pages were; a failed commit is reported.
+// Neither stops the other files' commits.
+func TestClosingCommitsWhatItCan(t *testing.T) {
+	attempts, pause := flushAttempts, flushPause
+	flushAttempts, flushPause = 3, 0
+	t.Cleanup(func() { flushAttempts, flushPause = attempts, pause })
+	inner := &fakeFS{handles: map[string]uint64{"/a": 1, "/b": 2, "/c": 3}, failSync: map[uint64]int{2: -cgofuse.EIO}}
+	p := newPrivateFS(inner, false, make(chan struct{}))
+	for _, name := range []string{"/a", "/b", "/c"} {
+		p.Open(name, cgofuse.O_WRONLY)
+	}
+	tries := map[string]int{}
+	n, problems := p.closing(func(path string) bool { tries[path]++; return path != "/a" })
+	if n != 3 || len(problems) != 2 || !slices.Equal(inner.synced, []uint64{3}) {
+		t.Fatalf("closing: %d, %v; synced %v, want only c's", n, problems, inner.synced)
+	}
+	if tries["/a"] != 3 {
+		t.Errorf("a refused flush was tried %d times, want 3", tries["/a"])
+	}
+	text := fmt.Sprint(problems)
+	if !strings.Contains(text, "caches for a,") || !strings.Contains(text, "b could not be committed") {
+		t.Errorf("the problems do not name a and b: %s", text)
 	}
 }
 

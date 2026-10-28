@@ -22,7 +22,9 @@ if (process.platform === "win32") {
   for (const signal of ["SIGINT", "SIGBREAK", "SIGHUP"]) process.on(signal, () => {});
 } else {
   // `mountable mount` unmounts on SIGINT/SIGTERM, so a signal sent to this
-  // launcher must reach it.
+  // launcher must reach it. A terminal's Ctrl-C reaches it as well, as it
+  // shares this process group; mountable takes the same signal again within
+  // a second as one request, not a second one to abort.
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
 }
 child.on("error", (error) => {

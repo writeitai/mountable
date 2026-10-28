@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/filer_pb"
@@ -185,15 +186,17 @@ func mount(o *output, ticket, dir string) (err error) {
 	revoked := make(chan struct{}, 1)
 	go session.mountSession.watch(ctx, revoked)
 	l := &lifecycle{
-		e:        e,
-		signals:  signals,
-		revoked:  revoked,
-		renewed:  session.renewed,
-		notAfter: session.notAfter,
-		timeout:  shutdownTimeout,
+		e:          e,
+		signals:    signals,
+		revoked:    revoked,
+		renewed:    session.renewed,
+		notAfter:   session.notAfter,
+		timeout:    shutdownTimeout,
+		sameSignal: sameSignal,
 	}
 	if interrupted {
 		l.ended = eventSignal
+		l.signaled = time.Now()
 		err = l.shutdown(true)
 	} else {
 		err = l.run()

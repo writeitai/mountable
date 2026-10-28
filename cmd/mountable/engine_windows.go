@@ -188,16 +188,17 @@ func (e *engine) served() <-chan struct{} { return e.done }
 // refused, and every file still open for writing is first committed
 // through the engine: all its program has written out so far. A program
 // that still holds such a file loses what it writes after that, which the
-// warning says.
+// warning says. A file that cannot be committed is named, and the stop goes
+// on: an abort would lose the other files' pending writes too.
 func (e *engine) unmount() error {
 	select {
 	case <-e.done:
 		return nil
 	default:
 	}
-	held, err := e.fs.closing(func(path string) { e.host.FlushCached(path) })
-	if err != nil {
-		return err
+	held, problems := e.fs.closing(e.host.FlushCached)
+	for _, problem := range problems {
+		diagnose("%v", problem)
 	}
 	if held > 0 {
 		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", held)
@@ -260,16 +261,18 @@ func (e *engine) abort() error {
 	}
 }
 
-// closing refuses every open from now on (for good: an unmount that fails
-// after it turns into an abort), then commits every file still open for
-// writing, and returns how many there were. Windows may still hold such a
-// file's data in its cache manager, which the engine cannot see, so first
-// flush asks WinFsp to write it out (a change notification for the path
-// does: WinFsp flushes the file's cache before it reports the change);
-// committing the engine's view alone would store the file's size with
-// zeros. A failed commit is the error: the clean unmount then turns into an
-// abort. A file released meanwhile was committed by its release.
-func (p *privateFS) closing(flush func(path string)) (int, error) {
+// closing refuses every open and rename from now on (for good: an unmount
+// that fails after it turns into an abort), then commits every file still
+// open for writing. It returns how many there were, and a problem for each
+// it could not commit, which keeps what was committed last. Windows may
+// still hold such a file's data in its cache manager, which the engine
+// cannot see, so first flush asks WinFsp to write it out (a change
+// notification for the path does: WinFsp flushes the file's cache before
+// it reports the change). Committing the engine's view alone would store
+// the file's size with zeros, so a file whose flush WinFsp refuses, after
+// retries, is not committed. A failure does not stop the other files'
+// commits. A file released meanwhile was committed by its release.
+func (p *privateFS) closing(flush func(path string) bool) (int, []error) {
 	p.mu.Lock()
 	p.isClosing = true
 	var writers []uint64
@@ -281,19 +284,41 @@ func (p *privateFS) closing(flush func(path string)) (int, error) {
 		}
 	}
 	p.mu.Unlock()
-	for _, path := range paths {
-		flush(path)
-	}
-	for _, fh := range writers {
+	var problems []error
+	for i, fh := range writers {
+		name := strings.TrimPrefix(paths[i], "/")
+		if !flushed(flush, paths[i]) {
+			problems = append(problems, fmt.Errorf("Windows did not hand over what it caches for %s, so its writes since it was last committed are lost", name))
+			continue
+		}
 		errc := p.FileSystemInterface.Fsync("", false, fh)
 		if errc == -cgofuse.ENOENT || errc != 0 && !p.isOpen(fh) {
 			continue // released meanwhile, and committed there
 		}
 		if errc != 0 {
-			return len(writers), fmt.Errorf("committing a file open for writing: %v", cgofuse.Error(errc))
+			problems = append(problems, fmt.Errorf("%s could not be committed (%v), so its writes since it was last committed are lost", name, cgofuse.Error(errc)))
 		}
 	}
-	return len(writers), nil
+	return len(writers), problems
+}
+
+// flushAttempts and flushPause bound the retries of a refused flush:
+// WinFsp refuses a change notification while renames are in progress.
+var (
+	flushAttempts = 10
+	flushPause    = 100 * time.Millisecond
+)
+
+func flushed(flush func(path string) bool, path string) bool {
+	for attempt := range flushAttempts {
+		if attempt > 0 {
+			time.Sleep(flushPause)
+		}
+		if flush(path) {
+			return true
+		}
+	}
+	return false
 }
 
 // fileSecurity is the access list every file in the mount gets, in SDDL:
@@ -373,7 +398,7 @@ func (p *privateFS) isOpen(fh uint64) bool {
 	return p.handles[fh] != nil
 }
 
-// admit refuses an open once a clean unmount has begun.
+// admit refuses an open or a rename once a clean unmount has begun.
 func (p *privateFS) admit() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -484,6 +509,9 @@ func (p *privateFS) Readlink(path string) (int, string) {
 func (p *privateFS) Rename(oldpath, newpath string) int {
 	if p.ended.Load() {
 		return -cgofuse.EIO
+	}
+	if errc := p.admit(); errc != 0 {
+		return errc // a clean unmount is flushing files by their names
 	}
 	errc := p.FileSystemInterface.Rename(oldpath, newpath)
 	if errc == 0 {

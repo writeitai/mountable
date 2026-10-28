@@ -178,8 +178,8 @@ func (c *cell) mode(name string) os.FileMode {
 	return os.FileMode(entry.Attributes.FileMode).Perm()
 }
 
-// eventually waits up to 15 seconds for check to hold.
-// eventually waits for check to hold and returns how long that took.
+// eventually waits up to 15 seconds for check to hold and returns how long
+// that took.
 func eventually(t *testing.T, what string, check func() bool) time.Duration {
 	t.Helper()
 	start := time.Now()
@@ -289,26 +289,27 @@ func TestCellClosedFilesReachTheCell(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "mnt")
 	e := c.mount(dir, false)
 	defer c.stop(e)
-	const files = 5
-	start := time.Now()
-	for i := range files {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("closed%d.txt", i)), []byte(fmt.Sprintf("closed %d", i)), 0o644); err != nil {
+	// Well under the engine's periodic metadata flush (two minutes), which
+	// would commit the files without any Close.
+	const limit = 30 * time.Second
+	closed := map[string]time.Time{}
+	for i := range 5 {
+		name := fmt.Sprintf("closed%d.txt", i)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		closed[name] = time.Now()
 	}
-	written := time.Since(start)
-	for i := range files {
-		name, want := fmt.Sprintf("closed%d.txt", i), fmt.Sprintf("closed %d", i)
-		for {
-			if got, ok := c.stored(name); ok && got == want {
-				t.Logf("%s reached the cell %v after it was written", name, time.Since(start)-written)
-				break
+	for len(closed) > 0 {
+		for name, at := range closed {
+			if got, ok := c.stored(name); ok && got == name {
+				t.Logf("%s reached the cell %v after its close", name, time.Since(at).Round(50*time.Millisecond))
+				delete(closed, name)
+			} else if time.Since(at) > limit {
+				t.Fatalf("%s did not reach the cell within %v of its close", name, limit)
 			}
-			if time.Since(start) > 2*time.Minute {
-				t.Fatalf("%s did not reach the cell within two minutes of its close", name)
-			}
-			time.Sleep(100 * time.Millisecond)
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -333,23 +334,25 @@ func TestCellRemoteChanges(t *testing.T) {
 
 	// A move between directories as the Autoboard ticket sync makes one: the
 	// file written at its new path, then deleted from the old, with both
-	// directories listed meanwhile.
+	// directories listed (and so cached) before.
 	c.put("todo/t.md", "ticket")
-	eventually(t, "a remote create in a directory", func() bool {
-		_, err := os.Stat(filepath.Join(dir, "todo", "t.md"))
-		return err == nil
-	})
-	listed := func(sub string) bool {
+	c.put("done/other.md", "another ticket")
+	listed := func(sub string) (bool, error) {
 		entries, err := os.ReadDir(filepath.Join(dir, sub))
-		return err == nil && slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == "t.md" })
+		return slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == "t.md" }), err
 	}
-	listed("todo")
-	listed("done")
+	eventually(t, "remote creates in two directories", func() bool {
+		inTodo, err := listed("todo")
+		_, errDone := listed("done")
+		return err == nil && errDone == nil && inTodo
+	})
 	c.put("done/t.md", "ticket, done")
 	c.remove("todo/t.md")
-	t.Logf("a remote move appeared in both listings after %v", eventually(t, "a remote move", func() bool {
+	t.Logf("a remote move appeared in both listings after %v (directory listings are cached for up to 1 s)", eventually(t, "a remote move", func() bool {
 		got, err := os.ReadFile(filepath.Join(dir, "done", "t.md"))
-		return err == nil && string(got) == "ticket, done" && listed("done") && !listed("todo")
+		inDone, errDone := listed("done")
+		inTodo, errTodo := listed("todo")
+		return err == nil && string(got) == "ticket, done" && errDone == nil && inDone && errTodo == nil && !inTodo
 	}))
 }
 

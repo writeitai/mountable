@@ -198,6 +198,27 @@ func TestEventsDuringShutdownAbort(t *testing.T) {
 	}
 }
 
+// The signal that began the shutdown, delivered again at once (by a
+// launcher that forwards the terminal's Ctrl-C to it), is not a request to
+// abort; a later one is.
+func TestTheSameSignalAgainDoesNotAbort(t *testing.T) {
+	h := newHarness(time.Hour)
+	h.l.timeout = time.Hour
+	h.l.sameSignal = time.Hour
+	release := make(chan struct{})
+	blocked := make(chan struct{})
+	h.e.unmountFn = func() error { close(blocked); <-release; close(h.e.done); return nil }
+	h.signals <- syscall.SIGINT
+	result := h.runAsync()
+	<-blocked
+	h.signals <- syscall.SIGINT
+	time.Sleep(50 * time.Millisecond) // the duplicate is read and passed over
+	close(release)
+	if err := await(t, result); err != nil || h.e.aborted.Load() {
+		t.Fatalf("the repeated signal aborted the shutdown: %v", err)
+	}
+}
+
 func TestFailedCleanUnmountAborts(t *testing.T) {
 	h := newHarness(time.Hour)
 	h.e.unmountFn = func() error { return errors.New("device or\nresource busy") }
