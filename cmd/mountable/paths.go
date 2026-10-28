@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -18,6 +17,9 @@ const helperTimeout = 10 * time.Second
 // component is followed by reading the link, unless the OS mount table
 // already lists it as a mount point (macOS), when it is not touched at all.
 func canonicalDir(dir string) (string, error) {
+	if letter, ok := driveLetter(dir); ok {
+		return letter, nil
+	}
 	for range 40 {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
@@ -54,17 +56,4 @@ func withTimeout(d time.Duration, fn func() error) error {
 	case <-time.After(d):
 		return errors.New("timed out")
 	}
-}
-
-// checkPrivate checks that a reused directory is this user's alone.
-func checkPrivate(dir string) error {
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !info.IsDir() || !ok || st.Uid != uint32(os.Getuid()) || info.Mode().Perm() != 0o700 {
-		return fmt.Errorf("%s must be a directory of yours with mode 0700; remove it and mount again", dir)
-	}
-	return nil
 }

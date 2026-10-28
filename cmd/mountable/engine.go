@@ -15,9 +15,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/user"
 	"runtime"
-	"strconv"
 	"sync"
 	"time"
 
@@ -56,6 +54,14 @@ type mountConfig struct {
 	cacheDir string
 }
 
+// owner is who the mount shows as the owner of the mount point, and the
+// local ids the filesystem owner's are mapped to.
+type owner struct {
+	uid, gid           uint32 // the mount point's
+	localUID, localGID int    // the local user's
+	ctime              time.Time
+}
+
 // startEngine mounts. Every step that talks to the gateway runs before the
 // mount is attached and ends with ctx or startupTimeout, even where the
 // engine's own calls ignore their context; once attached, a failure or
@@ -81,29 +87,38 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	}
 
 	dir := c.dir
-	info, err := os.Stat(dir)
+	owner, err := mountOwner(dir)
 	if err != nil {
 		return nil, err
 	}
-	uid, gid := util.GetFileUidGid(info)
-	if uid == 0 {
-		if u, err := user.Current(); err == nil {
-			if id, err := strconv.ParseUint(u.Uid, 10, 32); err == nil {
-				uid = uint32(id)
-			}
-			if id, err := strconv.ParseUint(u.Gid, 10, 32); err == nil {
-				gid = uint32(id)
-			}
-		}
-	}
 	mapper, err := meta_cache.NewUidGidMapper(
-		fmt.Sprintf("%d:%d", os.Getuid(), ownerID), fmt.Sprintf("%d:%d", os.Getgid(), ownerID))
+		fmt.Sprintf("%d:%d", owner.localUID, ownerID), fmt.Sprintf("%d:%d", owner.localGID, ownerID))
 	if err != nil {
 		return nil, err
 	}
 
-	wfs := weedmount.NewSeaweedFileSystem(&weedmount.Option{
-		MountDirectory:        dir,
+	wfs := newWFS(filers, dialOption, c, owner, mapper, cipher)
+	parent, name := util.FullPath(c.root).DirAndName()
+	if err := unlessCancelled(ctx, func() error {
+		return filer_pb.Mkdir(ctx, wfs, parent, name, nil)
+	}); err != nil {
+		return nil, fmt.Errorf("creating the filesystem root: %w", err)
+	}
+	// Reads the cell's configuration (without a deadline of its own) and
+	// starts the metadata subscription; nothing here needs the mount.
+	if err := unlessCancelled(ctx, wfs.StartBackgroundTasks); err != nil {
+		return nil, fmt.Errorf("starting the mount engine: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return attach(ctx, wfs, c)
+}
+
+// newWFS is the mount engine with the options mountable.io uses.
+func newWFS(filers []pb.ServerAddress, dialOption grpc.DialOption, c mountConfig, owner owner, mapper *meta_cache.UidGidMapper, cipher bool) *weedmount.WFS {
+	return weedmount.NewSeaweedFileSystem(&weedmount.Option{
+		MountDirectory:        c.dir,
 		FilerAddresses:        filers,
 		GrpcDialOption:        dialOption,
 		FilerMountRootPath:    c.root,
@@ -116,10 +131,10 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		CacheDirForWrite:      c.cacheDir,
 		CacheMetaTTlSec:       60,
 		CacheDirMaxEntries:    100000,
-		MountUid:              uid,
-		MountGid:              gid,
+		MountUid:              owner.uid,
+		MountGid:              owner.gid,
 		MountMode:             os.ModeDir | 0o777&^umask,
-		MountCtime:            info.ModTime(),
+		MountCtime:            owner.ctime,
 		MountMtime:            time.Now(),
 		Umask:                 umask,
 		VolumeServerAccess:    "filerProxy",
@@ -140,21 +155,6 @@ func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 		// retries.
 		RefusalsAreFinal: runtime.GOOS == "darwin",
 	})
-	parent, name := util.FullPath(c.root).DirAndName()
-	if err := unlessCancelled(ctx, func() error {
-		return filer_pb.Mkdir(ctx, wfs, parent, name, nil)
-	}); err != nil {
-		return nil, fmt.Errorf("creating the filesystem root: %w", err)
-	}
-	// Reads the cell's configuration (without a deadline of its own) and
-	// starts the metadata subscription; nothing here needs the mount.
-	if err := unlessCancelled(ctx, wfs.StartBackgroundTasks); err != nil {
-		return nil, fmt.Errorf("starting the mount engine: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return attach(ctx, wfs, c)
 }
 
 // unlessCancelled runs fn and returns its error, or ctx's error as soon as

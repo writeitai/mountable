@@ -6,6 +6,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/seaweedfs/go-fuse/v2 v2.9.4
 	github.com/seaweedfs/seaweedfs v0.0.0-20260928155340-530be3e37337
+	github.com/winfsp/cgofuse v1.6.1-0.20260126094232-f2c4fccdb286
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.85.0-dev.0.20260915183914-4e49413dcab7
 	google.golang.org/protobuf v1.36.12
@@ -67,4 +68,4 @@ require (
 	google.golang.org/grpc/security/advancedtls v1.0.0 // indirect
 )
 
-replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261023203747-4688ccdcba39
+replace github.com/seaweedfs/seaweedfs => github.com/writeitai/seaweedfs v0.0.0-20261027154244-58779d481725

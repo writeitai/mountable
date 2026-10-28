@@ -1,12 +1,13 @@
+//go:build !windows
+
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"golang.org/x/sys/unix"
 )
 
 func TestCanonicalDir(t *testing.T) {
@@ -154,7 +155,7 @@ func TestStaleCacheDirsArePruned(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Close()
-	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := tryLockFile(held); err != nil {
 		t.Fatal(err)
 	}
 	dir, release, err := mountCacheDir()
@@ -169,7 +170,7 @@ func TestStaleCacheDirsArePruned(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := unix.Flock(int(other.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+	if err := tryLockFile(other); err == nil {
 		t.Fatal("the new mount's lock is free")
 	}
 }
@@ -193,7 +194,7 @@ func TestCacheDirsWhenInDoubt(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { root.Close() })
-			if err := unix.Flock(int(root.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			if err := tryLockFile(root); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -203,9 +204,9 @@ func TestCacheDirsWhenInDoubt(t *testing.T) {
 			}
 		}},
 		{"no flock", func(t *testing.T, _ string) {
-			saved := flock
-			flock = func(int, int) error { return unix.ENOTSUP }
-			t.Cleanup(func() { flock = saved })
+			saved := tryLock
+			tryLock = func(*os.File) error { return errors.ErrUnsupported }
+			t.Cleanup(func() { tryLock = saved })
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

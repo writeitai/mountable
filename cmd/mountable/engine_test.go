@@ -79,7 +79,7 @@ func TestSignalEndsAStalledStartup(t *testing.T) {
 				root:     "/c/fs1",
 				dir:      dir,
 				tls:      config,
-				cacheDir: t.TempDir(),
+				cacheDir: engineCacheDir(t),
 			})
 			return err
 		})
