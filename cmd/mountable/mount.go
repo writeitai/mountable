@@ -141,7 +141,7 @@ func mount(o *output, ticket, dir string) (err error) {
 		cleanup = func() {}
 	)
 	defer func() { cleanup() }()
-	interrupted, err := untilSignal(signals, func(ctx context.Context) error {
+	interruption, err := untilSignal(signals, func(ctx context.Context) error {
 		var err error
 		session, cleanup, err = startSession(ctx, ticket)
 		if err != nil {
@@ -162,7 +162,7 @@ func mount(o *output, ticket, dir string) (err error) {
 		return err
 	})
 	if err != nil {
-		if interrupted {
+		if interruption != nil {
 			return errInterrupted
 		}
 		return err
@@ -194,9 +194,9 @@ func mount(o *output, ticket, dir string) (err error) {
 		timeout:    shutdownTimeout,
 		sameSignal: sameSignal,
 	}
-	if interrupted {
+	if interruption != nil {
 		l.ended = eventSignal
-		l.signaled = time.Now()
+		l.first, l.signaled = interruption, time.Now()
 		err = l.shutdown(true)
 	} else {
 		err = l.run()
@@ -279,18 +279,18 @@ func startSession(ctx context.Context, ticket string) (*startedSession, func(), 
 }
 
 // untilSignal runs fn, cancelling its context if a signal arrives first;
-// interrupted reports whether one did.
-func untilSignal(signals <-chan os.Signal, fn func(ctx context.Context) error) (interrupted bool, err error) {
+// interruption is that signal.
+func untilSignal(signals <-chan os.Signal, fn func(ctx context.Context) error) (interruption os.Signal, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- fn(ctx) }()
 	select {
 	case err := <-result:
-		return false, err
-	case <-signals:
+		return nil, err
+	case sig := <-signals:
 		cancel()
-		return true, <-result
+		return sig, <-result
 	}
 }
 

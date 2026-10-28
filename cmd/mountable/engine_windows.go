@@ -200,8 +200,8 @@ func (e *engine) unmount() error {
 	for _, problem := range problems {
 		diagnose("%v", problem)
 	}
-	if held > 0 {
-		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", held)
+	if saved := held - len(problems); saved > 0 {
+		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", saved)
 	}
 	if err := e.removeVolume(time.Now().Add(abortTimeout)); err != nil {
 		return err
@@ -288,6 +288,11 @@ func (p *privateFS) closing(flush func(path string) bool) (int, []error) {
 	for i, fh := range writers {
 		name := strings.TrimPrefix(paths[i], "/")
 		if !flushed(flush, paths[i]) {
+			p.mu.Lock()
+			if f := p.handles[fh]; f != nil {
+				f.unflushed = true
+			}
+			p.mu.Unlock()
 			problems = append(problems, fmt.Errorf("Windows did not hand over what it caches for %s, so its writes since it was last committed are lost", name))
 			continue
 		}
@@ -359,6 +364,9 @@ type openFile struct {
 	opens   int
 	writing bool
 	path    string // as WinFsp opened it, then renamed
+	// unflushed: a clean unmount could not have Windows write out its cache,
+	// so it is never released in the engine, whose release would commit it.
+	unflushed bool
 }
 
 func newPrivateFS(adapter cgofuse.FileSystemInterface, readOnly bool, initialized chan struct{}) *privateFS {
@@ -385,6 +393,9 @@ func (p *privateFS) releaseAll() {
 	p.handles = map[uint64]*openFile{}
 	p.mu.Unlock()
 	for fh, f := range handles {
+		if f.unflushed {
+			continue // its writer lock goes when the process exits
+		}
 		for range f.opens {
 			p.FileSystemInterface.Release("", fh)
 		}

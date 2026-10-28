@@ -221,7 +221,10 @@ func TestControlSocketReportsAFailedEnd(t *testing.T) {
 	go func() { answered <- abortMount(dir) }()
 	for range 2 {
 		select {
-		case <-signals:
+		case sig := <-signals:
+			if sig != abortRequest {
+				t.Fatalf("abort arrived as %v, which a repeat would not abort", sig)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("abort did not arrive as two signals")
 		}
@@ -265,6 +268,7 @@ type fakeFS struct {
 	// those handles' fsyncs.
 	handles  map[string]uint64
 	failSync map[uint64]int
+	released []uint64
 }
 
 func (f *fakeFS) Fsync(path string, datasync bool, fh uint64) int {
@@ -311,6 +315,7 @@ func (f *fakeFS) Open(path string, flags int) (int, uint64) {
 
 func (f *fakeFS) Release(path string, fh uint64) int {
 	f.calls++
+	f.released = append(f.released, fh)
 	return 0
 }
 
@@ -452,6 +457,12 @@ func TestClosingCommitsWhatItCan(t *testing.T) {
 	}
 	if tries["/a"] != 3 {
 		t.Errorf("a refused flush was tried %d times, want 3", tries["/a"])
+	}
+	// Released in the engine, a would be committed after all.
+	p.releaseAll()
+	slices.Sort(inner.released)
+	if !slices.Equal(inner.released, []uint64{2, 3}) {
+		t.Errorf("released %v after the volume went, want b and c only", inner.released)
 	}
 	text := fmt.Sprint(problems)
 	if !strings.Contains(text, "caches for a,") || !strings.Contains(text, "b could not be committed") {

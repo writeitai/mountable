@@ -436,7 +436,7 @@ func (c *control) handle(conn net.Conn) {
 	case "unmount":
 		sendSignal(c.signals, syscall.SIGTERM, 1)
 	case "abort":
-		sendSignal(c.signals, syscall.SIGTERM, 2)
+		sendSignal(c.signals, abortRequest, 2)
 	default:
 		fmt.Fprintln(conn, "error: unknown request")
 		return

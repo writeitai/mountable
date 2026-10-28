@@ -19,6 +19,16 @@ const shutdownTimeout = 30 * time.Second
 // signalling every process of a unit.
 const sameSignal = time.Second
 
+// abortRequest asks for an abort; the duplicate window never swallows it.
+// The Windows control socket's abort sends two: the first begins the
+// shutdown, the second aborts it.
+var abortRequest os.Signal = abortSignal{}
+
+type abortSignal struct{}
+
+func (abortSignal) String() string { return "abort request" }
+func (abortSignal) Signal()        {}
+
 type event int
 
 const (
@@ -83,10 +93,11 @@ type lifecycle struct {
 	renewed  <-chan struct{}
 	notAfter func() time.Time
 	timeout  time.Duration // for the ordinary shutdown
-	// sameSignal: a signal this soon after the one that began the shutdown
-	// is ignored.
+	// sameSignal: the signal that began the shutdown, again this soon, is
+	// ignored.
 	sameSignal time.Duration
-	signaled   time.Time // when the signal that began the shutdown arrived
+	first      os.Signal // the signal that began the shutdown
+	signaled   time.Time // when it arrived
 	// ended is the event that ended the mount, once run returns.
 	ended event
 }
@@ -112,8 +123,8 @@ func (l *lifecycle) wait() event {
 		select {
 		case <-l.e.served():
 			return eventUnmounted
-		case <-l.signals:
-			l.signaled = time.Now()
+		case sig := <-l.signals:
+			l.first, l.signaled = sig, time.Now()
 			return eventSignal
 		case <-l.revoked:
 			return eventRevoked
@@ -154,8 +165,8 @@ func (l *lifecycle) shutdown(unmount bool) error {
 			return l.abort(fmt.Sprintf("%s could not be unmounted cleanly (%s)", l.e.mountPoint(), oneLine(err)))
 		case <-deadline.C:
 			return l.abort(fmt.Sprintf("the mount did not shut down within %s", l.timeout))
-		case <-l.signals:
-			if !l.signaled.IsZero() && time.Since(l.signaled) < l.sameSignal {
+		case sig := <-l.signals:
+			if sig != abortRequest && sig == l.first && time.Since(l.signaled) < l.sameSignal {
 				continue // the first one again
 			}
 			return l.abort("a second signal arrived during shutdown")

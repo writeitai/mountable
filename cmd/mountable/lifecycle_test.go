@@ -219,6 +219,34 @@ func TestTheSameSignalAgainDoesNotAbort(t *testing.T) {
 	}
 }
 
+// Within the window, another signal than the one that began the shutdown
+// (Ctrl-C, then a supervisor's SIGTERM) aborts, and so does an abort
+// request, even right after one began it: the Windows control socket's
+// abort is two.
+func TestOtherSignalsAndAbortRequestsAbortAtOnce(t *testing.T) {
+	cases := map[string][2]os.Signal{
+		"another signal":             {syscall.SIGINT, syscall.SIGTERM},
+		"an abort request":           {syscall.SIGINT, abortRequest},
+		"the control socket's abort": {abortRequest, abortRequest},
+	}
+	for name, sent := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(time.Hour)
+			h.l.timeout = time.Hour
+			h.l.sameSignal = time.Hour
+			blocked := make(chan struct{})
+			h.e.unmountFn = func() error { close(blocked); select {} }
+			h.signals <- sent[0]
+			result := h.runAsync()
+			<-blocked
+			h.signals <- sent[1]
+			if err := await(t, result); err == nil || !h.e.aborted.Load() {
+				t.Fatalf("expected an abort, got %v", err)
+			}
+		})
+	}
+}
+
 func TestFailedCleanUnmountAborts(t *testing.T) {
 	h := newHarness(time.Hour)
 	h.e.unmountFn = func() error { return errors.New("device or\nresource busy") }
@@ -263,16 +291,16 @@ func TestNoAbortOnceServingStopped(t *testing.T) {
 func TestUntilSignalCancelsStartup(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	signals <- syscall.SIGINT
-	interrupted, err := untilSignal(signals, func(ctx context.Context) error {
+	interruption, err := untilSignal(signals, func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	if !interrupted || !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v, %v", interrupted, err)
+	if interruption != syscall.SIGINT || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, %v", interruption, err)
 	}
-	interrupted, err = untilSignal(make(chan os.Signal), func(context.Context) error { return nil })
-	if interrupted || err != nil {
-		t.Fatalf("got %v, %v", interrupted, err)
+	interruption, err = untilSignal(make(chan os.Signal), func(context.Context) error { return nil })
+	if interruption != nil || err != nil {
+		t.Fatalf("got %v, %v", interruption, err)
 	}
 }
 
