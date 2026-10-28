@@ -143,6 +143,23 @@ func (c *cell) put(name, content string) {
 	}
 }
 
+// remove deletes a file in the cell past the mount.
+func (c *cell) remove(name string) {
+	c.t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, c.url(name), nil)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		c.t.Fatalf("removing %s: %s", name, resp.Status)
+	}
+}
+
 // mode is an entry's stored permission bits.
 func (c *cell) mode(name string) os.FileMode {
 	c.t.Helper()
@@ -162,15 +179,17 @@ func (c *cell) mode(name string) os.FileMode {
 }
 
 // eventually waits up to 15 seconds for check to hold.
-func eventually(t *testing.T, what string, check func() bool) {
+// eventually waits for check to hold and returns how long that took.
+func eventually(t *testing.T, what string, check func() bool) time.Duration {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	start := time.Now()
 	for !check() {
-		if time.Now().After(deadline) {
+		if time.Since(start) > 15*time.Second {
 			t.Fatalf("%s: not within 15s", what)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
+	return time.Since(start)
 }
 
 // Writes: durable when FlushFileBuffers returns; committed by a clean stop
@@ -294,22 +313,44 @@ func TestCellClosedFilesReachTheCell(t *testing.T) {
 }
 
 // Changes made past the mount (another mount, the files API) appear in it,
-// including in a file whose data Windows has cached.
+// including in a file whose data Windows has cached; the test records how
+// soon.
 func TestCellRemoteChanges(t *testing.T) {
 	c := newCell(t)
 	dir := filepath.Join(t.TempDir(), "mnt")
 	c.mount(dir, false)
 	path := filepath.Join(dir, "remote.txt")
 	c.put("remote.txt", "first")
-	eventually(t, "a remote create", func() bool {
+	t.Logf("a remote create appeared after %v", eventually(t, "a remote create", func() bool {
 		got, err := os.ReadFile(path)
 		return err == nil && string(got) == "first"
-	})
+	}))
 	c.put("remote.txt", "second, longer")
-	eventually(t, "a remote change to a cached file", func() bool {
+	t.Logf("a remote change to a cached file appeared after %v", eventually(t, "a remote change to a cached file", func() bool {
 		got, err := os.ReadFile(path)
 		return err == nil && string(got) == "second, longer"
+	}))
+
+	// A move between directories as the Autoboard ticket sync makes one: the
+	// file written at its new path, then deleted from the old, with both
+	// directories listed meanwhile.
+	c.put("todo/t.md", "ticket")
+	eventually(t, "a remote create in a directory", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "todo", "t.md"))
+		return err == nil
 	})
+	listed := func(sub string) bool {
+		entries, err := os.ReadDir(filepath.Join(dir, sub))
+		return err == nil && slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == "t.md" })
+	}
+	listed("todo")
+	listed("done")
+	c.put("done/t.md", "ticket, done")
+	c.remove("todo/t.md")
+	t.Logf("a remote move appeared in both listings after %v", eventually(t, "a remote move", func() bool {
+		got, err := os.ReadFile(filepath.Join(dir, "done", "t.md"))
+		return err == nil && string(got) == "ticket, done" && listed("done") && !listed("todo")
+	}))
 }
 
 // An ACL edit from Windows never adds an execute bit or changes group and
