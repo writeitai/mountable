@@ -95,8 +95,9 @@ with `bad_path` before any request.
 - `mountable mount` keeps stderr quiet. It says `mountable: mounted at DIR`
   (without `--json`), and otherwise only what needs attention, as
   `mountable: …` lines: the service not answering for 30 seconds and
-  answering again, a failed certificate renewal, why a mount ended. Programs
-  using the mount see a failed file operation as the operation's error.
+  answering again, a file it could not save, a failed certificate renewal,
+  why a mount ended. Programs using the mount also see a failed file
+  operation as the operation's error.
   `--verbose` adds the mount engine's full log, for debugging.
 - Exit codes: `0` success; `1` an error from the API, network, mount or
   credentials; `2` wrong usage.

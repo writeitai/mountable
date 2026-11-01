@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -67,7 +68,7 @@ type mountConfig struct {
 func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	ctx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
-	engineVerbose.Store(c.verbose)
+	engineShown.Store(&engineOutput{verbose: c.verbose, root: c.root, dir: c.dir})
 	if err := logToStderr(); err != nil {
 		return nil, err
 	}
@@ -180,8 +181,8 @@ func unlessCancelled(ctx context.Context, fn func() error) error {
 }
 
 // engineLog carries what the engine writes to os.Stderr through a pipe, so
-// its lines reach the real stderr with secrets removed, and only its fatal
-// errors unless engineVerbose.
+// its lines reach the real stderr with secrets removed, and only those
+// engineLine keeps.
 var engineLog struct {
 	mu      sync.Mutex
 	pipe    *os.File      // os.Stderr once redirected
@@ -190,8 +191,14 @@ var engineLog struct {
 
 const engineLogFlush = "\x00mountable: flush\n"
 
-// engineVerbose is mount --verbose: the engine's whole log reaches stderr.
-var engineVerbose atomic.Bool
+// engineOutput is what of the engine's log a mount shows (see engineLine).
+type engineOutput struct {
+	verbose bool   // mount --verbose: all of it
+	root    string // the filesystem's path in the cell
+	dir     string // where it is mounted
+}
+
+var engineShown atomic.Pointer[engineOutput]
 
 // logToStderr sends the engine's log to stderr, never to files, with
 // secrets removed. The engine writes to os.Stderr directly, so os.Stderr
@@ -225,7 +232,11 @@ func logToStderr() error {
 				}
 				continue
 			}
-			if shown := engineLine(line, engineVerbose.Load()); shown != "" {
+			out := engineShown.Load()
+			if out == nil { // no mount has started
+				out = &engineOutput{}
+			}
+			if shown := engineLine(line, out); shown != "" && (out.verbose || repeats.fresh(shown, time.Now())) {
 				writeDiagnostic(shown)
 			}
 			if err != nil {
@@ -240,20 +251,95 @@ func logToStderr() error {
 // Error, Fatal), date, time, source file and line, then the message.
 var glogLine = regexp.MustCompile(`^([IWEF])\d{4} \d\d:\d\d:\d\d\.\d{6} +\S+:\d+\]? (.*)`)
 
+// unsavedFile matches the engine's messages for a file it could not save,
+// from a flush at close, fsync or release (weed/mount/weedfs_file_sync.go):
+// the file's path in the cell, then the error. A failed flush at release
+// reaches no program.
+var unsavedFile = []*regexp.Regexp{
+	regexp.MustCompile(`^(/.*) doFlush: (.*)$`),
+	regexp.MustCompile(`^(/.*) fh \d+ flush: (.*)$`),
+	regexp.MustCompile(`^fh flush create (/.*): (.*)$`),
+}
+
 // engineLine is what reaches stderr of one line the engine wrote: the line
-// itself when verbose, otherwise only a fatal error's message. The engine
-// logs routine progress, and every retry, at the other levels; what a user
-// needs from a running mount, the mount reports in its own words, and a
-// failed file operation fails in the program that made it.
-func engineLine(line string, verbose bool) string {
-	if verbose {
+// itself with --verbose. Otherwise, in the mount's own words, only a file
+// the engine could not save and a fatal error. The engine logs routine
+// progress, and every retry, as it goes; a failed file operation also
+// fails in the program that made it, and the mount reports the service not
+// answering itself.
+func engineLine(line string, out *engineOutput) string {
+	if out.verbose {
 		return line
 	}
-	m := glogLine.FindStringSubmatch(line)
-	if m == nil || m[1] != "F" {
+	m := glogLine.FindStringSubmatch(strings.TrimRight(line, "\n"))
+	if m == nil {
 		return ""
 	}
-	return "mountable: fatal error: " + strings.TrimSpace(m[2]) + "\n"
+	switch severity, message := m[1], m[2]; severity {
+	case "F":
+		return "mountable: the mount stopped on an internal error; run it with --verbose for details\n"
+	case "E":
+		for _, pattern := range unsavedFile {
+			if f := pattern.FindStringSubmatch(message); f != nil {
+				return unsavedLine(out.localPath(f[1]), gist(f[2]))
+			}
+		}
+	}
+	return ""
+}
+
+func unsavedLine(path, why string) string {
+	return fmt.Sprintf("mountable: could not save %s: %s\n", path, why)
+}
+
+// unsaved says that the file at path could not be saved, and why.
+func unsaved(path, why string) {
+	if line := unsavedLine(path, why); repeats.fresh(line, time.Now()) {
+		writeDiagnostic(line)
+	}
+}
+
+// repeats drops a line that repeats the one before it within repeatQuiet
+// of its last time: the engine reports one failed flush at close and again
+// at release, and the Mac sends a refused file's writes one by one.
+var repeats quieter
+
+const repeatQuiet = 10 * time.Second
+
+type quieter struct {
+	mu   sync.Mutex
+	last string
+	at   time.Time
+}
+
+func (q *quieter) fresh(line string, now time.Time) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	fresh := line != q.last || now.Sub(q.at) >= repeatQuiet
+	q.last, q.at = line, now
+	return fresh
+}
+
+// localPath is where the file at path in the cell is in the mount.
+func (out *engineOutput) localPath(path string) string {
+	rest, ok := strings.CutPrefix(path, out.root)
+	if !ok || out.root == "" || (rest != "" && rest[0] != '/') {
+		return path
+	}
+	return filepath.Join(out.dir, rest)
+}
+
+// gist is the specific part of an error message: the end of a gRPC
+// status's description, or of a chain of errors, as in "connection refused"
+// or "entry quota exceeded".
+func gist(message string) string {
+	if i := strings.LastIndex(message, "desc = "); i >= 0 {
+		message = message[i+len("desc = "):]
+	}
+	if i := strings.LastIndex(message, ": "); i >= 0 {
+		message = message[i+2:]
+	}
+	return strings.Trim(message, `" `)
 }
 
 // flushEngineLog waits, briefly, until what the engine logged so far is

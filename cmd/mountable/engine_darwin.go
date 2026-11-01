@@ -57,7 +57,10 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 	if err != nil {
 		return nil, fmt.Errorf("creating the NFS socket's directory: %w", err)
 	}
-	server, err := nfs.NewServer(nfs.Config{Engine: wfs, UID: uint32(os.Getuid()), ReadOnly: c.readOnly})
+	server, err := nfs.NewServer(nfs.Config{
+		Engine: wfs, UID: uint32(os.Getuid()), ReadOnly: c.readOnly,
+		Unsaved: func(path, why string) { unsaved(filepath.Join(c.dir, path), why) },
+	})
 	if err != nil {
 		os.RemoveAll(socketDir)
 		return nil, err

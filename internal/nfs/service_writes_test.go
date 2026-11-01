@@ -2,6 +2,8 @@ package nfs
 
 import (
 	"bytes"
+	"slices"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -654,6 +656,32 @@ func TestFailedWriteLeavesNothing(t *testing.T) {
 	f.mu.Unlock()
 	if got := f.dataOf("a.txt"); got != "hYllo world" || opens != 2 || releases != 1 {
 		t.Fatalf("data %q, %d opens, %d releases", got, opens, releases)
+	}
+}
+
+// A WRITE a limit refused is reported with the file's path in the
+// filesystem; other failures are not.
+func TestRefusedWriteIsReported(t *testing.T) {
+	f := sampleEngine()
+	var mu sync.Mutex
+	var reported []string
+	_, c := startExport(t, Config{Engine: f, UID: 501, Unsaved: func(path, why string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, path+": "+why)
+	}})
+	fh, _ := c.lookup(c.root(), "a.txt")
+	for _, refusal := range []fuse.Status{fuse.Status(syscall.EDQUOT), fuse.Status(syscall.EFBIG), fuse.EIO} {
+		f.mu.Lock()
+		f.writeErr = refusal
+		f.mu.Unlock()
+		c.call(procWrite, wire{}.opaque(fh).u64(0).u32(1).u32(stableUnstable).str("X")).writeReply()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"/a.txt: a quota or the spending cap is reached", "/a.txt: the file is too large"}
+	if !slices.Equal(reported, want) {
+		t.Fatalf("reported %q, want %q", reported, want)
 	}
 }
 

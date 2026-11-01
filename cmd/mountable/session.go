@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -129,11 +128,7 @@ func failure(err error) string {
 	if status.Code(err) == codes.DeadlineExceeded {
 		return "timed out"
 	}
-	message := status.Convert(err).Message()
-	if i := strings.LastIndex(message, ": "); i >= 0 {
-		message = message[i+2:]
-	}
-	return strings.Trim(message, `" `)
+	return gist(status.Convert(err).Message())
 }
 
 // renew gets a new certificate for the same key and serves it from then on.

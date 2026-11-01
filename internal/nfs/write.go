@@ -3,6 +3,7 @@ package nfs
 import (
 	"crypto/rand"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -248,9 +249,30 @@ func (s *service) write(o *op) reply {
 	}
 	s.writes.give(w)
 	if status != nfsOK {
+		s.refused(obj.inode, status)
 		return fail(status)
 	}
 	return s.written(o, obj, written)
+}
+
+// limits says why a WRITE a limit refused was not saved.
+var limits = map[nfsStatus]string{
+	nfsErrDQuot: "a quota or the spending cap is reached",
+	nfsErrFBig:  "the file is too large",
+	nfsErrNoSpc: "the service is out of space",
+}
+
+// refused tells Config.Unsaved of a WRITE a limit refused.
+func (s *service) refused(inode uint64, status nfsStatus) {
+	why, ok := limits[status]
+	if !ok || s.unsaved == nil {
+		return
+	}
+	path, ok := s.engine.PathForInode(inode)
+	if !ok || strings.HasPrefix(path.Name(), "._") { // macOS's own AppleDouble files
+		return
+	}
+	s.unsaved(strings.TrimPrefix(string(path), strings.TrimSuffix(string(s.engine.MountRoot()), "/")), why)
 }
 
 // written answers a WRITE persisted: FILE_SYNC, with the verifier.

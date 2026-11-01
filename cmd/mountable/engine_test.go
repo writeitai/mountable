@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -119,23 +121,94 @@ func TestEngineLogIsRedacted(t *testing.T) {
 	}
 }
 
-func TestEngineLineShowsOnlyFatalErrorsUnlessVerbose(t *testing.T) {
+func TestEngineLineShowsOnlyWhatNeedsAttentionUnlessVerbose(t *testing.T) {
+	quiet := &engineOutput{root: "/c/fs1", dir: "/home/me/work"}
+	verbose := &engineOutput{verbose: true, root: "/c/fs1", dir: "/home/me/work"}
 	for _, c := range []struct {
-		line    string
-		verbose bool
-		want    string
+		line string
+		out  *engineOutput
+		want string
 	}{
-		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", false, ""},
-		{"I1101 11:13:54.138792 retry.go:164 retry filer grpc: err: rpc error: code = Unavailable\n", false, ""},
-		{"W1101 11:13:54.138792 weedfs.go:495 meta events follow retry from 2026-11-01: EOF\n", false, ""},
-		{"E1101 11:13:54.138792 weedfs_dir_read.go:359 dir ReadDirAll /x: rpc error\n", false, ""},
-		{"F1101 11:13:54.138792 filehandle.go:156 setting file handle entry to nil\n", false, "mountable: fatal error: setting file handle entry to nil\n"},
-		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", false, ""},
-		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", true, "I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n"},
-		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", true, "2026/11/01 11:00:07 writer: Write/Writev failed\n"},
+		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", quiet, ""},
+		{"I1101 11:13:54.138792 retry.go:164 retry filer grpc: err: rpc error: code = Unavailable desc = error reading from server: read: connection reset by peer\n", quiet, ""},
+		{"W1101 11:13:54.138792 weedfs.go:495 meta events follow retry from 2026-11-01: EOF\n", quiet, ""},
+		{"W1101 11:13:54.138792 weedfs_file_sync.go:214 /c/fs1/a fh 3 flush: retrying metadata flush (attempt 1/3) after 1s: EOF\n", quiet, ""},
+		{"E1101 11:13:54.138792 weedfs_dir_read.go:359 dir ReadDirAll /c/fs1/x: rpc error\n", quiet, ""},
+		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", quiet, ""},
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:182 /c/fs1/notes/a b.txt doFlush: upload data: rpc error: code = ResourceExhausted desc = entry quota exceeded\n", quiet,
+			"mountable: could not save /home/me/work/notes/a b.txt: entry quota exceeded\n"},
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:217 /c/fs1/a.txt fh 7 flush: rpc error: code = ResourceExhausted desc = filesystem_spending_cap_reached: the filesystem's monthly spending cap is reached\n", quiet,
+			"mountable: could not save /home/me/work/a.txt: the filesystem's monthly spending cap is reached\n"},
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:342 fh flush create /c/fs1/b.txt: disk quota exceeded\n", quiet,
+			"mountable: could not save /home/me/work/b.txt: disk quota exceeded\n"},
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:182 /c/fs10/a doFlush: EOF\n", quiet,
+			"mountable: could not save /c/fs10/a: EOF\n"},
+		{"W1101 11:13:54.138792 weedfs_file_io.go:153 release fh 4 inode 99: fallback flush failed: 5=input/output error\n", quiet, ""},
+		{"F1101 11:13:54.138792 filehandle.go:156 setting file handle entry to nil\n", quiet,
+			"mountable: the mount stopped on an internal error; run it with --verbose for details\n"},
+		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", verbose, "I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n"},
+		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", verbose, "2026/11/01 11:00:07 writer: Write/Writev failed\n"},
 	} {
-		if got := engineLine(c.line, c.verbose); got != c.want {
-			t.Errorf("engineLine(%q, %v) = %q, want %q", c.line, c.verbose, got, c.want)
+		if got := engineLine(c.line, c.out); got != c.want {
+			t.Errorf("engineLine(%q, %+v) = %q, want %q", c.line, c.out, got, c.want)
+		}
+	}
+}
+
+// The engine messages engineLine translates are the engine's own: an engine
+// upgrade that rewords one fails here instead of silently hiding it.
+func TestEngineMessagesStillExist(t *testing.T) {
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/seaweedfs/seaweedfs").Output()
+	if err != nil {
+		t.Skipf("the engine's source is not available: %v", err)
+	}
+	mount := filepath.Join(strings.TrimSpace(string(out)), "weed", "mount")
+	for file, formats := range map[string][]string{
+		// A failed flush at release goes through doFlush, which logs it
+		// with the path before Release's own warning.
+		"weedfs_file_sync.go": {`"%v doFlush: %v", fileFullPath`, `"%v fh %d flush: %v", fileFullPath`, `"fh flush create %s: %v", fileFullPath`},
+		"weedfs_file_io.go":   {`wfs.doFlush(context.Background(), fh, in.Uid, in.Gid, allowAsync)`},
+	} {
+		source, err := os.ReadFile(filepath.Join(mount, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, format := range formats {
+			if !strings.Contains(string(source), format) {
+				t.Errorf("%s no longer logs %s", file, format)
+			}
+		}
+	}
+}
+
+// A line repeating the one before it stays quiet while it keeps coming
+// within repeatQuiet.
+func TestRepeatsAreQuiet(t *testing.T) {
+	var q quieter
+	now := time.Now()
+	for i, c := range []struct {
+		line  string
+		after time.Duration
+		fresh bool
+	}{
+		{"a", 0, true}, {"a", 5 * time.Second, false}, {"a", 14 * time.Second, false},
+		{"b", 15 * time.Second, true}, {"a", 16 * time.Second, true}, {"a", 30 * time.Second, true},
+	} {
+		if got := q.fresh(c.line, now.Add(c.after)); got != c.fresh {
+			t.Errorf("%d: fresh(%q) = %v, want %v", i, c.line, got, c.fresh)
+		}
+	}
+}
+
+func TestGist(t *testing.T) {
+	for message, want := range map[string]string{
+		"rpc error: code = ResourceExhausted desc = entry quota exceeded":                                                "entry quota exceeded",
+		`connection error: desc = "transport: Error while dialing: dial tcp 1.2.3.4:18889: connect: connection refused"`: "connection refused",
+		"error reading from server: read tcp 10.0.0.1:5->10.0.0.2:18889: read: connection reset by peer":                 "connection reset by peer",
+		"disk quota exceeded": "disk quota exceeded",
+	} {
+		if got := gist(message); got != want {
+			t.Errorf("gist(%q) = %q, want %q", message, got, want)
 		}
 	}
 }
