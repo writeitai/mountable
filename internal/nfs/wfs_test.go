@@ -116,7 +116,7 @@ func entry(name string, mode os.FileMode, inode uint64, content string) *filer_p
 // configures it, against an in-memory filer. Directories of more than
 // maxCached entries are not cached but read through to the filer, which
 // sends no change events: there, the engine sees changes at once.
-func realEngine(t *testing.T, filer *memFiler, maxCached int) *weedmount.WFS {
+func realEngine(t *testing.T, filer filer_pb.SeaweedFilerServer, maxCached int) *weedmount.WFS {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

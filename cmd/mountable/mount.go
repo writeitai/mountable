@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -39,9 +40,10 @@ type mountCredentials struct {
 }
 
 func mountCommand(o *output, args []string) error {
-	f := newFlags("mount [--ro] FS_ID DIR | mountable mount --ticket-stdin DIR")
+	f := newFlags("mount [--ro] [--verbose] FS_ID DIR | mountable mount --ticket-stdin [--verbose] DIR")
 	readOnly := f.Bool("ro", false, "mount read-only")
 	ticketStdin := f.Bool("ticket-stdin", false, "read a mount ticket from stdin")
+	verbose := f.Bool("verbose", false, "show the mount engine's full log")
 	positional, err := f.parse(args, -1)
 	if err != nil {
 		return err
@@ -67,7 +69,7 @@ func mountCommand(o *output, args []string) error {
 	default:
 		return usageError(f.usage)
 	}
-	err = mount(o, ticket, dir)
+	err = mount(o, ticket, dir, *verbose)
 	var api *apiError
 	var network *url.Error
 	var reported *alreadyReported
@@ -97,8 +99,8 @@ func createSession(filesystemID string, readOnly bool) (string, error) {
 }
 
 // mount mounts until the mount ends. With --json it writes the events
-// "mounted" and "unmounted" as JSON lines.
-func mount(o *output, ticket, dir string) (err error) {
+// "mounted" and "unmounted" as JSON lines, and stderr carries only problems.
+func mount(o *output, ticket, dir string, verbose bool) (err error) {
 	defer flushEngineLog()
 	dir, err = canonicalPoint(dir)
 	if err != nil {
@@ -158,6 +160,7 @@ func mount(o *output, ticket, dir string) (err error) {
 			readOnly: session.readOnly,
 			tls:      tlsConfig,
 			cacheDir: cacheDir,
+			verbose:  verbose,
 		})
 		return err
 	})
@@ -168,7 +171,6 @@ func mount(o *output, ticket, dir string) (err error) {
 		return err
 	}
 	defer e.close() // however the mount ends, also when its shutdown was cut short
-	note(o.stderr, "mounted at %s", e.dir)
 	if o.json {
 		mode := "rw"
 		if e.readOnly {
@@ -179,6 +181,8 @@ func mount(o *output, ticket, dir string) (err error) {
 		}); err != nil {
 			note(o.stderr, "writing the mounted event: %v", err)
 		}
+	} else {
+		note(o.stderr, "mounted at %s", e.dir)
 	}
 
 	ctx, stopWatching := context.WithCancel(context.Background())
@@ -263,6 +267,10 @@ func startSession(ctx context.Context, ticket string) (*startedSession, func(), 
 		readOnly:     creds.Mode == "ro",
 	}
 	session.certs.set(cert)
+	session.server = creds.GatewayAddress
+	if host, _, err := net.SplitHostPort(creds.GatewayAddress); err == nil {
+		session.server = host
+	}
 	tlsConfig, err := session.tlsConfig()
 	if err != nil {
 		return nil, noop, err

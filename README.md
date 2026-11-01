@@ -59,8 +59,8 @@ they fail with `org_required`.
 Deleting a filesystem is done in the console.
 
 The API checks the limits' ranges: `--spending-cap-cents` 0 to 1,000,000,000
-(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 GiB to
-100 GiB, `--entry-quota` 10,000 to 1,000,000; the quotas cannot be removed.
+(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 byte
+to 100 GiB, `--entry-quota` 1 to 1,000,000; the quotas cannot be removed.
 `fs create` and `fs update` refuse an API key limited to one filesystem
 (`key_limited_to_filesystem`) and need the key's creator to be an owner or
 admin. `fs update` and every `webhooks` command need read-write access to the
@@ -92,6 +92,13 @@ with `bad_path` before any request.
   `{"event":"mounted","path":…,"filesystem_id":…,"mode":…}` once the mount is
   usable, and `{"event":"unmounted","reason":"signal|unmount|revoked|expired|error","detail":…}`
   when it ends. Wait for `mounted` before using the directory.
+- `mountable mount` keeps stderr quiet. It says `mountable: mounted at DIR`
+  (without `--json`), and otherwise only what needs attention, as
+  `mountable: …` lines: the service not answering for 30 seconds and
+  answering again, a file it could not save, a failed certificate renewal,
+  why a mount ended. Programs using the mount also see a failed file
+  operation as the operation's error.
+  `--verbose` adds the mount engine's full log, for debugging.
 - Exit codes: `0` success; `1` an error from the API, network, mount or
   credentials; `2` wrong usage.
 - Errors carry a stable code and a next step: on stderr, or with `--json` as
@@ -372,6 +379,11 @@ and the sandbox receives the one-time ticket on stdin. The guide is
 LlamaIndex index as checked JSON files and loads it in a fresh process. Follow
 [the snapshot guide](https://mountable.io/docs/llamaindex).
 
+[`examples/haystack-pipeline`](examples/haystack-pipeline) saves a small
+Haystack pipeline as YAML, verifies it in a fresh process and loads it with
+Haystack's default protections, without a model call. mountable.io maintains
+it separately from Haystack. [Guide](https://mountable.io/docs/haystack).
+
 [`examples/external-integrations`](examples/external-integrations) has Pydantic
 AI tools for persistent Markdown notes and a paginated Mem0 record export.
 Both use the Files API through the SDK. Their offline tests exercise the real
@@ -406,6 +418,12 @@ through the validated tool-use stream, and reads the note in a fresh process
 without a model call. mountable.io maintains it separately from AWS and the
 Strands project. [Guide](https://mountable.io/docs/strands).
 
+[`examples/deno-note`](examples/deno-note) saves one note with the released
+`mountable-sdk` package inside Deno 2.9.8, then reads it from a fresh process.
+The script asks only for the API key, filesystem id, note path and
+`mountable.io`. mountable.io maintains it separately from Deno. It is a local
+Deno script, not Deno Deploy. [Guide](https://mountable.io/docs/deno).
+
 [`examples/playwright-artifacts`](examples/playwright-artifacts) saves a
 screenshot and a Playwright trace of a local fixture, uploads the closed
 files with the TypeScript SDK, and has a later process check the same bytes.
@@ -419,16 +437,52 @@ guide is <https://mountable.io/docs/slack-file-webhook>.
 local Git history and hands its generated report to a fresh read-only worker
 through the SDK. Its offline tests need no credentials.
 
+[`examples/two-editors`](examples/two-editors) has two processes edit one
+task file. The second write sends the ETag both of them read, so it is
+refused and the first edit stays. The second process reads again and sets
+only its own field. Its offline tests need no credentials. The guide is
+<https://mountable.io/docs/stale-edit>.
+
+[`examples/job-cleanup`](examples/job-cleanup) records the files one job
+created and deletes a file only when its path and ETag still match. A
+second job's prefix stays. Its offline tests need no credentials. The
+guide is <https://mountable.io/docs/job-cleanup>.
+
 [`examples/fastapi-reports`](examples/fastapi-reports) generates a small
 report in a FastAPI process, uploads it, and returns it from a second
 process. The caller receives an id only after the upload succeeds. The guide
 is <https://mountable.io/docs/fastapi>.
+
+[`examples/prefect-task-report`](examples/prefect-task-report) runs a Prefect
+flow that uploads a closed report and returns an id. A second process runs
+a reader flow and checks the same bytes. The guide is
+<https://mountable.io/docs/prefect>.
+
+[`examples/dagster-materialization`](examples/dagster-materialization)
+materializes a tiny local Dagster asset, uploads the closed JSON report, and
+has a fresh process check the run id, asset key, row count and checksums.
+The guide is <https://mountable.io/docs/dagster>.
+
+[`examples/airflow-task-report`](examples/airflow-task-report) runs an
+Airflow TaskFlow DAG that uploads a closed report and passes only an id
+through XCom. A fresh process checks the same bytes. The guide is
+<https://mountable.io/docs/airflow>.
+
+[`examples/huggingface-datasets`](examples/huggingface-datasets) saves a
+two-row Hugging Face dataset with `save_to_disk`, uploads that closed file
+set, and has a fresh process check the hashes before `load_from_disk`.
+The guide is <https://mountable.io/docs/huggingface-datasets>.
 
 [`examples/csv-parquet-batches`](examples/csv-parquet-batches) commits small
 CSV-to-Parquet batches one at a time through the SDK. A manifest records a
 batch only after its upload reads back with the right checksum, so a fresh
 process resumes without redoing or duplicating a batch. Its offline tests
 need no credentials.
+
+[`examples/dspy-evaluation`](examples/dspy-evaluation) saves a tiny model-free
+DSPy evaluation as checked JSON files. A fresh process verifies the bundle
+and recomputes the same fixture score. Follow the
+[DSPy guide](https://mountable.io/docs/dspy?utm_source=data-science-and-ml-workspaces&utm_medium=other&utm_content=dspy-01-evaluation-bundle).
 
 ## Showcase demos
 

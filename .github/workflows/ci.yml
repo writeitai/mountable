@@ -273,8 +273,56 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked ruff check .
           uv run --locked pytest -q
+      - name: Two editors refuse a stale task-file write
+        working-directory: examples/two-editors
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+      - name: Job cleanup deletes one prefix and leaves the other
+        working-directory: examples/job-cleanup
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
       - name: LlamaIndex closed snapshots verify before loading
         working-directory: examples/llamaindex-snapshot
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+      - name: Haystack pipeline YAML is verified before a fresh local run
+        working-directory: examples/haystack-pipeline
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+      - name: Prefect task report is read by a fresh flow process
+        working-directory: examples/prefect-task-report
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+      - name: Dagster materialization report is read by a fresh process
+        working-directory: examples/dagster-materialization
+        run: |
+          uv run --locked ruff format --check .
+          uv run --locked ruff check .
+          uv run --locked pytest -q
+      - name: Airflow task report passes an id through XCom
+        working-directory: examples/airflow-task-report
+        run: |
+          uv run --locked --python 3.12 ruff format --check .
+          uv run --locked --python 3.12 ruff check .
+          uv run --locked --python 3.12 pytest -q
+      - name: DSPy evaluation bundles verify before accepting a score
+        working-directory: examples/dspy-evaluation
+        run: |
+          uv run --locked --python 3.12 ruff format --check .
+          uv run --locked --python 3.12 ruff check .
+          uv run --locked --python 3.12 pytest -q
+      - name: Hugging Face dataset reloads in a fresh process
+        working-directory: examples/huggingface-datasets
         run: |
           uv run --locked ruff format --check .
           uv run --locked ruff check .
@@ -360,3 +408,22 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  deno-note:
+    name: Deno note uses the released TypeScript SDK
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: examples/deno-note
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Deno 2.9.8
+        run: |
+          curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$RUNNER_TEMP/deno" sh -s v2.9.8
+          echo "$RUNNER_TEMP/deno/bin" >> "$GITHUB_PATH"
+      - name: Offline tests with the pinned lockfile
+        run: deno task test

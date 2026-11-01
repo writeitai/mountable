@@ -599,7 +599,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-github.com/dustin/go-humanize v1.0.1
+github.com/dustin/go-humanize v1.1.0
 ================================================================================
 
 --- LICENSE ---
@@ -627,7 +627,7 @@ SOFTWARE.
 <http://www.opensource.org/licenses/mit-license.php>
 
 ================================================================================
-github.com/fsnotify/fsnotify v1.9.0
+github.com/fsnotify/fsnotify v1.10.1
 ================================================================================
 
 --- LICENSE ---
@@ -659,7 +659,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-github.com/go-jose/go-jose/v4 v4.1.4
+github.com/go-jose/go-jose/v4 v4.1.5
 ================================================================================
 
 --- LICENSE ---
@@ -3296,7 +3296,7 @@ SoundCloud Ltd. (http://soundcloud.com/).
 // source: io/prometheus/client/metrics.proto
 
 ================================================================================
-github.com/prometheus/common v0.70.1
+github.com/prometheus/common v0.71.0
 ================================================================================
 
 --- LICENSE ---
@@ -5300,7 +5300,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-github.com/writeitai/seaweedfs v0.0.0-20261027154244-58779d481725
+github.com/writeitai/seaweedfs v0.0.0-20261101124028-53139098ba62
 ================================================================================
 
 --- LICENSE ---
@@ -6000,7 +6000,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ================================================================================
-golang.org/x/crypto v0.57.0
+golang.org/x/crypto v0.58.0
 ================================================================================
 
 --- LICENSE ---
@@ -6068,7 +6068,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/net v0.58.0
+golang.org/x/net v0.61.0
 ================================================================================
 
 --- LICENSE ---
@@ -6102,7 +6102,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/oauth2 v0.36.0
+golang.org/x/oauth2 v0.37.0
 ================================================================================
 
 --- LICENSE ---
@@ -6136,7 +6136,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/sync v0.23.0
+golang.org/x/sync v0.24.0
 ================================================================================
 
 --- LICENSE ---
@@ -6170,7 +6170,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/sys v0.48.0
+golang.org/x/sys v0.49.0
 ================================================================================
 
 --- LICENSE ---
@@ -6204,7 +6204,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/text v0.42.0
+golang.org/x/text v0.43.0
 ================================================================================
 
 --- LICENSE ---
@@ -6238,7 +6238,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-golang.org/x/time v0.15.0
+golang.org/x/time v0.16.0
 ================================================================================
 
 --- LICENSE ---
@@ -6272,7 +6272,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
-google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
+google.golang.org/genproto/googleapis/rpc v0.0.0-20260904194346-d0f1323225a4
 ================================================================================
 
 --- LICENSE ---
