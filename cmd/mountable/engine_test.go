@@ -101,18 +101,42 @@ func TestSignalEndsAStalledStartup(t *testing.T) {
 	}
 }
 
-// The engine's own log, which it writes to os.Stderr, reaches stderr with
-// secrets removed: here its parse error for a gateway address holding a
-// token.
+// With --verbose the engine's own log, which it writes to os.Stderr, reaches
+// stderr with secrets removed: here its parse error for a gateway address
+// holding a token. Without it, that log line is not shown.
 func TestEngineLogIsRedacted(t *testing.T) {
-	buf := captureDiagnostics(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-	_, err := startEngine(ctx, mountConfig{gateway: testJWT + ":abc", root: "/c/fs1", dir: t.TempDir(), cacheDir: t.TempDir()})
-	flushEngineLog()
-	logged := buf.String()
-	if err == nil || !strings.Contains(logged, "server address mtblat_[redacted]:abc parse error") || strings.Contains(logged, "eyJ") {
-		t.Fatalf("err %v, engine log %q", err, logged)
+	for _, verbose := range []bool{true, false} {
+		buf := captureDiagnostics(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		_, err := startEngine(ctx, mountConfig{gateway: testJWT + ":abc", root: "/c/fs1", dir: t.TempDir(), cacheDir: t.TempDir(), verbose: verbose})
+		cancel()
+		flushEngineLog()
+		logged := buf.String()
+		shown := strings.Contains(logged, "server address mtblat_[redacted]:abc parse error")
+		if err == nil || shown != verbose || strings.Contains(logged, "eyJ") {
+			t.Fatalf("verbose %v: err %v, engine log %q", verbose, err, logged)
+		}
+	}
+}
+
+func TestEngineLineShowsOnlyFatalErrorsUnlessVerbose(t *testing.T) {
+	for _, c := range []struct {
+		line    string
+		verbose bool
+		want    string
+	}{
+		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", false, ""},
+		{"I1101 11:13:54.138792 retry.go:164 retry filer grpc: err: rpc error: code = Unavailable\n", false, ""},
+		{"W1101 11:13:54.138792 weedfs.go:495 meta events follow retry from 2026-11-01: EOF\n", false, ""},
+		{"E1101 11:13:54.138792 weedfs_dir_read.go:359 dir ReadDirAll /x: rpc error\n", false, ""},
+		{"F1101 11:13:54.138792 filehandle.go:156 setting file handle entry to nil\n", false, "mountable: fatal error: setting file handle entry to nil\n"},
+		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", false, ""},
+		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", true, "I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n"},
+		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", true, "2026/11/01 11:00:07 writer: Write/Writev failed\n"},
+	} {
+		if got := engineLine(c.line, c.verbose); got != c.want {
+			t.Errorf("engineLine(%q, %v) = %q, want %q", c.line, c.verbose, got, c.want)
+		}
 	}
 }
 

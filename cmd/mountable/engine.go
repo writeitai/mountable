@@ -16,9 +16,12 @@ import (
 	"log"
 	"os"
 	"os/user"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
@@ -54,6 +57,7 @@ type mountConfig struct {
 	readOnly bool
 	tls      *tls.Config
 	cacheDir string
+	verbose  bool // the engine's whole log reaches stderr
 }
 
 // startEngine mounts. Every step that talks to the gateway runs before the
@@ -63,6 +67,7 @@ type mountConfig struct {
 func startEngine(ctx context.Context, c mountConfig) (*engine, error) {
 	ctx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
+	engineVerbose.Store(c.verbose)
 	if err := logToStderr(); err != nil {
 		return nil, err
 	}
@@ -175,7 +180,8 @@ func unlessCancelled(ctx context.Context, fn func() error) error {
 }
 
 // engineLog carries what the engine writes to os.Stderr through a pipe, so
-// its lines reach the real stderr with secrets removed.
+// its lines reach the real stderr with secrets removed, and only its fatal
+// errors unless engineVerbose.
 var engineLog struct {
 	mu      sync.Mutex
 	pipe    *os.File      // os.Stderr once redirected
@@ -183,6 +189,9 @@ var engineLog struct {
 }
 
 const engineLogFlush = "\x00mountable: flush\n"
+
+// engineVerbose is mount --verbose: the engine's whole log reaches stderr.
+var engineVerbose atomic.Bool
 
 // logToStderr sends the engine's log to stderr, never to files, with
 // secrets removed. The engine writes to os.Stderr directly, so os.Stderr
@@ -216,8 +225,8 @@ func logToStderr() error {
 				}
 				continue
 			}
-			if line != "" {
-				writeDiagnostic(line)
+			if shown := engineLine(line, engineVerbose.Load()); shown != "" {
+				writeDiagnostic(shown)
 			}
 			if err != nil {
 				return
@@ -225,6 +234,26 @@ func logToStderr() error {
 		}
 	}()
 	return nil
+}
+
+// glogLine is a line of the engine's log: its severity (Info, Warning,
+// Error, Fatal), date, time, source file and line, then the message.
+var glogLine = regexp.MustCompile(`^([IWEF])\d{4} \d\d:\d\d:\d\d\.\d{6} +\S+:\d+\]? (.*)`)
+
+// engineLine is what reaches stderr of one line the engine wrote: the line
+// itself when verbose, otherwise only a fatal error's message. The engine
+// logs routine progress, and every retry, at the other levels; what a user
+// needs from a running mount, the mount reports in its own words, and a
+// failed file operation fails in the program that made it.
+func engineLine(line string, verbose bool) string {
+	if verbose {
+		return line
+	}
+	m := glogLine.FindStringSubmatch(line)
+	if m == nil || m[1] != "F" {
+		return ""
+	}
+	return "mountable: fatal error: " + strings.TrimSpace(m[2]) + "\n"
 }
 
 // flushEngineLog waits, briefly, until what the engine logged so far is

@@ -92,6 +92,12 @@ with `bad_path` before any request.
   `{"event":"mounted","path":…,"filesystem_id":…,"mode":…}` once the mount is
   usable, and `{"event":"unmounted","reason":"signal|unmount|revoked|expired|error","detail":…}`
   when it ends. Wait for `mounted` before using the directory.
+- `mountable mount` keeps stderr quiet. It says `mountable: mounted at DIR`
+  (without `--json`), and otherwise only what needs attention, as
+  `mountable: …` lines: the service not answering for 30 seconds and
+  answering again, a failed certificate renewal, why a mount ended. Programs
+  using the mount see a failed file operation as the operation's error.
+  `--verbose` adds the mount engine's full log, for debugging.
 - Exit codes: `0` success; `1` an error from the API, network, mount or
   credentials; `2` wrong usage.
 - Errors carry a stable code and a next step: on stderr, or with `--json` as
