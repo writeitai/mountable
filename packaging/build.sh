@@ -3,10 +3,10 @@
 # the npm package and the wheel for one version into dist/. Used by
 # .github/workflows/release.yml and CI.
 #   packaging/build.sh 1.2.3
-# The Windows binaries are always built into dist/bin/, but go into the
-# release archives, the npm package and the wheel only with
-# MOUNTABLE_WINDOWS_PACKAGES=1: Windows ships once its qualification passes
-# (fsit design/designs/windows-mount.md §7).
+# The Windows binaries are always built, and go into the GitHub release
+# archives as a beta for qualification. They go into the npm package and the
+# wheel only with MOUNTABLE_WINDOWS_PACKAGES=1: Windows ships there once its
+# qualification passes (fsit design/designs/windows-mount.md §7).
 set -eu
 version=$1
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,7 +22,6 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 wi
   [ "$os" = windows ] && exe=.exe
   (cd "$root" && CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
     -ldflags "-s -w -X main.version=$version" -o "$dist/bin/mountable-$os-$arch$exe" ./cmd/mountable)
-  [ "$os" = windows ] && [ "$windows_packages" != 1 ] && continue
   # GitHub release: mountable-<os>-<arch>.tar.gz holding the executable,
   # LICENSE and THIRD_PARTY_NOTICES.
   stage=$dist/stage/$os-$arch

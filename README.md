@@ -242,11 +242,13 @@ machine show up here in under a second, and the other way round.
 - No Spotlight indexing, and locks (`flock`, `fcntl`) are local to the mount:
   open a database through one mount at a time, even on the same machine.
 
-## Windows (beta, not released yet)
+## Windows (beta)
 
-Windows mounting is built and in testing; the published packages do not
-include it until it passes its qualification. It needs **WinFsp 2.2 Beta 5
-or later**, installed once per machine by an administrator
+Windows mounting is in beta: the GitHub release carries
+`mountable-windows-amd64.tar.gz` and `mountable-windows-arm64.tar.gz` (open
+them with `tar -xf`), while npm, PyPI and `install.sh` do not include Windows
+until it passes its qualification on a Windows 11 desktop. It needs **WinFsp
+2.2 Beta 5 or later**, installed once per machine by an administrator
 ([winfsp-2.2.26286.msi](https://github.com/winfsp/winfsp/releases/download/v2.2B5/winfsp-2.2.26286.msi)).
 The stable WinFsp 2.1 is refused: it lacks fixes for CVE-2026-3006 and
 CVE-2026-7162. Mounting itself needs no administrator.
@@ -259,12 +261,13 @@ mountable unmount X:
 
 The mount is private to your account: every file in it grants access to you
 (and SYSTEM) only. A write is saved when `FlushFileBuffers` returns; after a
-plain close it is saved shortly afterwards, and an error then reaches no
+plain close it is saved a few seconds later, and an error then reaches no
 program. Ctrl-C, closing the console and `mountable unmount` unmount
-cleanly, but refuse while a file is open for writing and abort instead,
-warning that writes not yet saved may be lost. Names are case-sensitive, as
-on every other mount; symlinks, hard links, Windows ACLs and alternate data
-streams are not supported, and locks are local to the one mount.
+cleanly: files still open for writing are saved with what their programs
+wrote so far, and a file that cannot be saved is named in a warning. Names
+are case-sensitive, as on every other mount; symlinks, hard links, Windows
+ACLs and alternate data streams are not supported, and locks are local to
+the one mount.
 
 WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos,
 <https://github.com/winfsp/winfsp>. WinFsp is GPLv3 with an exception for
