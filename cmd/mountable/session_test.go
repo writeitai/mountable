@@ -64,7 +64,7 @@ func TestGatewayRejectionConfirmedByAPI(t *testing.T) {
 	ca := newTestCA(t)
 	renewAPI(t, ca, http.StatusNotFound)
 	s := testSession(t, ca, probeReturning(status.Error(codes.Unauthenticated, "no active mount session")))
-	if !s.rejected(context.Background()) {
+	if gone, _ := s.rejected(context.Background()); !gone {
 		t.Fatal("a confirmed rejection was not reported")
 	}
 }
@@ -73,8 +73,8 @@ func TestGatewayRejectionTheAPIDoesNotConfirm(t *testing.T) {
 	ca := newTestCA(t)
 	calls := renewAPI(t, ca, 0)
 	s := testSession(t, ca, probeReturning(status.Error(codes.Unauthenticated, "database unavailable")))
-	if s.rejected(context.Background()) {
-		t.Fatal("an unconfirmed rejection ended the session")
+	if gone, err := s.rejected(context.Background()); gone || err == nil {
+		t.Fatal("an unconfirmed rejection ended the session, or was not reported as a failed check")
 	}
 	if calls.Load() != 1 || s.certs.get().Leaf.Subject.CommonName != "renewed" {
 		t.Fatal("the session was not renewed")
@@ -90,8 +90,8 @@ func TestOtherGatewayErrorsAreNoRejection(t *testing.T) {
 	ca := newTestCA(t)
 	calls := renewAPI(t, ca, http.StatusNotFound)
 	for _, err := range []error{nil, status.Error(codes.Unavailable, "down"), errors.New("network")} {
-		if testSession(t, ca, probeReturning(err)).rejected(context.Background()) {
-			t.Fatalf("%v counted as a rejection", err)
+		if gone, got := testSession(t, ca, probeReturning(err)).rejected(context.Background()); gone || got != err {
+			t.Fatalf("%v counted as a rejection, or reported as %v", err, got)
 		}
 	}
 	if calls.Load() != 0 {
@@ -124,11 +124,49 @@ func TestStalledProbeEndsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if s.rejected(ctx) {
+	if gone, _ := s.rejected(ctx); gone {
 		t.Fatal("a stalled probe counted as a rejection")
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("the stalled probe outlived its context")
+	}
+}
+
+// Failed checks are reported only once they have lasted outageAfter, once,
+// and so is the gateway answering again after that; a short failure stays
+// quiet.
+func TestOutageIsReportedOnceItLasts(t *testing.T) {
+	buf := captureDiagnostics(t)
+	var o outage
+	start := time.Now()
+	reset := status.Error(codes.Unavailable, `connection error: desc = "error reading from server: read tcp 10.0.0.1:5->10.0.0.2:18889: read: connection reset by peer"`)
+	o.observe("mountable.io", reset, start)
+	o.observe("mountable.io", nil, start.Add(5*time.Second))
+	if buf.String() != "" {
+		t.Fatalf("a short failure was reported: %q", buf.String())
+	}
+	o.observe("mountable.io", reset, start.Add(10*time.Second))
+	o.observe("mountable.io", reset, start.Add(40*time.Second))
+	o.observe("mountable.io", status.Error(codes.DeadlineExceeded, "context deadline exceeded"), start.Add(45*time.Second))
+	o.observe("mountable.io", nil, start.Add(50*time.Second))
+	o.observe("mountable.io", nil, start.Add(55*time.Second))
+	want := "mountable: mountable.io has not answered for 30s (connection reset by peer); still trying\n" +
+		"mountable: mountable.io is answering again\n"
+	if buf.String() != want {
+		t.Fatalf("reported %q, want %q", buf.String(), want)
+	}
+}
+
+func TestFailureIsTheGist(t *testing.T) {
+	for err, want := range map[error]string{
+		status.Error(codes.DeadlineExceeded, "context deadline exceeded"):                                                                                 "timed out",
+		status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial tcp 1.2.3.4:18889: connect: connection refused"`): "connection refused",
+		status.Error(codes.Unauthenticated, "no active mount session"):                                                                                    "no active mount session",
+		errors.New("network down"): "network down",
+	} {
+		if got := failure(err); got != want {
+			t.Errorf("failure(%v) = %q, want %q", err, got, want)
+		}
 	}
 }
 

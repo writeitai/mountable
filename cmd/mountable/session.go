@@ -20,6 +20,10 @@ const checkEvery = 5 * time.Second
 // requestTimeout bounds each call to the gateway or the API.
 const requestTimeout = 10 * time.Second
 
+// outageAfter is how long the gateway may fail its checks before the mount
+// says so: shorter failures are covered by the engine's own retries.
+const outageAfter = 30 * time.Second
+
 // mountSession is the live session behind a mount: its key, its current
 // certificate, and a way to ask the gateway whether it still accepts it.
 type mountSession struct {
@@ -27,6 +31,9 @@ type mountSession struct {
 	key   *ecdsa.PrivateKey
 	certs *certSource
 	probe func(ctx context.Context) error
+	// server names the gateway in messages.
+	server string
+	outage outage
 	// renewed receives a value (without blocking) whenever the certificate
 	// was replaced, so the lifecycle can re-arm its expiry timer.
 	renewed chan struct{}
@@ -60,7 +67,11 @@ func (s *mountSession) watch(ctx context.Context, revoked chan<- struct{}) {
 				diagnose("renewal failed, retrying: %v", err)
 			}
 		case <-check.C:
-			gone = s.rejected(ctx)
+			var err error
+			gone, err = s.rejected(ctx)
+			if ctx.Err() == nil {
+				s.outage.observe(s.server, err, time.Now())
+			}
 		}
 		if gone {
 			select {
@@ -72,18 +83,52 @@ func (s *mountSession) watch(ctx context.Context, revoked chan<- struct{}) {
 	}
 }
 
-// rejected reports whether the gateway refuses the session and the API, the
-// authority, confirms it: a gateway rejection alone (say, its database is
-// down) never ends a mount.
-func (s *mountSession) rejected(ctx context.Context) bool {
+// rejected asks the gateway whether it accepts the session, and returns its
+// error. It reports gone when the gateway refuses the session and the API,
+// the authority, confirms it: a gateway rejection alone (say, its database
+// is down) never ends a mount.
+func (s *mountSession) rejected(ctx context.Context) (gone bool, err error) {
 	probeCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-	err := s.probe(probeCtx)
+	err = s.probe(probeCtx)
 	cancel()
 	if status.Code(err) != codes.Unauthenticated {
-		return false
+		return false, err
 	}
 	revoked, _ := s.renew(ctx)
-	return revoked
+	return revoked, err
+}
+
+// outage follows the gateway checks, and says once when the gateway has
+// failed them for outageAfter and once when it answers again.
+type outage struct {
+	since    time.Time // the first failure since the gateway last answered
+	reported bool
+}
+
+func (o *outage) observe(server string, err error, now time.Time) {
+	if err == nil {
+		if o.reported {
+			diagnose("%s is answering again", server)
+		}
+		*o = outage{}
+		return
+	}
+	if o.since.IsZero() {
+		o.since = now
+	}
+	if waited := now.Sub(o.since); !o.reported && waited >= outageAfter {
+		o.reported = true
+		diagnose("%s has not answered for %s (%s); still trying", server, waited.Round(time.Second), failure(err))
+	}
+}
+
+// failure is the gist of a failed gateway check: "timed out", or the last
+// part of the error, as in "connection refused".
+func failure(err error) string {
+	if status.Code(err) == codes.DeadlineExceeded {
+		return "timed out"
+	}
+	return gist(status.Convert(err).Message())
 }
 
 // renew gets a new certificate for the same key and serves it from then on.

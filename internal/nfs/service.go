@@ -22,6 +22,10 @@ type Config struct {
 	// ReadOnly makes every procedure that would change something answer
 	// NFS3ERR_ROFS, for a read-only session.
 	ReadOnly bool
+	// Unsaved, when set, hears of each WRITE refused for good by a limit
+	// (a quota, the spending cap, the file's size, the service's space):
+	// the file's path in the filesystem, and why.
+	Unsaved func(path, why string)
 }
 
 // NewServer returns a server for one export.
@@ -36,6 +40,7 @@ func NewServer(c Config) (*Server, error) {
 		engine:    c.Engine,
 		uid:       c.UID,
 		readOnly:  c.ReadOnly,
+		unsaved:   c.Unsaved,
 		handles:   h,
 		exclusive: &exclusiveSet{inodes: map[uint64]struct{}{}},
 		objects:   newObjects(c.Engine),
@@ -93,6 +98,7 @@ type service struct {
 	engine    Engine
 	uid       uint32
 	readOnly  bool
+	unsaved   func(path, why string)
 	writes    *writes
 	exclusive *exclusiveSet
 	handles   *handles

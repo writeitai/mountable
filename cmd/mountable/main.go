@@ -49,6 +49,10 @@ mount; {"usage": …} for help), diagnostics on stderr. The exceptions are
 mcp, whose stdout is the MCP protocol, and files read, which needs --to
 with --json. Nothing prompts.
 
+mount keeps stderr to "mountable:" lines: that it mounted (without
+--json) and what needs attention. --verbose adds the mount engine's full
+log, for debugging.
+
 Limits (fs create, fs update): the API checks the ranges. With fs update,
 none removes the spending cap (cents a month) or restores the default
 mutation rate; it needs at least one limit.
