@@ -660,7 +660,8 @@ func TestFailedWriteLeavesNothing(t *testing.T) {
 }
 
 // A WRITE a limit refused is reported with the file's path in the
-// filesystem; other failures are not.
+// filesystem; other failures (an I/O error, whose outcome may be unknown,
+// "retry later", a file replaced elsewhere) are not.
 func TestRefusedWriteIsReported(t *testing.T) {
 	f := sampleEngine()
 	var mu sync.Mutex
@@ -671,7 +672,7 @@ func TestRefusedWriteIsReported(t *testing.T) {
 		reported = append(reported, path+": "+why)
 	}})
 	fh, _ := c.lookup(c.root(), "a.txt")
-	for _, refusal := range []fuse.Status{fuse.Status(syscall.EDQUOT), fuse.Status(syscall.EFBIG), fuse.EIO} {
+	for _, refusal := range []fuse.Status{fuse.Status(syscall.EDQUOT), fuse.Status(syscall.EFBIG), fuse.EIO, weedmount.NFSRetryLater, fuse.Status(syscall.ESTALE)} {
 		f.mu.Lock()
 		f.writeErr = refusal
 		f.mu.Unlock()

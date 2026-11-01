@@ -251,15 +251,19 @@ func logToStderr() error {
 // Error, Fatal), date, time, source file and line, then the message.
 var glogLine = regexp.MustCompile(`^([IWEF])\d{4} \d\d:\d\d:\d\d\.\d{6} +\S+:\d+\]? (.*)`)
 
-// unsavedFile matches the engine's messages for a file it could not save,
-// from a flush at close, fsync or release (weed/mount/weedfs_file_sync.go):
-// the file's path in the cell, then the error. A failed flush at release
-// reaches no program.
+// unsavedFile matches the engine's messages for a file it could not save
+// (weed/mount/weedfs_file_sync.go): a flush at close, fsync or release that
+// failed for good, with the file's path in the cell and the error. A
+// failed flush at release reaches no program.
 var unsavedFile = []*regexp.Regexp{
 	regexp.MustCompile(`^(/.*) doFlush: (.*)$`),
 	regexp.MustCompile(`^(/.*) fh \d+ flush: (.*)$`),
-	regexp.MustCompile(`^fh flush create (/.*): (.*)$`),
 }
+
+// replacedFile matches the engine's messages for a file whose writes it
+// will not save because the file was replaced or removed elsewhere while
+// open (weedfs_file_sync.go): it logs this once per open file.
+var replacedFile = regexp.MustCompile(`^flush (/.*) fh \d+: (?:the path no longer leads to the open file|the handle holds another object than its inode's|the filer has another object there), not writing it$`)
 
 // engineLine is what reaches stderr of one line the engine wrote: the line
 // itself with --verbose. Otherwise, in the mount's own words, only a file
@@ -283,6 +287,10 @@ func engineLine(line string, out *engineOutput) string {
 			if f := pattern.FindStringSubmatch(message); f != nil {
 				return unsavedLine(out.localPath(f[1]), gist(f[2]))
 			}
+		}
+	case "W":
+		if f := replacedFile.FindStringSubmatch(message); f != nil {
+			return unsavedLine(out.localPath(f[1]), "it was replaced or removed elsewhere while open")
 		}
 	}
 	return ""

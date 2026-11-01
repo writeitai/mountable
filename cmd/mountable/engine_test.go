@@ -139,8 +139,14 @@ func TestEngineLineShowsOnlyWhatNeedsAttentionUnlessVerbose(t *testing.T) {
 			"mountable: could not save /home/me/work/notes/a b.txt: entry quota exceeded\n"},
 		{"E1101 11:13:54.138792 weedfs_file_sync.go:217 /c/fs1/a.txt fh 7 flush: rpc error: code = ResourceExhausted desc = filesystem_spending_cap_reached: the filesystem's monthly spending cap is reached\n", quiet,
 			"mountable: could not save /home/me/work/a.txt: the filesystem's monthly spending cap is reached\n"},
-		{"E1101 11:13:54.138792 weedfs_file_sync.go:342 fh flush create /c/fs1/b.txt: disk quota exceeded\n", quiet,
-			"mountable: could not save /home/me/work/b.txt: disk quota exceeded\n"},
+		// Logged within a flush that may still retry and succeed.
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:342 fh flush create /c/fs1/b.txt: disk quota exceeded\n", quiet, ""},
+		{"W1101 11:13:54.138792 weedfs_file_sync.go:467 flush /c/fs1/c.txt fh 9: the path no longer leads to the open file, not writing it\n", quiet,
+			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
+		{"W1101 11:13:54.138792 weedfs_file_sync.go:473 flush /c/fs1/c.txt fh 9: the handle holds another object than its inode's, not writing it\n", quiet,
+			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
+		{"W1101 11:13:54.138792 weedfs_file_sync.go:520 flush /c/fs1/c.txt fh 9: the filer has another object there, not writing it\n", quiet,
+			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
 		{"E1101 11:13:54.138792 weedfs_file_sync.go:182 /c/fs10/a doFlush: EOF\n", quiet,
 			"mountable: could not save /c/fs10/a: EOF\n"},
 		{"W1101 11:13:54.138792 weedfs_file_io.go:153 release fh 4 inode 99: fallback flush failed: 5=input/output error\n", quiet, ""},
@@ -166,8 +172,13 @@ func TestEngineMessagesStillExist(t *testing.T) {
 	for file, formats := range map[string][]string{
 		// A failed flush at release goes through doFlush, which logs it
 		// with the path before Release's own warning.
-		"weedfs_file_sync.go": {`"%v doFlush: %v", fileFullPath`, `"%v fh %d flush: %v", fileFullPath`, `"fh flush create %s: %v", fileFullPath`},
-		"weedfs_file_io.go":   {`wfs.doFlush(context.Background(), fh, in.Uid, in.Gid, allowAsync)`},
+		"weedfs_file_sync.go": {
+			`"%v doFlush: %v", fileFullPath`, `"%v fh %d flush: %v", fileFullPath`,
+			`"flush %s fh %d: the path no longer leads to the open file, not writing it", path`,
+			`"flush %s fh %d: the handle holds another object than its inode's, not writing it", path`,
+			`"flush %s fh %d: the filer has another object there, not writing it", path`,
+		},
+		"weedfs_file_io.go": {`wfs.doFlush(context.Background(), fh, in.Uid, in.Gid, allowAsync)`},
 	} {
 		source, err := os.ReadFile(filepath.Join(mount, file))
 		if err != nil {
