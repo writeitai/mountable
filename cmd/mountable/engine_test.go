@@ -150,6 +150,9 @@ func TestEngineLineShowsOnlyWhatNeedsAttentionUnlessVerbose(t *testing.T) {
 		{"E1101 11:13:54.138792 weedfs_file_sync.go:182 /c/fs10/a doFlush: EOF\n", quiet,
 			"mountable: could not save /c/fs10/a: EOF\n"},
 		{"W1101 11:13:54.138792 weedfs_file_io.go:153 release fh 4 inode 99: fallback flush failed: 5=input/output error\n", quiet, ""},
+		{"I1101 11:13:54.138792 metadata_rate_wait.go:88 create /c/fs1/node_modules/a.js: waiting at the filesystem's metadata rate\n", quiet,
+			"mountable: the filesystem's metadata rate is reached; changes wait until it allows them\n"},
+		{"I1101 11:13:54.138792 metadata_rate_wait.go:101 create /c/fs1/node_modules/a.js: sent after 12s at the metadata rate\n", quiet, ""},
 		{"F1101 11:13:54.138792 filehandle.go:156 setting file handle entry to nil\n", quiet,
 			"mountable: the mount stopped on an internal error; run it with --verbose for details\n"},
 		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", verbose, "I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n"},
@@ -178,7 +181,8 @@ func TestEngineMessagesStillExist(t *testing.T) {
 			`"flush %s fh %d: the handle holds another object than its inode's, not writing it", path`,
 			`"flush %s fh %d: the filer has another object there, not writing it", path`,
 		},
-		"weedfs_file_io.go": {`wfs.doFlush(context.Background(), fh, in.Uid, in.Gid, allowAsync)`},
+		"weedfs_file_io.go":     {`wfs.doFlush(waitingAtMetadataRate(context.Background(), nil), fh, in.Uid, in.Gid, allowAsync)`},
+		"metadata_rate_wait.go": {`"%s: waiting at the filesystem's metadata rate", what`},
 	} {
 		source, err := os.ReadFile(filepath.Join(mount, file))
 		if err != nil {
