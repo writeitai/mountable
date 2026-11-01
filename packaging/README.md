@@ -8,10 +8,13 @@ The CLI ships as the npm package `mountable-cli`, the PyPI package
 - `pypi/`: the wheel: the `mountable` entry point runs
   `mountable/bin/mountable-{linux,darwin}-{amd64,arm64}`.
 - `npm-placeholder/`: `mountable-cli@0.0.0`, published once by hand (below).
-- `build.sh VERSION`: builds the four binaries, the release archives
-  `mountable-<os>-<arch>.tar.gz` (executable, `LICENSE`, `THIRD_PARTY_NOTICES`)
-  with `SHA256SUMS`, the npm tarball and the wheel into `dist/`. The release
-  workflow runs it; run it locally for a dry run.
+- `build.sh VERSION`: builds the Linux, macOS and Windows binaries, the
+  release archives `mountable-<os>-<arch>.tar.gz` (executable, `LICENSE`,
+  `THIRD_PARTY_NOTICES`) with `SHA256SUMS`, the npm tarball and the wheel
+  into `dist/`. The Windows archives are a beta until Windows qualification
+  passes; the npm package and the wheel carry Windows only with
+  `MOUNTABLE_WINDOWS_PACKAGES=1`. The release workflow runs it; run it
+  locally for a dry run.
 
 Every channel carries `LICENSE` and `THIRD_PARTY_NOTICES`, the licenses of the
 third-party code compiled into the binary (also printed by

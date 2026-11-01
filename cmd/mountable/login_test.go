@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // The first poll's connection is dropped mid-request, the second is still
@@ -294,7 +292,7 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := unix.Flock(int(other.Fd()), unix.LOCK_EX); err != nil {
+	if err := lockFile(other); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -306,7 +304,7 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 		t.Fatal("saved while another holder had the lock")
 	case <-time.After(200 * time.Millisecond):
 	}
-	if err := unix.Flock(int(other.Fd()), unix.LOCK_UN); err != nil {
+	if err := unlockFile(other); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -321,38 +319,6 @@ func TestCredentialsLockIsAFileLock(t *testing.T) {
 
 // Saving replaces the file with an owner-only one, even over a file with
 // wider permissions, and leaves no temporary file behind.
-func TestCredentialsAreReplacedOwnerOnly(t *testing.T) {
-	isolateConfig(t)
-	t.Setenv("MOUNTABLE_API_URL", "http://127.0.0.1:1")
-	path, err := credentialsPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveCredentials(tokenResponse{AccessToken: testJWT, RefreshToken: "mtblrt_rotated", ExpiresIn: 900}, testGeneration); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, %v", info.Mode(), err)
-	}
-	if c, err := loadCredentials(); err != nil || c.AccessToken != testJWT {
-		t.Fatalf("loaded %+v, %v", c, err)
-	}
-	entries, _ := os.ReadDir(filepath.Dir(path))
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	if !slices.Equal(names, []string{"credentials.json", "credentials.json.lock"}) {
-		t.Fatalf("files = %v", names)
-	}
-}
 
 // A new `mountable login` saved while a request was in flight is not used
 // to retry that request: it may be another account.

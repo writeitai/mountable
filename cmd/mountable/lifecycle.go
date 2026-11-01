@@ -3,7 +3,6 @@ package main
 // What ends a mount, and how the mount ends for each.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -12,6 +11,23 @@ import (
 // shutdownTimeout bounds an ordinary shutdown as a whole: the clean unmount,
 // serving stopping, and pending writes.
 const shutdownTimeout = 30 * time.Second
+
+// sameSignal is how soon after the signal that began a shutdown another one
+// is the same request delivered twice, not a second request to abort: a
+// terminal's Ctrl-C reaches the whole foreground process group, so a
+// launcher that forwards it (npm's) delivers it again, as does systemd
+// signalling every process of a unit.
+const sameSignal = time.Second
+
+// abortRequest asks for an abort; the duplicate window never swallows it.
+// The Windows control socket's abort sends two: the first begins the
+// shutdown, the second aborts it.
+var abortRequest os.Signal = abortSignal{}
+
+type abortSignal struct{}
+
+func (abortSignal) String() string { return "abort request" }
+func (abortSignal) Signal()        {}
 
 type event int
 
@@ -77,6 +93,11 @@ type lifecycle struct {
 	renewed  <-chan struct{}
 	notAfter func() time.Time
 	timeout  time.Duration // for the ordinary shutdown
+	// sameSignal: the signal that began the shutdown, again this soon, is
+	// ignored.
+	sameSignal time.Duration
+	first      os.Signal // the signal that began the shutdown
+	signaled   time.Time // when it arrived
 	// ended is the event that ended the mount, once run returns.
 	ended event
 }
@@ -102,7 +123,8 @@ func (l *lifecycle) wait() event {
 		select {
 		case <-l.e.served():
 			return eventUnmounted
-		case <-l.signals:
+		case sig := <-l.signals:
+			l.first, l.signaled = sig, time.Now()
 			return eventSignal
 		case <-l.revoked:
 			return eventRevoked
@@ -116,8 +138,8 @@ func (l *lifecycle) wait() event {
 
 // shutdown ends the mount the ordinary way within l.timeout: unmount
 // cleanly (unless the mount is already gone), wait for serving to stop and
-// for pending writes. Failure, the deadline, a second signal, revocation or
-// expiry turn it into an abort.
+// for pending writes. Failure, the deadline, a second signal (not the first
+// delivered again), revocation or expiry turn it into an abort.
 func (l *lifecycle) shutdown(unmount bool) error {
 	done := make(chan error, 1)
 	go func() {
@@ -143,7 +165,10 @@ func (l *lifecycle) shutdown(unmount bool) error {
 			return l.abort(fmt.Sprintf("%s could not be unmounted cleanly (%s)", l.e.mountPoint(), oneLine(err)))
 		case <-deadline.C:
 			return l.abort(fmt.Sprintf("the mount did not shut down within %s", l.timeout))
-		case <-l.signals:
+		case sig := <-l.signals:
+			if sig != abortRequest && sig == l.first && time.Since(l.signaled) < l.sameSignal {
+				continue // the first one again
+			}
 			return l.abort("a second signal arrived during shutdown")
 		case <-l.revoked:
 			return l.abort(reason(eventRevoked))
@@ -193,18 +218,4 @@ func reason(ev event) string {
 		return "the mount session expired"
 	}
 	return "the mount session was revoked"
-}
-
-// abortMount aborts the connection behind dir, then detaches dir. An error
-// means the connection was not aborted (a lazy detach alone leaves open
-// files working) or dir was not detached.
-func abortMount(dir string) error {
-	var errs []error
-	if err := abortConnection(dir); err != nil {
-		errs = append(errs, err)
-	}
-	if err := detach(dir); err != nil {
-		errs = append(errs, fmt.Errorf("detaching: %w", err))
-	}
-	return errors.Join(errs...)
 }
