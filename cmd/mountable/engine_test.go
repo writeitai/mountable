@@ -155,8 +155,14 @@ func TestEngineLineShowsOnlyWhatNeedsAttentionUnlessVerbose(t *testing.T) {
 		{"I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n", verbose, "I1101 11:00:07.259767 weedfs.go:307 distributed lock manager enabled for mount\n"},
 		{"2026/11/01 11:00:07 writer: Write/Writev failed\n", verbose, "2026/11/01 11:00:07 writer: Write/Writev failed\n"},
 	} {
-		if got := engineLine(c.line, c.out); got != c.want {
-			t.Errorf("engineLine(%q, %+v) = %q, want %q", c.line, c.out, got, c.want)
+		// A path in the mount is written as the platform writes paths.
+		want := c.want
+		if rest, ok := strings.CutPrefix(want, "mountable: could not save /home/me/work/"); ok {
+			path, why, _ := strings.Cut(rest, ": ")
+			want = "mountable: could not save " + filepath.Join(filepath.FromSlash("/home/me/work"), path) + ": " + why
+		}
+		if got := engineLine(c.line, c.out); got != want {
+			t.Errorf("engineLine(%q, %+v) = %q, want %q", c.line, c.out, got, want)
 		}
 	}
 }
