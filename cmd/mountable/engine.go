@@ -292,9 +292,18 @@ func engineLine(line string, out *engineOutput) string {
 		if f := replacedFile.FindStringSubmatch(message); f != nil {
 			return unsavedLine(out.localPath(f[1]), "it was replaced or removed elsewhere while open")
 		}
+	case "I":
+		if strings.HasSuffix(message, ": waiting at the filesystem's metadata rate") {
+			return metadataRateLine
+		}
 	}
 	return ""
 }
+
+// metadataRateLine says that changes wait at the filesystem's metadata
+// rate (mutations_per_minute): the engine sends them again once the rate
+// allows, so nothing fails.
+const metadataRateLine = "mountable: the filesystem's metadata rate is reached; changes wait until it allows them\n"
 
 func unsavedLine(path, why string) string {
 	return fmt.Sprintf("mountable: could not save %s: %s\n", path, why)
