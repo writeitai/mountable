@@ -61,7 +61,12 @@ jobs:
       - name: GitHub release with the archives and SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/release/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        # The Windows archives are a beta until Windows qualification passes
+        # (fsit design/designs/windows-mount.md §7); npm and PyPI do not
+        # carry Windows yet.
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/release/* --repo "$GITHUB_REPOSITORY" --generate-notes \
+            --notes "**Windows (beta):** \`mountable-windows-amd64.tar.gz\` and \`mountable-windows-arm64.tar.gz\` mount through WinFsp 2.2 Beta 5 or later, installed once by an administrator (https://github.com/winfsp/winfsp/releases). They pass the automated qualification but not yet the qualification on a Windows 11 desktop; npm, PyPI and install.sh do not carry Windows yet."
 
   publish:
     name: Publish to npm and PyPI
