@@ -35,7 +35,7 @@ they fail with `org_required`.
 | `mountable fs list` | filesystems |
 | `mountable fs create NAME [--spending-cap-cents N] [--mutations-per-minute N] [--byte-quota BYTES] [--entry-quota N]` | create a filesystem, with the limits given; prints its ID |
 | `mountable fs get FS_ID` | a filesystem and its limits |
-| `mountable fs update FS_ID [--spending-cap-cents N\|none] [--mutations-per-minute N\|none] [--byte-quota BYTES] [--entry-quota N]` | change only the limits given (at least one); `none` removes the spending cap or restores the default mutation rate |
+| `mountable fs update FS_ID [--spending-cap-cents N\|none] [--mutations-per-minute N\|none] [--byte-quota BYTES] [--entry-quota N]` | change only the limits given (at least one); `none` removes the spending cap or the mutation rate |
 | `mountable fs usage FS_ID` | stored bytes and files against quotas, 30-day traffic |
 | `mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration D]` | a one-time mount ticket for a sandbox; the session lasts `D` (such as `12h` or `720h`; default 12 hours, at most the API key's or login's expiry) |
 | `mountable sessions list FS_ID` | live mount sessions |
@@ -59,7 +59,8 @@ they fail with `org_required`.
 Deleting a filesystem is done in the console.
 
 The API checks the limits' ranges: `--spending-cap-cents` 0 to 1,000,000,000
-(cents a month), `--mutations-per-minute` 1 to 1,000, `--byte-quota` 1 byte
+(cents a month), `--mutations-per-minute` 1 to 2,147,483,647 (no rate by
+default), `--byte-quota` 1 byte
 to 100 GiB, `--entry-quota` 1 to 1,000,000; the quotas cannot be removed.
 `fs create` and `fs update` refuse an API key limited to one filesystem
 (`key_limited_to_filesystem`) and need the key's creator to be an owner or

@@ -216,7 +216,7 @@ func (v *limitValue) Set(s string) error {
 
 // addLimitFlags adds the limit flags to f and returns the limits given, as
 // API fields, once f has parsed. With update, none removes the spending cap
-// or restores the default mutation rate; the quotas cannot be removed.
+// or the mutation rate; the quotas cannot be removed.
 func addLimitFlags(f *flags, update bool) map[string]any {
 	limits := map[string]any{}
 	for _, l := range []struct {

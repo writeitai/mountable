@@ -54,8 +54,8 @@ mount keeps stderr to "mountable:" lines: that it mounted (without
 log, for debugging.
 
 Limits (fs create, fs update): the API checks the ranges. With fs update,
-none removes the spending cap (cents a month) or restores the default
-mutation rate; it needs at least one limit.
+none removes the spending cap (cents a month) or the mutation rate (none
+by default); it needs at least one limit.
 
 The files commands work without mounting, through a token session that
 ends with the command. files read writes to stdout without --to.
