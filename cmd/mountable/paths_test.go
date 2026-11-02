@@ -274,3 +274,43 @@ func cacheBase(t *testing.T) string {
 	}
 	return base
 }
+
+// A mount's cache directory goes as the mount ends. What cannot be removed
+// keeps the directory's lock file, so the next mount prunes the rest
+// instead of leaving it unmarked for good.
+func TestEndedMountsCacheDirKeepsItsLockWhileAnythingStays(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a read-only directory's files")
+	}
+	cacheBase(t)
+	dir, release, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stuck := filepath.Join(dir, "engine")
+	if err := os.MkdirAll(filepath.Join(stuck, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o500); err != nil { // its entries cannot be removed
+		t.Fatal(err)
+	}
+	removeCacheDir(dir, release)
+	checkExists(t, map[string]bool{stuck: true, filepath.Join(dir, cacheLockName): true})
+	// A mount pruning it meanwhile keeps the lock file too.
+	next, releaseNext, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeCacheDir(next, releaseNext)
+	checkExists(t, map[string]bool{next: false, stuck: true, filepath.Join(dir, cacheLockName): true})
+	if err := os.Chmod(stuck, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	last, releaseLast, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkExists(t, map[string]bool{dir: false})
+	removeCacheDir(last, releaseLast)
+	checkExists(t, map[string]bool{last: false})
+}
