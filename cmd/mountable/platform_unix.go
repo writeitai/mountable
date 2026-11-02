@@ -12,10 +12,6 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
-// captureNativeStderr has nothing to capture: no native code writes to
-// stderr.
-func captureNativeStderr(_, _ *os.File) error { return nil }
-
 // checkMountDir checks the mount point before the ticket is exchanged: an
 // existing directory.
 func checkMountDir(dir string) error { return checkMountDirectory(dir) }

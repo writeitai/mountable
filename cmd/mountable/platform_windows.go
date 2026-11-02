@@ -15,7 +15,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -117,18 +116,6 @@ func checkBeforeSession(dir string) error {
 		return err
 	}
 	return checkMountDir(dir)
-}
-
-// captureNativeStderr sends what native code writes to the process's
-// standard error into the engine's log, w, shown with --verbose only:
-// WinFsp writes "The service mountable has been started." there when the
-// mount starts from a console. The runtime writes a crash there too, so a
-// crash is also written to stderr, the real one.
-func captureNativeStderr(w, stderr *os.File) error {
-	if err := debug.SetCrashOutput(stderr, debug.CrashOptions{}); err != nil {
-		return err
-	}
-	return windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(w.Fd()))
 }
 
 // checkMountDir checks the mount point before the ticket is exchanged: a

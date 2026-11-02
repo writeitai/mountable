@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,11 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		},
 	})
 	e.host.Notify(wfs)
+	if !c.verbose {
+		if err := quietNativeStderr(); err != nil {
+			return nil, err
+		}
+	}
 	go func() {
 		e.serveErr = e.host.Serve(c.dir)
 		close(e.done)
@@ -85,11 +91,7 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		// Kept above WinFsp's own handler while the mount lasts (design §5).
 		keepConsole(e.done)
 	case <-e.done:
-		if !c.verbose {
-			// WinFsp's own messages are in the engine's log.
-			return nil, fmt.Errorf("mounting %s: %w (run it with --verbose for WinFsp's messages)", c.dir, e.servedError())
-		}
-		return nil, fmt.Errorf("mounting %s: %w", c.dir, e.servedError())
+		return nil, mountError(c, e.servedError())
 	case <-ctx.Done():
 		e.abandon()
 		return nil, ctx.Err()
@@ -100,10 +102,47 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		if abortErr := e.abort(); abortErr != nil {
 			err = fmt.Errorf("%w; cleaning up the mount: %v", err, abortErr)
 		}
-		return nil, fmt.Errorf("mounting %s: %w", c.dir, err)
+		return nil, mountError(c, err)
 	}
 	return e, nil
 }
+
+// mountError is a mount's failure to start. Without --verbose it says
+// where WinFsp's own messages are: quietNativeStderr dropped them.
+func mountError(c mountConfig, err error) error {
+	if !c.verbose {
+		return fmt.Errorf("mounting %s: %w (run it with --verbose for WinFsp's own messages)", c.dir, err)
+	}
+	return fmt.Errorf("mounting %s: %w", c.dir, err)
+}
+
+// quietNativeStderr keeps WinFsp's service messages ("The service
+// mountable has been started.", which it writes to the process's standard
+// error handle in a console) out of a mount's quiet output: the handle
+// goes to NUL, where writing never blocks. The Go runtime writes a crash
+// to that handle too, so a crash is also written to the real stderr. With
+// --verbose the handle is left alone and WinFsp's messages show.
+func quietNativeStderr() error {
+	if err := debug.SetCrashOutput(consoleStderr, debug.CrashOptions{}); err != nil {
+		return err
+	}
+	var err error
+	if nativeStderr == nil {
+		if nativeStderr, err = os.OpenFile(os.DevNull, os.O_WRONLY, 0); err != nil {
+			return err
+		}
+	}
+	return windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(nativeStderr.Fd()))
+}
+
+var (
+	// consoleStderr is stderr as the process started, before the engine's
+	// log took os.Stderr over.
+	consoleStderr = os.Stderr
+	// nativeStderr is what the standard error handle points at in a quiet
+	// mount: held for the life of the process, so the handle stays open.
+	nativeStderr *os.File
+)
 
 // waitForRoot waits, up to timeout, until the mount's root can be read.
 // WinFsp calls Init before it creates the volume and sets its mount point,

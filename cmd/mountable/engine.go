@@ -218,11 +218,6 @@ func logToStderr() error {
 	if err != nil {
 		return err
 	}
-	if err := captureNativeStderr(w, os.Stderr); err != nil {
-		r.Close()
-		w.Close()
-		return err
-	}
 	engineLog.pipe, engineLog.flushed = w, make(chan struct{}, 1)
 	flushed := engineLog.flushed
 	os.Stderr = w

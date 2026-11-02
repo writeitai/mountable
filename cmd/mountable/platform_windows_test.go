@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -563,35 +565,48 @@ func TestLoadWinFsp(t *testing.T) {
 	}
 }
 
-// What native code writes to stderr (WinFsp's "The service mountable has
-// been started.") goes to the engine's log, shown with --verbose only.
-func TestNativeStderrIsTheEnginesLog(t *testing.T) {
-	buf := captureDiagnostics(t)
-	if err := logToStderr(); err != nil {
-		t.Fatal(err)
-	}
-	saved := engineShown.Load()
-	t.Cleanup(func() { engineShown.Store(saved) })
-	stderr, err := windows.GetStdHandle(windows.STD_ERROR_HANDLE)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write := func(line string) {
-		t.Helper()
-		var written uint32
-		if err := windows.WriteFile(stderr, []byte(line), &written, nil); err != nil {
+// In a quiet mount, what native code writes to stderr (WinFsp's "The
+// service mountable has been started.") goes nowhere, without blocking
+// however much it is, and a crash still reaches the real stderr.
+func TestQuietNativeStderr(t *testing.T) {
+	if os.Getenv("MOUNTABLE_TEST_CRASH") != "" {
+		if err := quietNativeStderr(); err != nil {
 			t.Fatal(err)
 		}
-		flushEngineLog()
+		stderr, err := windows.GetStdHandle(windows.STD_ERROR_HANDLE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var written uint32
+		line := []byte("The service mountable has been started.\n")
+		if err := windows.WriteFile(stderr, line, &written, nil); err != nil {
+			t.Fatal(err)
+		}
+		panic("crash after the quiet handle: " + strings.Repeat("x", 1<<20))
 	}
-	engineShown.Store(&engineOutput{verbose: true})
-	write("The service mountable has been started.\n")
-	if got := buf.String(); got != "The service mountable has been started.\n" {
-		t.Fatalf("with --verbose, a native stderr line came out as %q", got)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestQuietNativeStderr$")
+	cmd.Env = append(os.Environ(), "MOUNTABLE_TEST_CRASH=1")
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	engineShown.Store(&engineOutput{})
-	write("The service mountable has been stopped.\n")
-	if got := buf.String(); strings.Contains(got, "stopped") {
-		t.Fatalf("a native stderr line reached the quiet output: %q", got)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the crashing process exited 0")
+		}
+	case <-time.After(time.Minute):
+		cmd.Process.Kill()
+		t.Fatal("the crash hung")
+	}
+	got := stderr.String()
+	if strings.Contains(got, "The service mountable") {
+		t.Errorf("the native line reached stderr")
+	}
+	if !strings.Contains(got, "panic: crash after the quiet handle") {
+		t.Errorf("the crash did not reach stderr: %.200q", got)
 	}
 }
