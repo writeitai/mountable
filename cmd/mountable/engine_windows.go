@@ -236,8 +236,18 @@ func (e *engine) flush() {
 	e.wfs.ClearCacheDir()
 }
 
-// close has nothing to release: serving ends with the volume.
-func (e *engine) close() {}
+// close drops the local caches once the volume is gone, also after an
+// abort, which skips flush: their files are open, and Windows removes no
+// open file, so the mount's cache directory would stay behind. While the
+// volume is still there (an abort that failed), WinFsp may still call
+// into the engine, so they are left for the process's exit.
+func (e *engine) close() {
+	select {
+	case <-e.done:
+		e.wfs.ClearCacheDir()
+	default:
+	}
+}
 
 // abort ends the mount at once without flushing: every further operation
 // fails, and the volume is removed. It fails if the volume is still there

@@ -72,9 +72,28 @@ func TestCacheDirs(t *testing.T) {
 			t.Errorf("%s: exists %v, want %v", path, err == nil, want)
 		}
 	}
-	release()
-	if err := os.RemoveAll(dir); err != nil {
-		t.Errorf("removing a released cache directory: %v", err)
+	// A file still open when the mount ends (an engine file an abort left
+	// open) cannot be removed on Windows: the directory keeps its lock
+	// file, so the next mount prunes it.
+	held, err := os.Create(filepath.Join(dir, "open"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeCacheDir(dir, release)
+	if _, err := os.Stat(filepath.Join(dir, cacheLockName)); err != nil {
+		t.Errorf("a cache directory left behind lost its lock file: %v", err)
+	}
+	held.Close()
+	next, releaseNext, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the next mount did not prune the cache directory left behind: %v", err)
+	}
+	removeCacheDir(next, releaseNext)
+	if _, err := os.Stat(next); !os.IsNotExist(err) {
+		t.Errorf("an ended mount's cache directory is still there: %v", err)
 	}
 }
 

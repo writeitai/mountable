@@ -147,11 +147,7 @@ func mount(o *output, ticket, dir string, verbose bool) (err error) {
 	if err != nil {
 		return err
 	}
-	// Released first: Windows cannot remove the lock file while it is open.
-	defer func() {
-		release()
-		os.RemoveAll(cacheDir)
-	}()
+	defer removeCacheDir(cacheDir, release)
 
 	var (
 		e       *engine
@@ -410,6 +406,25 @@ func mountCacheDir() (string, func(), error) {
 		return dir, func() {}, nil
 	}
 	return dir, func() { lock.Close() }, nil
+}
+
+// removeCacheDir removes a mount's cache directory as the mount ends, its
+// lock file last: Windows removes no file that is still open (an engine
+// file an abort left open), and a directory that keeps its lock file is a
+// dead mount's to the next mount, which prunes it. release, which closes
+// the lock file, runs first because Windows cannot remove it while open.
+func removeCacheDir(dir string, release func()) {
+	entries, _ := os.ReadDir(dir)
+	kept := false
+	for _, e := range entries {
+		if e.Name() != cacheLockName && os.RemoveAll(filepath.Join(dir, e.Name())) != nil {
+			kept = true
+		}
+	}
+	release()
+	if !kept {
+		os.RemoveAll(dir)
+	}
 }
 
 // cacheLockName is the lock file of the cache root, held while a mount
