@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	weedmount "github.com/seaweedfs/seaweedfs/weed/mount"
@@ -285,12 +286,19 @@ func engineLine(line string, out *engineOutput) string {
 	case "E":
 		for _, pattern := range unsavedFile {
 			if f := pattern.FindStringSubmatch(message); f != nil {
-				return unsavedLine(out.localPath(f[1]), gist(f[2]))
+				why := gist(f[2])
+				if why == syscall.ESTALE.Error() {
+					// The engine refused the file for being replaced (and
+					// said so in a warning just before): the errno's text
+					// is NFS's, whatever the mount.
+					why = replacedWhy
+				}
+				return unsavedLine(out.localPath(f[1]), why)
 			}
 		}
 	case "W":
 		if f := replacedFile.FindStringSubmatch(message); f != nil {
-			return unsavedLine(out.localPath(f[1]), "it was replaced or removed elsewhere while open")
+			return unsavedLine(out.localPath(f[1]), replacedWhy)
 		}
 	case "I":
 		if strings.HasSuffix(message, ": waiting at the filesystem's metadata rate") {
@@ -299,6 +307,10 @@ func engineLine(line string, out *engineOutput) string {
 	}
 	return ""
 }
+
+// replacedWhy is why the engine does not save a file it refused for being
+// replaced or removed elsewhere while open (ESTALE).
+const replacedWhy = "it was replaced or removed elsewhere while open"
 
 // metadataRateLine says that changes wait at the filesystem's metadata
 // rate (mutations_per_minute): the engine sends them again once the rate

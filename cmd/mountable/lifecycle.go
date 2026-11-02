@@ -29,13 +29,23 @@ type abortSignal struct{}
 func (abortSignal) String() string { return "abort request" }
 func (abortSignal) Signal()        {}
 
+// unmountRequest is `mountable unmount` where it arrives as a request
+// rather than as the mount going away (the Windows control socket): it
+// shuts down as a signal does, and the mount ended for an unmount.
+var unmountRequest os.Signal = unmountSignal{}
+
+type unmountSignal struct{}
+
+func (unmountSignal) String() string { return "unmount request" }
+func (unmountSignal) Signal()        {}
+
 type event int
 
 const (
 	// eventUnmounted: the mount went away underneath (mountable unmount,
 	// umount); serving has stopped.
 	eventUnmounted event = iota + 1
-	// eventSignal: SIGINT or SIGTERM.
+	// eventSignal: SIGINT or SIGTERM, or an unmount request.
 	eventSignal
 	// eventRevoked: the API refused the session (a refused renewal, or a
 	// gateway rejection the API confirmed).
@@ -206,7 +216,7 @@ func (l *lifecycle) endReason(err error) string {
 		return "expired"
 	case err != nil:
 		return "error"
-	case l.ended == eventSignal:
+	case l.ended == eventSignal && l.first != unmountRequest:
 		return "signal"
 	default:
 		return "unmount"

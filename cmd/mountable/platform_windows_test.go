@@ -191,7 +191,10 @@ func TestControlSocket(t *testing.T) {
 	answered := make(chan error, 1)
 	go func() { answered <- cleanUnmount(dir) }()
 	select {
-	case <-signals:
+	case sig := <-signals:
+		if sig != unmountRequest {
+			t.Fatalf("unmount arrived as %v, which the unmounted event would report as a signal", sig)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("unmount did not arrive as a signal")
 	}

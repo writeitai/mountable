@@ -147,6 +147,9 @@ func TestEngineLineShowsOnlyWhatNeedsAttentionUnlessVerbose(t *testing.T) {
 			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
 		{"W1101 11:13:54.138792 weedfs_file_sync.go:520 flush /c/fs1/c.txt fh 9: the filer has another object there, not writing it\n", quiet,
 			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
+		// The same refusal, as the flush's error: ESTALE, whose text is NFS's.
+		{"E1101 11:13:54.138792 weedfs_file_sync.go:225 /c/fs1/c.txt fh 9 flush: " + syscall.ESTALE.Error() + "\n", quiet,
+			"mountable: could not save /home/me/work/c.txt: it was replaced or removed elsewhere while open\n"},
 		{"E1101 11:13:54.138792 weedfs_file_sync.go:182 /c/fs10/a doFlush: EOF\n", quiet,
 			"mountable: could not save /c/fs10/a: EOF\n"},
 		{"W1101 11:13:54.138792 weedfs_file_io.go:153 release fh 4 inode 99: fallback flush failed: 5=input/output error\n", quiet, ""},

@@ -80,7 +80,23 @@ func mountCommand(o *output, args []string) error {
 	return &cliError{Code: "mount_failed", Message: err.Error()}
 }
 
+// mountLoginHint is the next step when `mount FS_ID DIR` has no login: it
+// mounts with the login only, never MOUNTABLE_API_KEY (agent interfaces §1).
+const mountLoginHint = "run `mountable login`; with an API key, mount through a ticket: `mountable ticket create FS_ID | mountable mount --ticket-stdin DIR`"
+
 func createSession(filesystemID string, readOnly bool) (string, error) {
+	ticket, err := createLoginSession(filesystemID, readOnly)
+	if err != nil {
+		e := toCLIError(err)
+		if e.Code == "unauthenticated" || e.Code == "login_ended" {
+			e.Hint = mountLoginHint
+			return "", e
+		}
+	}
+	return ticket, err
+}
+
+func createLoginSession(filesystemID string, readOnly bool) (string, error) {
 	c, err := loginClient("")
 	if err != nil {
 		return "", err

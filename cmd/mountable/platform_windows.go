@@ -434,7 +434,7 @@ func (c *control) handle(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 	switch strings.TrimSpace(line) {
 	case "unmount":
-		sendSignal(c.signals, syscall.SIGTERM, 1)
+		sendSignal(c.signals, unmountRequest, 1)
 	case "abort":
 		sendSignal(c.signals, abortRequest, 2)
 	default:
