@@ -562,3 +562,36 @@ func TestLoadWinFsp(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// What native code writes to stderr (WinFsp's "The service mountable has
+// been started.") goes to the engine's log, shown with --verbose only.
+func TestNativeStderrIsTheEnginesLog(t *testing.T) {
+	buf := captureDiagnostics(t)
+	if err := logToStderr(); err != nil {
+		t.Fatal(err)
+	}
+	saved := engineShown.Load()
+	t.Cleanup(func() { engineShown.Store(saved) })
+	stderr, err := windows.GetStdHandle(windows.STD_ERROR_HANDLE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(line string) {
+		t.Helper()
+		var written uint32
+		if err := windows.WriteFile(stderr, []byte(line), &written, nil); err != nil {
+			t.Fatal(err)
+		}
+		flushEngineLog()
+	}
+	engineShown.Store(&engineOutput{verbose: true})
+	write("The service mountable has been started.\n")
+	if got := buf.String(); got != "The service mountable has been started.\n" {
+		t.Fatalf("with --verbose, a native stderr line came out as %q", got)
+	}
+	engineShown.Store(&engineOutput{})
+	write("The service mountable has been stopped.\n")
+	if got := buf.String(); strings.Contains(got, "stopped") {
+		t.Fatalf("a native stderr line reached the quiet output: %q", got)
+	}
+}

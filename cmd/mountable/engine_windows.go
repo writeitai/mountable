@@ -85,6 +85,10 @@ func attach(ctx context.Context, wfs *weedmount.WFS, c mountConfig) (*engine, er
 		// Kept above WinFsp's own handler while the mount lasts (design §5).
 		keepConsole(e.done)
 	case <-e.done:
+		if !c.verbose {
+			// WinFsp's own messages are in the engine's log.
+			return nil, fmt.Errorf("mounting %s: %w (run it with --verbose for WinFsp's messages)", c.dir, e.servedError())
+		}
 		return nil, fmt.Errorf("mounting %s: %w", c.dir, e.servedError())
 	case <-ctx.Done():
 		e.abandon()
