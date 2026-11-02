@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -573,6 +575,18 @@ func TestNotSignedIn(t *testing.T) {
 	}
 }
 
+// mount FS_ID DIR mounts with the login only, so without one its hint
+// names the ticket route for an API key rather than MOUNTABLE_API_KEY.
+func TestMountWithoutLoginHintsAtTickets(t *testing.T) {
+	useAPIKey(t)
+	isolateConfig(t)
+	newFakeAPI(t, nil)
+	r := runCLI(t, "mount", "fs_1", filepath.Join(t.TempDir(), "mnt"), "--json")
+	if e := jsonError(t, r); r.code != 1 || e.Code != "unauthenticated" || e.Hint != mountLoginHint {
+		t.Fatalf("got %d %+v", r.code, e)
+	}
+}
+
 func TestUsageErrorsExitTwo(t *testing.T) {
 	useAPIKey(t)
 	api := newFakeAPI(t, nil)
@@ -746,18 +760,21 @@ func TestEndReason(t *testing.T) {
 	failed := fmt.Errorf("could not unmount")
 	cases := []struct {
 		ended event
+		first os.Signal
 		err   error
 		want  string
 	}{
-		{eventUnmounted, nil, "unmount"},
-		{eventSignal, nil, "signal"},
-		{eventSignal, failed, "error"},
-		{eventUnmounted, failed, "error"},
-		{eventRevoked, failed, "revoked"},
-		{eventExpired, failed, "expired"},
+		{eventUnmounted, nil, nil, "unmount"},
+		{eventSignal, syscall.SIGTERM, nil, "signal"},
+		{eventSignal, unmountRequest, nil, "unmount"},
+		{eventSignal, unmountRequest, failed, "error"},
+		{eventSignal, syscall.SIGINT, failed, "error"},
+		{eventUnmounted, nil, failed, "error"},
+		{eventRevoked, nil, failed, "revoked"},
+		{eventExpired, nil, failed, "expired"},
 	}
 	for _, tc := range cases {
-		l := &lifecycle{ended: tc.ended}
+		l := &lifecycle{ended: tc.ended, first: tc.first}
 		if got := l.endReason(tc.err); got != tc.want {
 			t.Errorf("endReason(%d, %v) = %q, want %q", tc.ended, tc.err, got, tc.want)
 		}
