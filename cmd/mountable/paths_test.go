@@ -296,14 +296,21 @@ func TestEndedMountsCacheDirKeepsItsLockWhileAnythingStays(t *testing.T) {
 	}
 	removeCacheDir(dir, release)
 	checkExists(t, map[string]bool{stuck: true, filepath.Join(dir, cacheLockName): true})
-	if err := os.Chmod(stuck, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// A mount pruning it meanwhile keeps the lock file too.
 	next, releaseNext, err := mountCacheDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkExists(t, map[string]bool{dir: false})
 	removeCacheDir(next, releaseNext)
-	checkExists(t, map[string]bool{next: false})
+	checkExists(t, map[string]bool{next: false, stuck: true, filepath.Join(dir, cacheLockName): true})
+	if err := os.Chmod(stuck, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	last, releaseLast, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkExists(t, map[string]bool{dir: false})
+	removeCacheDir(last, releaseLast)
+	checkExists(t, map[string]bool{last: false})
 }

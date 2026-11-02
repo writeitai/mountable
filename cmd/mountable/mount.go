@@ -408,11 +408,13 @@ func mountCacheDir() (string, func(), error) {
 	return dir, func() { lock.Close() }, nil
 }
 
-// removeCacheDir removes a mount's cache directory as the mount ends, its
-// lock file last: Windows removes no file that is still open (an engine
-// file an abort left open), and a directory that keeps its lock file is a
-// dead mount's to the next mount, which prunes it. release, which closes
-// the lock file, runs first because Windows cannot remove it while open.
+// removeCacheDir removes a mount's cache directory, as the mount ends or
+// when a later mount prunes it, its lock file last: Windows removes no
+// file that is still open (an engine file an abort left open, perhaps
+// still held by its exiting process), and a directory that keeps its lock
+// file is a dead mount's to the next mount, which prunes it again.
+// release, which closes the lock file, runs before the lock file goes
+// because Windows cannot remove it while open.
 func removeCacheDir(dir string, release func()) {
 	entries, _ := os.ReadDir(dir)
 	kept := false
@@ -459,7 +461,7 @@ func pruneCacheDirs(base string) {
 		// open. The root's lock keeps every other mount out meanwhile.
 		lock.Close()
 		if dead {
-			os.RemoveAll(dir)
+			removeCacheDir(dir, func() {})
 		}
 	}
 }

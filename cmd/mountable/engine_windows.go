@@ -236,16 +236,32 @@ func (e *engine) flush() {
 	e.wfs.ClearCacheDir()
 }
 
+// cacheClearTimeout bounds how long close waits for the engine to drop
+// its caches: after an abort, its metadata cache may wait on a flush to a
+// gateway that no longer answers.
+const cacheClearTimeout = 2 * time.Second
+
 // close drops the local caches once the volume is gone, also after an
 // abort, which skips flush: their files are open, and Windows removes no
-// open file, so the mount's cache directory would stay behind. While the
-// volume is still there (an abort that failed), WinFsp may still call
-// into the engine, so they are left for the process's exit.
+// open file, so the mount's cache directory would stay behind. It waits
+// at most cacheClearTimeout; what is still open then keeps the directory
+// for the next mount to prune. While the volume is still there (an abort
+// that failed), WinFsp may still call into the engine, so the caches are
+// left for the process's exit.
 func (e *engine) close() {
 	select {
 	case <-e.done:
-		e.wfs.ClearCacheDir()
 	default:
+		return
+	}
+	cleared := make(chan struct{})
+	go func() {
+		e.wfs.ClearCacheDir()
+		close(cleared)
+	}()
+	select {
+	case <-cleared:
+	case <-time.After(cacheClearTimeout):
 	}
 }
 

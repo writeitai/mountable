@@ -83,6 +83,16 @@ func TestCacheDirs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, cacheLockName)); err != nil {
 		t.Errorf("a cache directory left behind lost its lock file: %v", err)
 	}
+	// A mount pruning it while the file is still open keeps the lock file
+	// too.
+	early, releaseEarly, err := mountCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeCacheDir(early, releaseEarly)
+	if _, err := os.Stat(filepath.Join(dir, cacheLockName)); err != nil {
+		t.Errorf("pruning while a file was open lost the lock file: %v", err)
+	}
 	held.Close()
 	next, releaseNext, err := mountCacheDir()
 	if err != nil {
