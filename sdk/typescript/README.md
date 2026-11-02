@@ -110,8 +110,8 @@ These calls use the API key, and the API checks what it may do:
   read-write access to the filesystem.
 - A key lists only its own live sessions and revokes only its own sessions.
 - The API checks the ranges: `spendingCapCents` 0–1,000,000,000 or `null`
-  (no cap), `mutationsPerMinute` 1–1,000 or `null` (the platform default),
-  `byteQuota` 1 GiB–100 GiB, `entryQuota` 10,000–1,000,000. The two quotas
+  (no cap), `mutationsPerMinute` 1–2,147,483,647 or `null` (no rate),
+  `byteQuota` 1 byte–100 GiB, `entryQuota` 1–1,000,000. The two quotas
   cannot be removed.
 - An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
   organisation ID, rejects with `invalid_request` before any request: URL

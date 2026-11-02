@@ -209,8 +209,8 @@ mountable fs update FS_ID --spending-cap-cents none --json     # removes the cap
 mountable fs get FS_ID --json
 ```
 
-`--mutations-per-minute none` restores the default rate. `--byte-quota` (1 GiB
-to 100 GiB) and `--entry-quota` (10,000 to 1,000,000) can be changed but not
+`--mutations-per-minute none` removes the rate (there is none by default).
+`--byte-quota` (1 byte to 100 GiB) and `--entry-quota` (1 to 1,000,000) can be changed but not
 removed; the API checks every range (`invalid_request`). Past the cap, its
 mounts and the files API (`402 filesystem_spending_cap_reached`) refuse
 billable work; other end users keep working. Creating filesystems and
