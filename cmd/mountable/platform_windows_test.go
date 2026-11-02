@@ -353,6 +353,11 @@ func (f *fakeFS) Release(path string, fh uint64) int {
 	return 0
 }
 
+func (f *fakeFS) Unlink(path string) int {
+	f.calls++
+	return 0
+}
+
 func (f *fakeFS) Rename(oldpath, newpath string) int {
 	f.calls++
 	return 0
@@ -442,15 +447,16 @@ func TestClosingSkipsFilesReleasedMeanwhile(t *testing.T) {
 	p := newPrivateFS(inner, false, make(chan struct{}))
 	inner.p = p
 	p.Open("/w", cgofuse.O_WRONLY)
-	if n, problems := p.closing(func(string) bool { return true }); n != 1 || problems != nil {
-		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure", n, problems)
+	if n, problems := p.closing(func(string) bool { return true }); n != 0 || problems != nil {
+		t.Fatalf("closing: %d, %v; a file released meanwhile is no failure, and no longer open", n, problems)
 	}
 }
 
 // A clean unmount writes out Windows' cache for an open file by the name
 // it has then: renamed itself, as git renames its index.lock over the
-// index, or with its directory. The index it replaced, still open, now
-// shares that name; an unlinked file keeps its last one.
+// index, or with its directory. The index it replaced and an unlinked
+// file, still open, have nothing left to commit: they are neither flushed
+// nor counted as open.
 func TestClosingFlushesRenamedFiles(t *testing.T) {
 	inner := &fakeFS{handles: map[string]uint64{"/.git/index": 1, "/.git/index.lock": 2, "/gone": 3}}
 	p := newPrivateFS(inner, false, make(chan struct{}))
@@ -462,10 +468,12 @@ func TestClosingFlushesRenamedFiles(t *testing.T) {
 	p.Rename("/.git", "/.git2")
 	p.Rename("/.git", "/other") // a string prefix of /.git2/index, not a path prefix
 	var flushed []string
-	_, problems := p.closing(func(path string) bool { flushed = append(flushed, path); return true })
-	slices.Sort(flushed)
-	if want := []string{"/.git2/index", "/.git2/index", "/gone"}; problems != nil || !slices.Equal(flushed, want) {
+	n, problems := p.closing(func(path string) bool { flushed = append(flushed, path); return true })
+	if want := []string{"/.git2/index"}; problems != nil || !slices.Equal(flushed, want) {
 		t.Errorf("closing flushed %q (%v), want %q", flushed, problems, want)
+	}
+	if !slices.Equal(inner.synced, []uint64{2}) || n != 1 {
+		t.Errorf("closing committed %v and counted %d open, want only the renamed index.lock", inner.synced, n)
 	}
 	if errc := p.Rename("/.git2/index", "/x"); errc != -cgofuse.EBUSY {
 		t.Errorf("a rename while closing: %d, want EBUSY: the flushes go by name", errc)
@@ -486,7 +494,7 @@ func TestClosingCommitsWhatItCan(t *testing.T) {
 	}
 	tries := map[string]int{}
 	n, problems := p.closing(func(path string) bool { tries[path]++; return path != "/a" })
-	if n != 3 || len(problems) != 2 || !slices.Equal(inner.synced, []uint64{3}) {
+	if n != 1 || len(problems) != 2 || !slices.Equal(inner.synced, []uint64{3}) {
 		t.Fatalf("closing: %d, %v; synced %v, want only c's", n, problems, inner.synced)
 	}
 	if tries["/a"] != 3 {
@@ -608,5 +616,14 @@ func TestQuietNativeStderr(t *testing.T) {
 	}
 	if !strings.Contains(got, "panic: crash after the quiet handle") {
 		t.Errorf("the crash did not reach stderr: %.200q", got)
+	}
+}
+
+func TestStillOpen(t *testing.T) {
+	if got := stillOpen(1); got != "1 file was still open for writing, or closed only moments before" {
+		t.Errorf("stillOpen(1) = %q", got)
+	}
+	if got := stillOpen(2); got != "2 files were still open for writing, or closed only moments before" {
+		t.Errorf("stillOpen(2) = %q", got)
 	}
 }
