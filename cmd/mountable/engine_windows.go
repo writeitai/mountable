@@ -243,8 +243,8 @@ func (e *engine) unmount() error {
 	for _, problem := range problems {
 		diagnose("%v", problem)
 	}
-	if saved := held - len(problems); saved > 0 {
-		diagnose("%d files were open for writing; what was written to them is saved, and anything their programs write from now on is lost", saved)
+	if held > 0 {
+		diagnose("%s; what was written to them is saved, and anything written to them from now on is lost", stillOpen(held))
 	}
 	if err := e.removeVolume(time.Now().Add(abortTimeout)); err != nil {
 		return err
@@ -330,10 +330,23 @@ func (e *engine) abort() error {
 	}
 }
 
+// stillOpen says how many files were still open for writing at a clean
+// unmount. Windows hands a file back to the mount (its Close) only seconds
+// after its program closed it, and the mount cannot tell the two apart:
+// WinFsp tells the filesystem of a handle's cleanup only when it deletes.
+func stillOpen(n int) string {
+	if n == 1 {
+		return "1 file was still open for writing, or closed only moments before"
+	}
+	return fmt.Sprintf("%d files were still open for writing, or closed only moments before", n)
+}
+
 // closing refuses every open and rename from now on (for good: an unmount
 // that fails after it turns into an abort), then commits every file still
-// open for writing. It returns how many there were, and a problem for each
-// it could not commit, which keeps what was committed last. Windows may
+// open for writing. It returns how many it committed that are still open,
+// and a problem for each it could not commit, which keeps what was
+// committed last. A file deleted or replaced from Windows while open has
+// nothing left to commit and is skipped (design §5). Windows may
 // still hold such a file's data in its cache manager, which the engine
 // cannot see, so first flush asks WinFsp to write it out (a change
 // notification for the path does: WinFsp flushes the file's cache before
@@ -347,13 +360,14 @@ func (p *privateFS) closing(flush func(path string) bool) (int, []error) {
 	var writers []uint64
 	var paths []string
 	for fh, f := range p.handles {
-		if f.writing {
+		if f.writing && !f.deleted {
 			writers = append(writers, fh)
 			paths = append(paths, f.path)
 		}
 	}
 	p.mu.Unlock()
 	var problems []error
+	held := 0
 	for i, fh := range writers {
 		name := strings.TrimPrefix(paths[i], "/")
 		if !flushed(flush, paths[i]) {
@@ -371,9 +385,11 @@ func (p *privateFS) closing(flush func(path string) bool) (int, []error) {
 		}
 		if errc != 0 {
 			problems = append(problems, fmt.Errorf("%s could not be committed (%v), so its writes since it was last committed are lost", name, cgofuse.Error(errc)))
+		} else if p.isOpen(fh) {
+			held++
 		}
 	}
-	return len(writers), problems
+	return held, problems
 }
 
 // flushAttempts and flushPause bound the retries of a refused flush:
@@ -436,6 +452,9 @@ type openFile struct {
 	// unflushed: a clean unmount could not have Windows write out its cache,
 	// so it is never released in the engine, whose release would commit it.
 	unflushed bool
+	// deleted: deleted, or replaced by a rename, while open: the name is
+	// another file's or none, and there is nothing left to commit.
+	deleted bool
 }
 
 func newPrivateFS(adapter cgofuse.FileSystemInterface, readOnly bool, initialized chan struct{}) *privateFS {
@@ -555,7 +574,23 @@ func (p *privateFS) Unlink(path string) int {
 	if p.ended.Load() {
 		return -cgofuse.EIO
 	}
-	return p.FileSystemInterface.Unlink(path)
+	errc := p.FileSystemInterface.Unlink(path)
+	if errc == 0 {
+		p.deleted(path)
+	}
+	return errc
+}
+
+// deleted marks the files open under path as deleted: the file at path
+// was deleted, or a rename replaced it.
+func (p *privateFS) deleted(path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, f := range p.handles {
+		if f.path == path {
+			f.deleted = true
+		}
+	}
 }
 
 func (p *privateFS) Rmdir(path string) int {
@@ -594,7 +629,8 @@ func (p *privateFS) Rename(oldpath, newpath string) int {
 		return errc // a clean unmount is flushing files by their names
 	}
 	errc := p.FileSystemInterface.Rename(oldpath, newpath)
-	if errc == 0 {
+	if errc == 0 && oldpath != newpath {
+		p.deleted(newpath) // replaced, if anything was there
 		p.renamed(oldpath, newpath)
 	}
 	return errc
