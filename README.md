@@ -316,11 +316,16 @@ It lives in [`skills/mountable/SKILL.md`](skills/mountable/SKILL.md).
 `delete_webhook` and `enable_webhook` over stdio (`create_mount_ticket`
 takes an optional `max_duration_seconds`). It authenticates like the CLI.
 Results are the API's JSON; errors return the code and hint. Mounting stays
-a process in the sandbox: `create_mount_ticket` returns the ticket and the
-command that mounts with it. Creating a webhook and rotating its secret are
+a process in the sandbox: `create_mount_ticket` returns the ticket and a
+`mount_command` convenience hint for a person. Agents construct the documented
+command under the trust boundary above instead of evaluating that string.
+Creating a webhook and rotating its secret are
 not tools: their result is the signing secret, which belongs in the backend
 that receives the deliveries, not in a model's context. Run
 `mountable webhooks create` there, or use the SDKs.
+
+Use an approved installed `mountable mcp`, or the exact-version npm examples
+below with lifecycle scripts disabled under the setup policy above.
 
 Give the server `MOUNTABLE_API_KEY` through its environment: inherited from
 the environment the MCP client starts in, or set in the client's MCP
@@ -341,7 +346,7 @@ from the environment Claude Code runs in, so the key stays out of the file):
   "mcpServers": {
     "mountable": {
       "command": "npx",
-      "args": ["-y", "mountable-cli", "mcp"],
+      "args": ["-y", "--ignore-scripts", "mountable-cli@0.9.0", "mcp"],
       "env": { "MOUNTABLE_API_KEY": "${MOUNTABLE_API_KEY}" }
     }
   }
@@ -356,7 +361,7 @@ from the environment Claude Code runs in, so the key stays out of the file):
   "mcpServers": {
     "mountable": {
       "command": "npx",
-      "args": ["-y", "mountable-cli", "mcp"],
+      "args": ["-y", "--ignore-scripts", "mountable-cli@0.9.0", "mcp"],
       "env": { "MOUNTABLE_API_KEY": "mtbl_…" }
     }
   }
