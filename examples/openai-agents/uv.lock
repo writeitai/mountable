@@ -666,6 +666,7 @@ name = "mountable-openai-agents-example"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "mountable-sdk" },
     { name = "openai-agents" },
 ]
@@ -678,7 +679,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mountable-sdk", specifier = "==0.3.0" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "mountable-sdk", specifier = "==0.4.0" },
     { name = "openai-agents", specifier = "==0.24.0" },
 ]
 
@@ -690,14 +692,14 @@ dev = [
 
 [[package]]
 name = "mountable-sdk"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/88/4c/7f2f67608e3d73be4c280535657baf18a31df7f248f567a07aed6792ff68/mountable_sdk-0.3.0.tar.gz", hash = "sha256:d565f086357c0d731f4fd8daf7db06e8000d2b5ff0dbd8979f1ac31065221df3", size = 41721, upload-time = "2026-10-25T23:32:27.626Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/db/f6/6b6210ef933820b7fe588214784eeb37bf3f0e00e7e1fa820b02ef279b59/mountable_sdk-0.4.0.tar.gz", hash = "sha256:37e1aae4fbf7c409c0d7e01f59e15039552b7ff1b652a4e5bdda4fcc1b066d9a", size = 45102, upload-time = "2026-11-06T23:10:56.682Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/bf/797560054d1ca2c64cf336db1513d7a86f23ce0629b1752657373d430801/mountable_sdk-0.3.0-py3-none-any.whl", hash = "sha256:b240934f477a12352727bd7c25045c5881a803660b0972deb907693dfadc184b", size = 17222, upload-time = "2026-10-25T23:32:26.557Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/b5/15dd5bf7393c69064ac0181f30dee8ddb672424cafaceefc65dffcff6ca1/mountable_sdk-0.4.0-py3-none-any.whl", hash = "sha256:963743f1d3e3eaa57e522118adca9019801871db0ca09ad2b6aac1e068f9372e", size = 18801, upload-time = "2026-11-06T23:10:55.166Z" },
 ]
 
 [[package]]

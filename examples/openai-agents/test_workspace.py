@@ -8,6 +8,7 @@ import pytest
 from agents.tool_context import ToolContext
 from mountable_sdk import MountableError
 
+import workspace
 from workspace import MAX_NOTE_BYTES, Workspace, read_note, write_note
 
 
@@ -173,3 +174,55 @@ def test_runner_cap_error_is_sanitized_at_cli(monkeypatch, capsys):
         "status": 402,
     }
     assert "PRIVATE" not in output.out + output.err
+
+
+def test_provision_creates_with_the_management_key_and_grants_the_api_key(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("MOUNTABLE_API_KEY", "mtbl_backend")
+    monkeypatch.setenv("MOUNTABLE_MANAGEMENT_KEY", "mtblm_admin")
+    monkeypatch.delenv("MOUNTABLE_API_URL", raising=False)
+    calls = []
+
+    class Answer:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"api_key": {"id": "key-1", "org_id": "org-1"}}
+
+    def get(url, headers, timeout):
+        calls.append(("me", url, headers["Authorization"]))
+        return Answer()
+
+    class Admin:
+        def __init__(self, api_key):
+            calls.append(("client", api_key))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def create_filesystem(self, name, **limits):
+            calls.append(("create", name, limits["spending_cap_cents"]))
+            return SimpleNamespace(id="fs-1")
+
+        def set_grant(self, fs_id, principal_type, principal_id, mode):
+            calls.append(("grant", fs_id, principal_type, principal_id, mode))
+
+    monkeypatch.setattr(workspace.httpx, "get", get)
+    monkeypatch.setattr(workspace, "Mountable", Admin)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["workspace.py", "provision", "--name", "notes", "--spending-cap-cents", "100"],
+    )
+    workspace.main()
+    assert json.loads(capsys.readouterr().out) == {"filesystem_id": "fs-1"}
+    assert calls == [
+        ("me", "https://mountable.io/api/v1/me", "Bearer mtbl_backend"),
+        ("client", "mtblm_admin"),
+        ("create", "notes", 100),
+        ("grant", "fs-1", "api_key", "key-1", "rw"),
+    ]

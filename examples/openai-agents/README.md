@@ -6,8 +6,10 @@ The hosted mountable.io service is paid; the example and client are open source.
 
 ## Setup
 
-Use Python 3.11+ and uv. Set `MOUNTABLE_API_KEY`, `MOUNTABLE_ORG` and
-`OPENAI_API_KEY` in your private environment or secret manager. Use an existing
+Use Python 3.11+ and uv. Set `MOUNTABLE_API_KEY` (an API key not limited to
+one filesystem), `MOUNTABLE_MANAGEMENT_KEY` (a management key, `mtblm_…`;
+an owner or admin creates both), `MOUNTABLE_ORG` and `OPENAI_API_KEY` in your
+private environment or secret manager. Use an existing
 mountable.io account with a saved payment method. Never put credentials in
 prompts or source files. OpenAI model use is billed separately.
 
@@ -18,8 +20,10 @@ uv sync --locked
 uv run python workspace.py provision --name notes-demo --spending-cap-cents 100
 ```
 
-The provision command creates one filesystem with a 100-cent monthly cap,
-1 GiB storage quota, 10,000 entries and 30 mutations/minute. The cap is in the
+The provision command uses the management key to create one filesystem with
+a 100-cent monthly cap, 1 GiB storage quota, 10,000 entries and 30
+mutations/minute, and gives the API key read-write access to it. The run
+command uses only the API key. The cap is in the
 organisation's billing currency (USD or EUR). It is a ceiling on mountable.io
 billable work, not a price or a grant of credit. It does not cover OpenAI.
 Read [billing](https://mountable.io/docs/billing?utm_source=trending-ecosystem-integrations&utm_medium=other&utm_content=openai-agents-example-billing) and
