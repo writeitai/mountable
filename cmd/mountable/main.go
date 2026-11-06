@@ -24,6 +24,7 @@ const usage = `usage:
   mountable fs update FS_ID [--spending-cap-cents N|none] [--mutations-per-minute N|none]
                        [--byte-quota BYTES] [--entry-quota N] [--org ORG_ID]
   mountable fs usage FS_ID [--org ORG_ID]
+  mountable fs delete FS_ID [--org ORG_ID]  at once, with all its files
   mountable ticket create FS_ID [--ro] [--idempotency-key KEY] [--max-duration DURATION]
   mountable sessions list FS_ID [--org ORG_ID]
   mountable sessions revoke SESSION_ID
@@ -37,6 +38,15 @@ const usage = `usage:
   mountable webhooks delete FS_ID WEBHOOK_ID [--org ORG_ID]
   mountable webhooks rotate-secret FS_ID WEBHOOK_ID [--org ORG_ID]
   mountable webhooks enable FS_ID WEBHOOK_ID [--org ORG_ID]
+  mountable api-keys create NAME [--expires-in-days N] [--filesystem FS_ID [--ro]] [--org ORG_ID]
+  mountable api-keys list [--org ORG_ID]
+  mountable api-keys revoke KEY_ID [--org ORG_ID]
+  mountable s3-keys create FS_ID NAME [--ro] [--expires-in-days N] [--org ORG_ID]
+  mountable s3-keys list FS_ID [--org ORG_ID]
+  mountable s3-keys revoke FS_ID ACCESS_KEY_ID [--org ORG_ID]
+  mountable grants list FS_ID [--org ORG_ID]
+  mountable grants set FS_ID member|group|api_key PRINCIPAL_ID ro|rw [--org ORG_ID]
+  mountable grants delete FS_ID GRANT_ID [--org ORG_ID]
   mountable mount [--ro] FS_ID DIR         mount with your login
   mountable mount --ticket-stdin DIR       mount with a ticket read from stdin
   mountable unmount DIR
@@ -57,6 +67,13 @@ Limits (fs create, fs update): the API checks the ranges. With fs update,
 none removes the spending cap (cents a month) or restores the default
 mutation rate; it needs at least one limit.
 
+Keys: a management key (mtblm_) manages: filesystems (create, delete,
+limits), API keys, S3 keys and grants. An API key (mtbl_) accesses files:
+tickets, sessions, the files commands and webhooks. Both go in
+MOUNTABLE_API_KEY; a person's login (an owner or admin) does either. A new
+key's secret is printed once, alone on stdout (the API's object with
+--json).
+
 The files commands work without mounting, through a token session that
 ends with the command. files read writes to stdout without --to.
 
@@ -64,7 +81,7 @@ Exit codes: 0 success, 1 error (API, network, mount or credentials),
 2 wrong usage.
 
 Environment:
-  MOUNTABLE_API_KEY  an API key, used instead of the login
+  MOUNTABLE_API_KEY  an API key or a management key, used instead of the login
   MOUNTABLE_ORG      the organisation, when --org is not given
   MOUNTABLE_API_URL  the Mountable API (default %s)
 `
@@ -151,7 +168,7 @@ func dispatch(o *output, command string, args []string) error {
 		}
 		return usageError("orgs list")
 	case "fs":
-		switch name, rest := sub("list", "create", "get", "update", "usage"); name {
+		switch name, rest := sub("list", "create", "get", "update", "usage", "delete"); name {
 		case "list":
 			return fsList(o, rest)
 		case "create":
@@ -162,8 +179,10 @@ func dispatch(o *output, command string, args []string) error {
 			return fsUpdate(o, rest)
 		case "usage":
 			return fsUsage(o, rest)
+		case "delete":
+			return fsDelete(o, rest)
 		}
-		return usageError("fs list | fs create NAME | fs get FS_ID | fs update FS_ID | fs usage FS_ID")
+		return usageError("fs list | fs create NAME | fs get FS_ID | fs update FS_ID | fs usage FS_ID | fs delete FS_ID")
 	case "ticket":
 		if name, rest := sub("create"); name != "" {
 			return ticketCreate(o, rest)
@@ -191,6 +210,36 @@ func dispatch(o *output, command string, args []string) error {
 			return filesChanges(o, rest)
 		}
 		return usageError("files write | files read | files delete | files list | files changes")
+	case "api-keys":
+		switch name, rest := sub("create", "list", "revoke"); name {
+		case "create":
+			return apiKeysCreate(o, rest)
+		case "list":
+			return apiKeysList(o, rest)
+		case "revoke":
+			return apiKeysRevoke(o, rest)
+		}
+		return usageError("api-keys create NAME | api-keys list | api-keys revoke KEY_ID")
+	case "s3-keys":
+		switch name, rest := sub("create", "list", "revoke"); name {
+		case "create":
+			return s3KeysCreate(o, rest)
+		case "list":
+			return s3KeysList(o, rest)
+		case "revoke":
+			return s3KeysRevoke(o, rest)
+		}
+		return usageError("s3-keys create FS_ID NAME | s3-keys list FS_ID | s3-keys revoke FS_ID ACCESS_KEY_ID")
+	case "grants":
+		switch name, rest := sub("list", "set", "delete"); name {
+		case "list":
+			return grantsList(o, rest)
+		case "set":
+			return grantsSet(o, rest)
+		case "delete":
+			return grantsDelete(o, rest)
+		}
+		return usageError("grants list FS_ID | grants set FS_ID TYPE PRINCIPAL_ID MODE | grants delete FS_ID GRANT_ID")
 	case "webhooks":
 		switch name, rest := sub("create", "list", "delete", "rotate-secret", "enable"); name {
 		case "create":

@@ -62,7 +62,7 @@ func TestMCPTools(t *testing.T) {
 		}
 	}
 	slices.Sort(names)
-	want := []string{"create_filesystem", "create_mount_ticket", "delete_webhook", "enable_webhook", "filesystem_usage", "list_filesystems", "list_mount_sessions", "list_organizations", "list_webhooks", "revoke_mount_session"}
+	want := []string{"create_filesystem", "create_mount_ticket", "delete_grant", "delete_webhook", "enable_webhook", "filesystem_usage", "list_api_keys", "list_filesystems", "list_grants", "list_mount_sessions", "list_organizations", "list_s3_keys", "list_webhooks", "revoke_api_key", "revoke_mount_session", "revoke_s3_key", "set_grant"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("tools = %v", names)
 	}
@@ -319,5 +319,82 @@ func TestMCPWebhookErrors(t *testing.T) {
 		if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != tc.code || !strings.Contains(out.Error.Hint, tc.hint) {
 			t.Errorf("%s = %v %s", tc.tool, isError, text)
 		}
+	}
+}
+
+func TestMCPKeyAndGrantTools(t *testing.T) {
+	useManagementKey(t)
+	org := "/api/v1/orgs/" + orgA
+	grants := org + "/filesystems/fsone/grants"
+	s3 := org + "/filesystems/fsone/s3-keys"
+	api := newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET /api/v1/me":                   reply(200, strings.Replace(oneOrg, `"api_key":null`, `"api_key":null,"management_key":{"id":"m","org_id":"`+orgA+`"}`, 1)),
+		"GET " + org + "/api-keys":         reply(200, apiKeys),
+		"DELETE " + org + "/api-keys/k1":   reply(204, ""),
+		"GET " + s3:                        reply(200, s3Keys),
+		"DELETE " + s3 + "/MTBLABCDEFGHIJ": reply(204, ""),
+		"GET " + grants:                    reply(200, "["+grant+"]"),
+		"PUT " + grants:                    reply(200, grant),
+		"DELETE " + grants + "/g1":         reply(204, ""),
+	})
+	s := connectMCP(t)
+	for tool, err := range s.Tools(context.Background(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A key's secret never enters the model's context.
+		if strings.Contains(tool.Name, "key") && strings.HasPrefix(tool.Name, "create") {
+			t.Fatalf("%s hands a key's secret to the model", tool.Name)
+		}
+		if strings.HasSuffix(tool.Name, "_keys") && !strings.Contains(tool.Description, "mountable api-keys create") {
+			t.Fatalf("%s does not say where keys are created: %s", tool.Name, tool.Description)
+		}
+	}
+	cases := []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"list_api_keys", nil, apiKeys},
+		{"revoke_api_key", map[string]any{"key_id": "k1"}, `{"id":"k1","revoked":true}`},
+		{"list_s3_keys", map[string]any{"filesystem_id": "fsone"}, s3Keys},
+		{"revoke_s3_key", map[string]any{"filesystem_id": "fsone", "access_key_id": "MTBLABCDEFGHIJ"}, `{"access_key_id":"MTBLABCDEFGHIJ","revoked":true}`},
+		{"list_grants", map[string]any{"filesystem_id": "fsone"}, "[" + grant + "]"},
+		{"set_grant", map[string]any{"filesystem_id": "fsone", "principal_type": "api_key", "principal_id": "k1", "mode": "ro"}, grant},
+		{"delete_grant", map[string]any{"filesystem_id": "fsone", "grant_id": "g1"}, `{"deleted":true,"id":"g1"}`},
+	}
+	for _, tc := range cases {
+		got, isError := callTool(t, s, tc.tool, tc.args)
+		if isError || got != tc.want || strings.Contains(got, testManagementKey) {
+			t.Errorf("%s = %v %s, want %s (calls %v)", tc.tool, isError, got, tc.want, api.called())
+		}
+	}
+	for tool, args := range map[string]map[string]any{
+		"revoke_api_key": {"key_id": ".."},
+		"delete_grant":   {"filesystem_id": "fsone", "grant_id": ".."},
+		"revoke_s3_key":  {"filesystem_id": "..", "access_key_id": "MTBLABCDEFGHIJ"},
+	} {
+		text, isError := callTool(t, s, tool, args)
+		if !isError || !strings.Contains(text, `"invalid_request"`) {
+			t.Errorf("%s with .. = %v %s", tool, isError, text)
+		}
+	}
+	if auth := api.auth[0]; auth != "Bearer "+testManagementKey {
+		t.Errorf("authorization = %q", auth)
+	}
+}
+
+func TestMCPWrongKeyKind(t *testing.T) {
+	useAPIKey(t)
+	newFakeAPI(t, map[string]http.HandlerFunc{
+		"GET /api/v1/orgs/" + orgA + "/api-keys": reply(403, `{"detail":{"code":"management_key_required"}}`),
+	})
+	t.Setenv("MOUNTABLE_ORG", orgA)
+	text, isError := callTool(t, connectMCP(t), "list_api_keys", nil)
+	var out struct {
+		Error cliError `json:"error"`
+	}
+	if !isError || json.Unmarshal([]byte(text), &out) != nil || out.Error.Code != "management_key_required" || !strings.Contains(out.Error.Hint, "management key") {
+		t.Fatalf("list_api_keys with an API key = %v %s", isError, text)
 	}
 }

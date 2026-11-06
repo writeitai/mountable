@@ -87,13 +87,14 @@ returns promises.
 
 ## Management
 
-Management calls send the API key, not a token session. Below, `…` is
-`/api/v1/orgs/{org_id}`.
+Management calls send the key, not a token session: an API key (`mtbl_`) or
+a management key (`mtblm_`), which the API tells apart by its prefix. Below,
+`…` is `/api/v1/orgs/{org_id}`.
 
 | ID | Case |
 | --- | --- |
-| C33 | `org_id` defaults to `MOUNTABLE_ORG`, then to the API key's organisation (`api_key.org_id` of `GET /api/v1/me`), read once on the first organisation call and kept; in TypeScript, concurrent first calls share one request. The argument wins. |
-| C34 | When `/me` has no `api_key.org_id`, an organisation call raises `org_required` (`status` `None`) and sends nothing more. An error from `/me` raises as it is. |
+| C33 | `org_id` defaults to `MOUNTABLE_ORG`, then to the key's organisation (`api_key.org_id`, or `management_key.org_id` for a management key, of `GET /api/v1/me`), read once on the first organisation call and kept; in TypeScript, concurrent first calls share one request. The argument wins. |
+| C34 | When `/me` has neither `api_key.org_id` nor `management_key.org_id`, an organisation call raises `org_required` (`status` `None`) and sends nothing more. An error from `/me` raises as it is. |
 | C35 | `list_filesystems` sends `GET …/filesystems` and `get_filesystem` sends `GET …/filesystems/{fs_id}`, both with `Authorization: Bearer <API key>` and no token session; they return `FilesystemInfo` (`spending_cap_cents` and `mutations_per_minute` `None` when null, `created_at` parsed). |
 | C36 | `create_filesystem(name, …)` sends `POST …/filesystems` with `name` and only the limits given (`0` is given), and returns the answer's `FilesystemInfo`. |
 | C37 | `update_filesystem(fs_id, …)` sends `PATCH …/filesystems/{fs_id}` with only the fields passed; `None` for `spending_cap_cents` or `mutations_per_minute` sends JSON `null`. It returns the answer's `FilesystemInfo`. |
@@ -101,12 +102,12 @@ Management calls send the API key, not a token session. Below, `…` is
 | C39 | `list_mount_sessions` sends `GET …/filesystems/{fs_id}/mount-sessions` and returns `MountSession`s with parsed datetimes. `revoke_mount_session` sends `DELETE /api/v1/mount-sessions/{session_id}`, which needs no organisation, and returns nothing. |
 | C40 | `create_webhook(fs_id, url)` sends `POST …/filesystems/{fs_id}/webhooks` with `url`, and `path_prefix` only when given, and returns a `Webhook` with the signing secret in `.secret`. `list_webhooks` sends `GET` there and returns `Webhook`s: `secret` `None`, nullable fields `None`, datetimes parsed. |
 | C41 | `delete_webhook` sends `DELETE …/webhooks/{webhook_id}` and returns nothing; `rotate_webhook_secret` sends `POST …/webhooks/{webhook_id}:rotate-secret` and returns the `Webhook` with the new `.secret`; `enable_webhook` sends `POST …/webhooks/{webhook_id}:enable` and returns the `Webhook`. |
-| C42 | Organisation, filesystem, session and webhook IDs are percent-encoded as path segments. |
+| C42 | Organisation, filesystem, session, webhook, API key, S3 key and grant IDs are percent-encoded as path segments. |
 | C43 | A `Webhook` does not show its secret when printed or inspected. A `whsec_` secret the API echoes in an error never appears in its message or `repr`. |
 | C44 | `/me`, `list_filesystems`, `get_filesystem`, `filesystem_usage`, `list_mount_sessions`, `list_webhooks`, `revoke_mount_session` and `enable_webhook` are sent once more after a network failure; a second failure raises `network_error`. |
 | C45 | `create_filesystem`, `update_filesystem`, `create_webhook`, `rotate_webhook_secret` and `delete_webhook` are never sent again after a network failure. |
 | C46 | API errors raise `MountableError` with their status and code, for example `403 key_limited_to_filesystem` from `create_filesystem` and `update_filesystem`, `422` validation details (`invalid_request`) from `update_filesystem`, a `403` from `list_webhooks` and `404 not_found` from `delete_webhook`. |
-| C47 | An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..` organisation ID (an empty `org_id` counts as not given), raises `invalid_request` (`status` `None`) before any request, the `/me` lookup included: URL normalisation would send it to another resource (`…/webhooks/..` is the filesystem). |
+| C47 | An empty, `.` or `..` filesystem, session, webhook, API key, S3 key or grant ID, or a `.` or `..` organisation ID (an empty `org_id` counts as not given), raises `invalid_request` (`status` `None`) before any request, the `/me` lookup included: URL normalisation would send it to another resource (`…/webhooks/..` is the filesystem). |
 
 ## Webhook deliveries
 
@@ -114,3 +115,18 @@ Management calls send the API key, not a token session. Below, `…` is
 | --- | --- |
 | C48 | `verify_webhook(secret, headers, body)` accepts a delivery whose `webhook-signature` holds a `v1` HMAC-SHA256 signature by the secret of `{webhook-id}.{webhook-timestamp}.{body}` (the shared vector `sdk/testdata/webhook.json`), with header names in any case, a body as bytes or a string, and two signatures of which only one matches, first or second (a rotation), also when a repeated header was joined with `", "` (in TypeScript, also Node's array of values). It returns `WebhookMessage`: `id` (the `webhook-id`), `type`, `timestamp`, `webhook_id`, `filesystem_id`, `events` as `Change` and `cursor`. |
 | C49 | `verify_webhook` raises `invalid_webhook` (`status` `None`) for a changed body, another secret, a missing header, a timestamp more than 300 seconds before or after now or longer than 12 digits, a signature without `v1,`, a malformed secret, or a signed body that is not a message, also one whose `cursor` is not a decimal integer (ASCII digits), or whose events lack a string `type` or `path` or have a `file` that is neither `null` nor a FileInfo with string `path`, `type` and `modified_at` (a valid time), integer `size` and string or `null` `etag` (the gateway's reference signature of a non-message body passes the signature check and fails here). Its message never shows the secret. |
+
+## Keys and grants
+
+Deleting filesystems, keys and grants take a management key (or a person);
+the SDKs send whichever key they were given, and the API decides.
+
+| ID | Case |
+| --- | --- |
+| C50 | `delete_filesystem` sends `DELETE …/filesystems/{fs_id}` and returns nothing. |
+| C51 | `create_api_key(name, …)` sends `POST …/api-keys` with `name` and only the options given (`expires_in_days`, `filesystem_id`, `mode`) and returns an `ApiKey` with the secret in `.secret`. `list_api_keys` sends `GET …/api-keys` and returns `ApiKey`s (`secret` `None`, `filesystem_id` `None` when null, datetimes parsed). `revoke_api_key` sends `DELETE …/api-keys/{key_id}` and returns nothing. |
+| C52 | `create_s3_key(fs_id, name, …)` sends `POST …/filesystems/{fs_id}/s3-keys` with `name` and only the options given (`mode`, `expires_in_days`) and returns an `S3Key` with the secret in `.secret_access_key`. `list_s3_keys` sends `GET` there and returns `S3Key`s (`secret_access_key` `None`). `revoke_s3_key` sends `DELETE …/s3-keys/{access_key_id}` and returns nothing. |
+| C53 | `list_grants` sends `GET …/filesystems/{fs_id}/grants` and returns `Grant`s; `set_grant(fs_id, principal_type, principal_id, mode)` sends `PUT` there with those fields and returns the `Grant`; `delete_grant` sends `DELETE …/grants/{grant_id}` and returns nothing. |
+| C54 | An `ApiKey` or `S3Key` does not show its secret when printed or inspected; an `mtblm_` management key never appears in an error's message or `repr`, even when the API echoes it. |
+| C55 | `list_api_keys`, `list_s3_keys`, `list_grants`, `revoke_api_key`, `revoke_s3_key` and `set_grant` are sent once more after a network failure; `delete_filesystem`, `create_api_key`, `create_s3_key` and `delete_grant` never are. |
+| C56 | A call with the wrong kind of key raises the API's `403` as it is: `management_key_required` (for example `create_api_key` with an API key) and `api_key_required` (for example `create_mount_ticket`, or a `Filesystem` handle's first operation, with a management key). |

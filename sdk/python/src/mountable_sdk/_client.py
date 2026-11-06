@@ -41,9 +41,10 @@ Mode = Literal["ro", "rw"]
 FileType = Literal["file", "directory", "symlink"]
 ChangeType = Literal["created", "updated", "deleted"]
 
-# Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-# tokens (mtblst_), tickets (mtbltk_) and login tokens; except webhook signing
-# secrets: whsec_ and Base64.
+# Every secret the API issues starts with "mtbl": API keys (mtbl_), management
+# keys (mtblm_), session tokens (mtblst_), tickets (mtbltk_) and login tokens;
+# except webhook signing secrets (whsec_ and Base64) and S3 secret access keys,
+# which only create_s3_key returns.
 _SECRET = re.compile(r"(mtbl[a-z]*|whsec)_[A-Za-z0-9_.+/=-]+")
 
 
@@ -181,6 +182,43 @@ class Webhook:
 
 
 @dataclass(frozen=True)
+class ApiKey:
+    id: str
+    name: str
+    # The secret's first characters, to recognise it.
+    prefix: str
+    # Set for a key limited to one filesystem.
+    filesystem_id: str | None
+    expires_at: datetime
+    revoked: bool
+    created_at: datetime
+    # The secret, only from create_api_key: kept out of repr.
+    secret: str | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class S3Key:
+    access_key_id: str
+    # The bucket name.
+    filesystem_id: str
+    name: str
+    mode: Mode
+    expires_at: datetime
+    revoked: bool
+    created_at: datetime
+    # The secret, only from create_s3_key: kept out of repr.
+    secret_access_key: str | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class Grant:
+    id: str
+    principal_type: Literal["member", "group", "api_key"]
+    principal_id: str
+    mode: Mode
+
+
+@dataclass(frozen=True)
 class WebhookMessage:
     """A verified webhook delivery."""
 
@@ -205,11 +243,14 @@ _UNSET = _Unset()
 
 
 class Mountable:
-    """A client authenticated with an API key.
+    """A client authenticated with a key.
 
-    ``api_key`` defaults to ``MOUNTABLE_API_KEY``; ``base_url`` to
-    ``MOUNTABLE_API_URL``, then https://mountable.io; ``org_id`` to
-    ``MOUNTABLE_ORG``, then the API key's organisation.
+    ``api_key`` is an API key (``mtbl_``), which accesses files, or a
+    management key (``mtblm_``), which manages filesystems, keys and grants;
+    the API refuses the other kind with ``api_key_required`` or
+    ``management_key_required``. It defaults to ``MOUNTABLE_API_KEY``;
+    ``base_url`` to ``MOUNTABLE_API_URL``, then https://mountable.io;
+    ``org_id`` to ``MOUNTABLE_ORG``, then the key's organisation.
     """
 
     def __init__(
@@ -340,6 +381,11 @@ class Mountable:
         response = self._call("PATCH", self._fs_path(fs_id), retry=False, json=body)
         return _filesystem_info(_json(response))
 
+    def delete_filesystem(self, fs_id: str) -> None:
+        """Deletes a filesystem at once, with every file in it. Never retried:
+        a retry after a lost answer would find nothing."""
+        self._call("DELETE", self._fs_path(fs_id), retry=False)
+
     def filesystem_usage(self, fs_id: str) -> FilesystemUsage:
         response = self._call("GET", self._fs_path(fs_id, "/usage"), retry=True)
         raw = _json(response)
@@ -409,10 +455,99 @@ class Mountable:
         path = self._webhook_path(fs_id, webhook_id) + ":enable"
         return _webhook(_json(self._call("POST", path, retry=True)))
 
+    def list_api_keys(self) -> list[ApiKey]:
+        response = self._call("GET", self._org_path("/api-keys"), retry=True)
+        return [_api_key(raw) for raw in _json(response)]
+
+    def create_api_key(
+        self,
+        name: str,
+        *,
+        expires_in_days: int | None = None,
+        filesystem_id: str | None = None,
+        mode: Mode | None = None,
+    ) -> ApiKey:
+        """Creates an API key; its secret is in ``.secret``, only here.
+
+        With ``filesystem_id`` the key is limited to that filesystem, with a
+        grant of ``mode`` (the API's default ``rw``). Never retried.
+        """
+        body: dict[str, Any] = {"name": name}
+        options = {
+            "expires_in_days": expires_in_days,
+            "filesystem_id": filesystem_id,
+            "mode": mode,
+        }
+        body.update({k: v for k, v in options.items() if v is not None})
+        response = self._call(
+            "POST", self._org_path("/api-keys"), retry=False, json=body
+        )
+        return _api_key(_json(response))
+
+    def revoke_api_key(self, key_id: str) -> None:
+        """Revoking a revoked key succeeds too."""
+        self._call("DELETE", self._org_path(f"/api-keys/{_id(key_id)}"), retry=True)
+
+    def list_s3_keys(self, fs_id: str) -> list[S3Key]:
+        response = self._call("GET", self._fs_path(fs_id, "/s3-keys"), retry=True)
+        return [_s3_key(raw) for raw in _json(response)]
+
+    def create_s3_key(
+        self,
+        fs_id: str,
+        name: str,
+        *,
+        mode: Mode | None = None,
+        expires_in_days: int | None = None,
+    ) -> S3Key:
+        """Creates an S3 key for the filesystem (the bucket of that ID at
+        https://s3.mountable.io, path-style); its secret is in
+        ``.secret_access_key``, only here. Never retried."""
+        body: dict[str, Any] = {"name": name}
+        options = {"mode": mode, "expires_in_days": expires_in_days}
+        body.update({k: v for k, v in options.items() if v is not None})
+        response = self._call(
+            "POST", self._fs_path(fs_id, "/s3-keys"), retry=False, json=body
+        )
+        return _s3_key(_json(response))
+
+    def revoke_s3_key(self, fs_id: str, access_key_id: str) -> None:
+        """Revoking a revoked key succeeds too."""
+        path = self._fs_path(fs_id, f"/s3-keys/{_id(access_key_id)}")
+        self._call("DELETE", path, retry=True)
+
+    def list_grants(self, fs_id: str) -> list[Grant]:
+        response = self._call("GET", self._fs_path(fs_id, "/grants"), retry=True)
+        return [_grant(raw) for raw in _json(response)]
+
+    def set_grant(
+        self,
+        fs_id: str,
+        principal_type: Literal["member", "group", "api_key"],
+        principal_id: str,
+        mode: Mode,
+    ) -> Grant:
+        """Creates the principal's grant, or changes its mode."""
+        body = {
+            "principal_type": principal_type,
+            "principal_id": principal_id,
+            "mode": mode,
+        }
+        response = self._call(
+            "PUT", self._fs_path(fs_id, "/grants"), retry=True, json=body
+        )
+        return _grant(_json(response))
+
+    def delete_grant(self, fs_id: str, grant_id: str) -> None:
+        """Never retried: a retry after a lost answer would find nothing."""
+        path = self._fs_path(fs_id, f"/grants/{_id(grant_id)}")
+        self._call("DELETE", path, retry=False)
+
     def _org_path(self, path: str) -> str:
         if self._org_id is None:
             me = _json(self._call("GET", "/api/v1/me", retry=True))
-            key: dict[str, Any] = me.get("api_key") or {}
+            # An API key's, or a management key's.
+            key: dict[str, Any] = me.get("api_key") or me.get("management_key") or {}
             org_id = key.get("org_id")
             if not isinstance(org_id, str) or not org_id:
                 raise MountableError(
@@ -724,6 +859,41 @@ def _webhook(raw: dict[str, Any]) -> Webhook:
         last_failure=raw.get("last_failure"),
         failing_since=_parse_optional_time(raw.get("failing_since")),
         secret=raw.get("secret"),
+    )
+
+
+def _api_key(raw: dict[str, Any]) -> ApiKey:
+    return ApiKey(
+        id=raw["id"],
+        name=raw["name"],
+        prefix=raw["prefix"],
+        filesystem_id=raw.get("filesystem_id"),
+        expires_at=_parse_time(raw["expires_at"]),
+        revoked=raw["revoked"],
+        created_at=_parse_time(raw["created_at"]),
+        secret=raw.get("secret"),
+    )
+
+
+def _s3_key(raw: dict[str, Any]) -> S3Key:
+    return S3Key(
+        access_key_id=raw["access_key_id"],
+        filesystem_id=raw["filesystem_id"],
+        name=raw["name"],
+        mode=raw["mode"],
+        expires_at=_parse_time(raw["expires_at"]),
+        revoked=raw["revoked"],
+        created_at=_parse_time(raw["created_at"]),
+        secret_access_key=raw.get("secret_access_key"),
+    )
+
+
+def _grant(raw: dict[str, Any]) -> Grant:
+    return Grant(
+        id=raw["id"],
+        principal_type=raw["principal_type"],
+        principal_id=raw["principal_id"],
+        mode=raw["mode"],
     )
 
 

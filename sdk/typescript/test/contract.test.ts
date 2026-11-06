@@ -6,9 +6,11 @@ import { readFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { Mountable, MountableError, verifyWebhook, Webhook } from "../src/index.ts";
+import { ApiKey, Mountable, MountableError, S3Key, verifyWebhook, Webhook } from "../src/index.ts";
 import {
   API_KEY,
+  API_KEYS,
+  apiKeyView,
   CHANGES,
   error,
   FILES,
@@ -16,13 +18,18 @@ import {
   FS,
   fileInfo,
   filesystemView,
+  GRANTS,
+  grantView,
   LIST,
+  MANAGEMENT_KEY,
   ME,
   MockAPI,
   me,
   type Reply,
   type Request,
   reply,
+  S3_KEYS,
+  s3KeyView,
   SESSIONS,
   WEBHOOK_SECRET,
   WEBHOOKS,
@@ -597,10 +604,17 @@ test("C33 the organisation is resolved once", async (t) => {
   await new Mountable({ apiKey: API_KEY, baseUrl: api.url }).listFilesystems();
   await new Mountable({ apiKey: API_KEY, baseUrl: api.url, orgId: "org_arg" }).listFilesystems();
   assert.deepEqual(api.calls().slice(4), ["GET /api/v1/orgs/org_env/filesystems", "GET /api/v1/orgs/org_arg/filesystems"]);
+  // A management key's organisation.
+  delete process.env.MOUNTABLE_ORG;
+  api.route("GET", ME, reply(200, me({ api_key: null, management_key: { id: "m1", org_id: "org_managed" } })));
+  api.route("GET", "/api/v1/orgs/org_managed/filesystems", reply(200, []));
+  await new Mountable({ apiKey: MANAGEMENT_KEY, baseUrl: api.url }).listFilesystems();
+  assert.deepEqual(api.calls().slice(6), [`GET ${ME}`, "GET /api/v1/orgs/org_managed/filesystems"]);
+  assert.equal(api.requests.at(-1)?.headers.authorization, `Bearer ${MANAGEMENT_KEY}`);
 });
 
 test("C34 no organisation raises org_required", async () => {
-  api.route("GET", ME, reply(200, me({ api_key: null })));
+  api.route("GET", ME, reply(200, me({ api_key: null, management_key: null })));
   let e = await rejects(client.listFilesystems());
   assert.deepEqual([e.status, e.code], [null, "org_required"]);
   assert.deepEqual(api.calls(), [`GET ${ME}`]);
@@ -786,11 +800,24 @@ test("C42 IDs are encoded as path segments", async () => {
   api.route("GET", fs, reply(200, filesystemView()));
   api.route("POST", `${fs}/webhooks/wh%3F1:enable`, reply(200, webhookView()));
   api.route("DELETE", `${SESSIONS}/s%231`, reply(204));
+  api.route("DELETE", "/api/v1/orgs/org%2F1/api-keys/k%2F1", reply(204));
+  api.route("DELETE", `${fs}/s3-keys/a%3Fk`, reply(204));
+  api.route("DELETE", `${fs}/grants/g%231`, reply(204));
   const c = new Mountable({ apiKey: API_KEY, baseUrl: api.url, orgId: "org/1" });
   await c.getFilesystem("a b/ž");
   await c.enableWebhook("a b/ž", "wh?1");
   await c.revokeMountSession("s#1");
-  assert.deepEqual(api.calls(), [`GET ${fs}`, `POST ${fs}/webhooks/wh%3F1:enable`, `DELETE ${SESSIONS}/s%231`]);
+  await c.revokeApiKey("k/1");
+  await c.revokeS3Key("a b/ž", "a?k");
+  await c.deleteGrant("a b/ž", "g#1");
+  assert.deepEqual(api.calls(), [
+    `GET ${fs}`,
+    `POST ${fs}/webhooks/wh%3F1:enable`,
+    `DELETE ${SESSIONS}/s%231`,
+    "DELETE /api/v1/orgs/org%2F1/api-keys/k%2F1",
+    `DELETE ${fs}/s3-keys/a%3Fk`,
+    `DELETE ${fs}/grants/g%231`,
+  ]);
 });
 
 test("C43 webhook secrets are hidden", async () => {
@@ -907,6 +934,14 @@ test("C47 dot-segment IDs are refused", async () => {
       () => client.deleteWebhook(FS, bad),
       () => client.rotateWebhookSecret(FS, bad),
       () => client.enableWebhook(FS, bad),
+      () => client.deleteFilesystem(bad),
+      () => client.revokeApiKey(bad),
+      () => client.listS3Keys(bad),
+      () => client.createS3Key(bad, "duck"),
+      () => client.revokeS3Key(FS, bad),
+      () => client.listGrants(bad),
+      () => client.setGrant(bad, "api_key", "k1", "ro"),
+      () => client.deleteGrant(FS, bad),
     );
   }
   for (const call of calls) {
@@ -1053,6 +1088,175 @@ test("C49 verifyWebhook refuses anything else", async (t) => {
 });
 
 // --- parity ----------------------------------------------------------------
+
+// --- keys and grants -------------------------------------------------------
+
+const EXPIRES = new Date("2027-01-01T00:00:00Z");
+const NEW_KEY = "mtbl_newkeysecret";
+const NEW_S3_SECRET = "c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0";
+
+function manager(): Mountable {
+  return new Mountable({ apiKey: MANAGEMENT_KEY, baseUrl: api.url });
+}
+
+test("C50 deleteFilesystem", async () => {
+  api.route("DELETE", `${FILESYSTEMS}/${FS}`, reply(204));
+  assert.equal(await manager().deleteFilesystem(FS), undefined);
+  assert.equal(api.calls().at(-1), `DELETE ${FILESYSTEMS}/${FS}`);
+  assert.equal(api.requests.at(-1)?.headers.authorization, `Bearer ${MANAGEMENT_KEY}`);
+});
+
+test("C51 API keys", async () => {
+  const m = manager();
+  api.route("POST", API_KEYS, (r) => reply(201, apiKeyView({ secret: NEW_KEY, ...r.json() })));
+  let key = await m.createApiKey("worker");
+  assert.ok(key instanceof ApiKey);
+  assert.deepEqual(
+    [key.id, key.name, key.prefix, key.filesystemId, key.expiresAt, key.revoked, key.createdAt, key.secret],
+    ["k1", "worker", "mtbl_abcdefg", null, EXPIRES, false, CREATED, NEW_KEY],
+  );
+  key = await m.createApiKey("one", { expiresInDays: 7, filesystemId: FS, mode: "ro" });
+  assert.deepEqual([key.filesystemId, key.secret], [FS, NEW_KEY]);
+  assert.deepEqual(
+    api.operations().map((r) => r.json()),
+    [{ name: "worker" }, { name: "one", expires_in_days: 7, filesystem_id: FS, mode: "ro" }],
+  );
+  api.route("GET", API_KEYS, reply(200, [apiKeyView(), apiKeyView({ revoked: true, filesystem_id: FS })]));
+  const [first, second] = await m.listApiKeys();
+  assert.deepEqual([first.secret, first.filesystemId], [null, null]);
+  assert.deepEqual([second.revoked, second.filesystemId, second.expiresAt], [true, FS, EXPIRES]);
+  api.route("DELETE", `${API_KEYS}/k1`, reply(204));
+  assert.equal(await m.revokeApiKey("k1"), undefined);
+  assert.equal(api.calls().at(-1), `DELETE ${API_KEYS}/k1`);
+});
+
+test("C52 S3 keys", async () => {
+  const m = manager();
+  api.route("POST", S3_KEYS, (r) => reply(201, s3KeyView({ secret_access_key: NEW_S3_SECRET, ...r.json() })));
+  let key = await m.createS3Key(FS, "duck");
+  assert.ok(key instanceof S3Key);
+  assert.deepEqual(
+    [key.accessKeyId, key.filesystemId, key.name, key.mode, key.expiresAt, key.revoked, key.createdAt, key.secretAccessKey],
+    ["MTBLABCDEFGHIJKLMNOP", FS, "duck", "rw", EXPIRES, false, CREATED, NEW_S3_SECRET],
+  );
+  key = await m.createS3Key(FS, "ro", { mode: "ro", expiresInDays: 365 });
+  assert.equal(key.mode, "ro");
+  assert.deepEqual(
+    api.operations().map((r) => r.json()),
+    [{ name: "duck" }, { name: "ro", mode: "ro", expires_in_days: 365 }],
+  );
+  api.route("GET", S3_KEYS, reply(200, [s3KeyView({ revoked: true })]));
+  const [listed] = await m.listS3Keys(FS);
+  assert.deepEqual([listed.secretAccessKey, listed.revoked], [null, true]);
+  api.route("DELETE", `${S3_KEYS}/MTBLABCDEFGHIJKLMNOP`, reply(204));
+  assert.equal(await m.revokeS3Key(FS, "MTBLABCDEFGHIJKLMNOP"), undefined);
+  assert.equal(api.calls().at(-1), `DELETE ${S3_KEYS}/MTBLABCDEFGHIJKLMNOP`);
+});
+
+test("C53 grants", async () => {
+  const m = manager();
+  api.route("GET", GRANTS, reply(200, [grantView()]));
+  api.route("PUT", GRANTS, (r) => reply(200, grantView(r.json())));
+  api.route("DELETE", `${GRANTS}/g1`, reply(204));
+  assert.deepEqual(await m.listGrants(FS), [{ id: "g1", principalType: "api_key", principalId: "k1", mode: "ro" }]);
+  assert.deepEqual(await m.setGrant(FS, "member", "u1", "rw"), {
+    id: "g1",
+    principalType: "member",
+    principalId: "u1",
+    mode: "rw",
+  });
+  assert.equal(await m.deleteGrant(FS, "g1"), undefined);
+  assert.deepEqual(
+    api.operations().map((r) => `${r.method} ${r.path}`),
+    [`GET ${GRANTS}`, `PUT ${GRANTS}`, `DELETE ${GRANTS}/g1`],
+  );
+  assert.deepEqual(api.operations()[1].json(), { principal_type: "member", principal_id: "u1", mode: "rw" });
+});
+
+test("C54 key secrets are hidden", async () => {
+  const m = manager();
+  api.route("POST", API_KEYS, reply(201, apiKeyView({ secret: NEW_KEY })));
+  api.route("POST", S3_KEYS, reply(201, s3KeyView({ secret_access_key: NEW_S3_SECRET })));
+  const key = await m.createApiKey("worker");
+  const s3 = await m.createS3Key(FS, "duck");
+  for (const [object, secret] of [
+    [key, NEW_KEY],
+    [s3, NEW_S3_SECRET],
+  ] as const) {
+    for (const shown of [String(object), inspect(object), JSON.stringify(object), JSON.stringify({ ...object })]) {
+      assert.ok(!shown.includes(secret), shown);
+    }
+  }
+  api.route("GET", API_KEYS, error(401, "unauthenticated", { message: `bad ${MANAGEMENT_KEY}` }));
+  const e = await rejects(m.listApiKeys());
+  for (const shown of [String(e), inspect(e), e.message, inspect(m)]) {
+    assert.ok(!shown.includes("testmanagementsecret"), shown);
+  }
+});
+
+test("C55 key and grant retries", async () => {
+  const m = manager();
+  const repeated: [string, string, Reply][] = [
+    ["GET", API_KEYS, reply(200, [])],
+    ["GET", S3_KEYS, reply(200, [])],
+    ["GET", GRANTS, reply(200, [])],
+    ["DELETE", `${API_KEYS}/k1`, reply(204)],
+    ["DELETE", `${S3_KEYS}/MTBLA`, reply(204)],
+    ["PUT", GRANTS, reply(200, grantView())],
+  ];
+  for (const [method, path, answer] of repeated) {
+    api.route(method, path, failFirst(1, "drop", answer));
+  }
+  await m.listApiKeys();
+  await m.listS3Keys(FS);
+  await m.listGrants(FS);
+  await m.revokeApiKey("k1");
+  await m.revokeS3Key(FS, "MTBLA");
+  await m.setGrant(FS, "api_key", "k1", "ro");
+  const count = (method: string, path: string) => api.calls().filter((c) => c === `${method} ${path}`).length;
+  assert.deepEqual(
+    repeated.map(([method, path]) => count(method, path)),
+    repeated.map(() => 2),
+  );
+  const once: [string, string, Reply][] = [
+    ["DELETE", `${FILESYSTEMS}/${FS}`, reply(204)],
+    ["POST", API_KEYS, reply(201, apiKeyView({ secret: NEW_KEY }))],
+    ["POST", S3_KEYS, reply(201, s3KeyView({ secret_access_key: "x" }))],
+    ["DELETE", `${GRANTS}/g1`, reply(204)],
+  ];
+  for (const [method, path, answer] of once) {
+    api.route(method, path, failFirst(1, "drop", answer));
+  }
+  const writes = [
+    () => m.deleteFilesystem(FS),
+    () => m.createApiKey("worker"),
+    () => m.createS3Key(FS, "duck"),
+    () => m.deleteGrant(FS, "g1"),
+  ];
+  for (const write of writes) {
+    assert.equal((await rejects(write)).code, "network_error");
+  }
+  assert.deepEqual(
+    once.map(([method, path]) => count(method, path)),
+    once.map(() => 1),
+  );
+});
+
+test("C56 the wrong kind of key is refused", async () => {
+  api.route("POST", API_KEYS, error(403, "management_key_required"));
+  let e = await rejects(client.createApiKey("worker"));
+  assert.deepEqual([e.status, e.code], [403, "management_key_required"]);
+  api.route("POST", SESSIONS, error(403, "api_key_required"));
+  const m = new Mountable({ apiKey: MANAGEMENT_KEY, baseUrl: api.url, orgId: "org_one" });
+  e = await rejects(m.createMountTicket(FS));
+  assert.deepEqual([e.status, e.code], [403, "api_key_required"]);
+  e = await rejects(m.filesystem(FS).read("a.txt"));
+  assert.deepEqual([e.status, e.code], [403, "api_key_required"]);
+  assert.deepEqual(
+    api.operations().map((r) => r.path),
+    [API_KEYS],
+  );
+});
 
 test("every contract case has a test", () => {
   const contract = readFileSync(new URL("../../contract.md", import.meta.url), "utf8");

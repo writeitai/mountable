@@ -3,7 +3,7 @@
 Read, write, delete, list and follow the files of a
 [mountable.io](https://mountable.io) filesystem over HTTPS from a backend,
 without mounting it, create one-time mount tickets for sandboxes, and manage
-filesystems, their limits, mount sessions and webhooks.
+filesystems, their limits, keys, grants, mount sessions and webhooks.
 
 ```sh
 pip install mountable-sdk
@@ -61,15 +61,27 @@ while True:  # 3. then follow changes from the cursor
 
 ## Managing filesystems
 
-```python
-client = Mountable()  # org_id: MOUNTABLE_ORG, else the API key's organisation
+A management key (`mtblm_…`, created by an owner or admin in the console)
+creates and deletes filesystems, sets their limits, and creates API keys, S3
+keys and grants. An API key (`mtbl_…`) accesses files: token sessions, mount
+tickets, sessions and webhooks. Both go in `api_key`; the API refuses the
+other kind with `403 management_key_required` or `403 api_key_required`.
 
-info = client.create_filesystem(
+```python
+# org_id: MOUNTABLE_ORG, else the key's organisation
+admin = Mountable(api_key=os.environ["MOUNTABLE_MANAGEMENT_KEY"])
+
+info = admin.create_filesystem(
     "agent-workspace", spending_cap_cents=2_000, byte_quota=5 * 2**30
 )
-client.update_filesystem(info.id, mutations_per_minute=None)  # the platform default
-print(client.filesystem_usage(info.id).retained_bytes)
+admin.update_filesystem(info.id, mutations_per_minute=None)  # the platform default
+print(admin.filesystem_usage(info.id).retained_bytes)
+key = admin.create_api_key("backend", filesystem_id=info.id, mode="rw")
+save_secret(key.secret)  # mtbl_…, returned only here
+s3 = admin.create_s3_key(info.id, "duckdb", mode="ro", expires_in_days=90)
+save_secret(s3.access_key_id, s3.secret_access_key)  # returned only here
 
+client = Mountable(api_key=key.secret)
 hook = client.create_webhook(
     info.id, "https://example.com/hooks/mountable", path_prefix="/tickets"
 )
@@ -90,12 +102,27 @@ save_secret(hook.secret)  # whsec_…, returned only here and by rotate_webhook_
 | `delete_webhook(fs_id, webhook_id)` | `None` |
 | `rotate_webhook_secret(fs_id, webhook_id)` | `Webhook` with the new `.secret` |
 | `enable_webhook(fs_id, webhook_id)` | `Webhook` |
+| `delete_filesystem(fs_id)` | `None`; the filesystem, its files, sessions and S3 keys go at once |
+| `create_api_key(name, *, expires_in_days, filesystem_id, mode)` | `ApiKey` with `.secret`; with `filesystem_id`, limited to that filesystem |
+| `list_api_keys()` | `list[ApiKey]` (`.secret` `None`) |
+| `revoke_api_key(key_id)` | `None` |
+| `create_s3_key(fs_id, name, *, mode, expires_in_days)` | `S3Key` with `.access_key_id` and `.secret_access_key` |
+| `list_s3_keys(fs_id)` | `list[S3Key]` (`.secret_access_key` `None`) |
+| `revoke_s3_key(fs_id, access_key_id)` | `None` |
+| `list_grants(fs_id)` | `list[Grant]` |
+| `set_grant(fs_id, principal_type, principal_id, mode)` | `Grant`; creates it or changes its mode |
+| `delete_grant(fs_id, grant_id)` | `None` |
 
-These calls use the API key, and the API checks what it may do:
+An S3 key works with any S3 client at `https://s3.mountable.io`, path-style,
+with the filesystem ID as the bucket. Key secrets are kept out of `repr`.
+Creating keys and deleting filesystems or grants are never retried after a
+network failure; list them to see what happened.
 
-- An API key limited to one filesystem cannot create or update filesystems
-  (`403 key_limited_to_filesystem`); creating and updating also need the
-  key's creator to be an owner or admin of the organisation.
+These calls use the key, and the API checks what it may do:
+
+- Creating, updating and deleting filesystems, keys and grants need a
+  management key whose creator is still an owner or admin
+  (`403 management_key_required` for an API key).
 - Updating a filesystem and every webhook call, listing included, need
   read-write access to the filesystem.
 - A key lists only its own live sessions and revokes only its own sessions.
@@ -103,7 +130,7 @@ These calls use the API key, and the API checks what it may do:
   (no cap), `mutations_per_minute` 1–1,000 or `None` (the platform default),
   `byte_quota` 1 GiB–100 GiB, `entry_quota` 10,000–1,000,000. The two quotas
   cannot be removed.
-- An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
+- An empty, `.` or `..` filesystem, session, webhook, key or grant ID, or a `.` or `..`
   organisation ID, raises `invalid_request` before any request: URL
   normalisation would send it to another resource. An empty `org_id` counts
   as not given.
