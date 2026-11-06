@@ -1,7 +1,7 @@
 package main
 
 // The management commands: organisations, filesystems, tickets, sessions,
-// webhooks.
+// webhooks. Keys and grants are in keys.go.
 
 import (
 	"context"
@@ -283,6 +283,19 @@ func fsUpdate(o *output, args []string) error {
 		return err
 	}
 	return o.result(raw, func(w io.Writer) error { return printFilesystem(w, raw) })
+}
+
+// fsDelete deletes a filesystem at once (D60): a person or a management key.
+func fsDelete(o *output, args []string) error {
+	return apiCommand(args, 1, "fs delete FS_ID [--org ORG_ID]", true, func(ctx context.Context, c *client, args []string) error {
+		if err := c.deleteFilesystem(ctx, args[0]); err != nil {
+			return err
+		}
+		return o.result(map[string]any{"id": args[0], "deleted": true}, func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "deleted %s\n", args[0])
+			return err
+		})
+	})
 }
 
 // printFilesystem writes a filesystem and its limits for people.

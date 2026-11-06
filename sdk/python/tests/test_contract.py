@@ -17,36 +17,46 @@ import httpx
 import pytest
 
 from mountable_sdk import (
+    ApiKey,
     Change,
     File,
     FileInfo,
     FilesystemInfo,
     FilesystemUsage,
+    Grant,
     Mountable,
     MountableError,
     MountSession,
+    S3Key,
     Webhook,
     _client,
     verify_webhook,
 )
 from tests.mock_api import (
     API_KEY,
+    API_KEYS,
     CHANGES,
     FILES,
     FILESYSTEMS,
     FS,
+    GRANTS,
     LIST,
+    MANAGEMENT_KEY,
     ME,
+    S3_KEYS,
     SESSIONS,
     WEBHOOK_SECRET,
     WEBHOOKS,
     MockAPI,
     Reply,
     Request,
+    api_key_view,
     error,
     file_info,
     filesystem_view,
+    grant_view,
     me,
+    s3_key_view,
     webhook_view,
 )
 
@@ -700,10 +710,19 @@ def test_c33_the_organisation_is_resolved_once(
         "GET /api/v1/orgs/org_env/filesystems",
         "GET /api/v1/orgs/org_arg/filesystems",
     ]
+    # A management key's organisation.
+    monkeypatch.delenv("MOUNTABLE_ORG")
+    managed = me(api_key=None, management_key={"id": "m1", "org_id": "org_managed"})
+    api.route("GET", ME, Reply(200, managed))
+    api.route("GET", "/api/v1/orgs/org_managed/filesystems", Reply(200, []))
+    with Mountable(api_key=MANAGEMENT_KEY, base_url=api.url) as c:
+        c.list_filesystems()
+    assert api.calls()[5:] == [f"GET {ME}", "GET /api/v1/orgs/org_managed/filesystems"]
+    assert api.requests[-1].headers["authorization"] == f"Bearer {MANAGEMENT_KEY}"
 
 
 def test_c34_no_organisation_raises_org_required(api: MockAPI, client: Mountable):
-    api.route("GET", ME, Reply(200, me(api_key=None)))
+    api.route("GET", ME, Reply(200, me(api_key=None, management_key=None)))
     e = raises(client.list_filesystems)
     assert (e.status, e.code) == (None, "org_required")
     assert api.calls() == [f"GET {ME}"]
@@ -912,14 +931,23 @@ def test_c42_ids_are_encoded_as_path_segments(api: MockAPI):
     api.route("GET", fs, Reply(200, filesystem_view()))
     api.route("POST", f"{fs}/webhooks/wh%3F1:enable", Reply(200, webhook_view()))
     api.route("DELETE", f"{SESSIONS}/s%231", Reply(204))
+    api.route("DELETE", "/api/v1/orgs/org%2F1/api-keys/k%2F1", Reply(204))
+    api.route("DELETE", f"{fs}/s3-keys/a%3Fk", Reply(204))
+    api.route("DELETE", f"{fs}/grants/g%231", Reply(204))
     with Mountable(api_key=API_KEY, base_url=api.url, org_id="org/1") as c:
         c.get_filesystem("a b/ž")
         c.enable_webhook("a b/ž", "wh?1")
         c.revoke_mount_session("s#1")
+        c.revoke_api_key("k/1")
+        c.revoke_s3_key("a b/ž", "a?k")
+        c.delete_grant("a b/ž", "g#1")
     assert api.calls() == [
         f"GET {fs}",
         f"POST {fs}/webhooks/wh%3F1:enable",
         f"DELETE {SESSIONS}/s%231",
+        "DELETE /api/v1/orgs/org%2F1/api-keys/k%2F1",
+        f"DELETE {fs}/s3-keys/a%3Fk",
+        f"DELETE {fs}/grants/g%231",
     ]
 
 
@@ -1038,6 +1066,14 @@ def test_c47_dot_segment_ids_are_refused(api: MockAPI):
                 lambda bad=bad: client.delete_webhook(FS, bad),
                 lambda bad=bad: client.rotate_webhook_secret(FS, bad),
                 lambda bad=bad: client.enable_webhook(FS, bad),
+                lambda bad=bad: client.delete_filesystem(bad),
+                lambda bad=bad: client.revoke_api_key(bad),
+                lambda bad=bad: client.list_s3_keys(bad),
+                lambda bad=bad: client.create_s3_key(bad, "duck"),
+                lambda bad=bad: client.revoke_s3_key(FS, bad),
+                lambda bad=bad: client.list_grants(bad),
+                lambda bad=bad: client.set_grant(bad, "api_key", "k1", "ro"),
+                lambda bad=bad: client.delete_grant(FS, bad),
             ]
         for call in calls:
             e = raises(call)
@@ -1181,6 +1217,178 @@ def test_c49_verify_webhook_refuses_anything_else(monkeypatch: pytest.MonkeyPatc
             assert raises(lambda: verify_webhook(secret, headers, body)).code == (
                 "invalid_webhook"
             )
+
+
+# --- keys and grants -------------------------------------------------------
+
+EXPIRES = datetime(2027, 1, 1, tzinfo=timezone.utc)
+NEW_KEY = "mtbl_newkeysecret"
+NEW_S3_SECRET = "c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0"
+
+
+@pytest.fixture
+def manager(api: MockAPI, monkeypatch: pytest.MonkeyPatch) -> Iterator[Mountable]:
+    monkeypatch.delenv("MOUNTABLE_ORG", raising=False)
+    with Mountable(api_key=MANAGEMENT_KEY, base_url=api.url) as c:
+        yield c
+
+
+def test_c50_delete_filesystem(api: MockAPI, manager: Mountable):
+    api.route("DELETE", f"{FILESYSTEMS}/{FS}", Reply(204))
+    assert manager.delete_filesystem(FS) is None
+    assert api.calls()[-1] == f"DELETE {FILESYSTEMS}/{FS}"
+    assert api.requests[-1].headers["authorization"] == f"Bearer {MANAGEMENT_KEY}"
+
+
+def test_c51_api_keys(api: MockAPI, manager: Mountable):
+    api.route(
+        "POST",
+        API_KEYS,
+        lambda r: Reply(201, api_key_view(secret=NEW_KEY, **r.json())),
+    )
+    key = manager.create_api_key("worker")
+    assert key == ApiKey(
+        "k1", "worker", "mtbl_abcdefg", None, EXPIRES, False, CREATED, NEW_KEY
+    )
+    key = manager.create_api_key("one", expires_in_days=7, filesystem_id=FS, mode="ro")
+    assert (key.filesystem_id, key.secret) == (FS, NEW_KEY)
+    assert [r.json() for r in api.operations()] == [
+        {"name": "worker"},
+        {"name": "one", "expires_in_days": 7, "filesystem_id": FS, "mode": "ro"},
+    ]
+    revoked = api_key_view(revoked=True, filesystem_id=FS)
+    api.route("GET", API_KEYS, Reply(200, [api_key_view(), revoked]))
+    first, second = manager.list_api_keys()
+    assert first.secret is None and first.filesystem_id is None
+    assert (second.revoked, second.filesystem_id, second.expires_at) == (
+        True,
+        FS,
+        EXPIRES,
+    )
+    api.route("DELETE", f"{API_KEYS}/k1", Reply(204))
+    assert manager.revoke_api_key("k1") is None
+    assert api.calls()[-1] == f"DELETE {API_KEYS}/k1"
+
+
+def test_c52_s3_keys(api: MockAPI, manager: Mountable):
+    api.route(
+        "POST",
+        S3_KEYS,
+        lambda r: Reply(201, s3_key_view(secret_access_key=NEW_S3_SECRET, **r.json())),
+    )
+    key = manager.create_s3_key(FS, "duck")
+    assert key == S3Key(
+        "MTBLABCDEFGHIJKLMNOP",
+        FS,
+        "duck",
+        "rw",
+        EXPIRES,
+        False,
+        CREATED,
+        NEW_S3_SECRET,
+    )
+    key = manager.create_s3_key(FS, "ro", mode="ro", expires_in_days=365)
+    assert key.mode == "ro"
+    assert [r.json() for r in api.operations()] == [
+        {"name": "duck"},
+        {"name": "ro", "mode": "ro", "expires_in_days": 365},
+    ]
+    api.route("GET", S3_KEYS, Reply(200, [s3_key_view(revoked=True)]))
+    (listed,) = manager.list_s3_keys(FS)
+    assert listed.secret_access_key is None and listed.revoked
+    api.route("DELETE", f"{S3_KEYS}/MTBLABCDEFGHIJKLMNOP", Reply(204))
+    assert manager.revoke_s3_key(FS, "MTBLABCDEFGHIJKLMNOP") is None
+    assert api.calls()[-1] == f"DELETE {S3_KEYS}/MTBLABCDEFGHIJKLMNOP"
+
+
+def test_c53_grants(api: MockAPI, manager: Mountable):
+    api.route("GET", GRANTS, Reply(200, [grant_view()]))
+    api.route("PUT", GRANTS, lambda r: Reply(200, grant_view(**r.json())))
+    api.route("DELETE", f"{GRANTS}/g1", Reply(204))
+    assert manager.list_grants(FS) == [Grant("g1", "api_key", "k1", "ro")]
+    assert manager.set_grant(FS, "member", "u1", "rw") == Grant(
+        "g1", "member", "u1", "rw"
+    )
+    assert manager.delete_grant(FS, "g1") is None
+    assert [(r.method, r.path) for r in api.operations()] == [
+        ("GET", GRANTS),
+        ("PUT", GRANTS),
+        ("DELETE", f"{GRANTS}/g1"),
+    ]
+    assert api.operations()[1].json() == {
+        "principal_type": "member",
+        "principal_id": "u1",
+        "mode": "rw",
+    }
+
+
+def test_c54_key_secrets_are_hidden(api: MockAPI, manager: Mountable):
+    api.route("POST", API_KEYS, Reply(201, api_key_view(secret=NEW_KEY)))
+    api.route("POST", S3_KEYS, Reply(201, s3_key_view(secret_access_key=NEW_S3_SECRET)))
+    key = manager.create_api_key("worker")
+    s3 = manager.create_s3_key(FS, "duck")
+    for text in (str(key), repr(key)):
+        assert NEW_KEY not in text
+    for text in (str(s3), repr(s3)):
+        assert NEW_S3_SECRET not in text
+    api.route(
+        "GET", API_KEYS, error(401, "unauthenticated", message=f"bad {MANAGEMENT_KEY}")
+    )
+    e = raises(manager.list_api_keys)
+    for text in (str(e), repr(e), e.message, repr(manager)):
+        assert MANAGEMENT_KEY not in text and "testmanagementsecret" not in text
+
+
+def test_c55_key_and_grant_retries(api: MockAPI, manager: Mountable):
+    repeated = [
+        ("GET", API_KEYS, Reply(200, [])),
+        ("GET", S3_KEYS, Reply(200, [])),
+        ("GET", GRANTS, Reply(200, [])),
+        ("DELETE", f"{API_KEYS}/k1", Reply(204)),
+        ("DELETE", f"{S3_KEYS}/MTBLA", Reply(204)),
+        ("PUT", GRANTS, Reply(200, grant_view())),
+    ]
+    for method, path, reply in repeated:
+        api.route(method, path, fail_first(1, "drop", reply))
+    manager.list_api_keys()
+    manager.list_s3_keys(FS)
+    manager.list_grants(FS)
+    manager.revoke_api_key("k1")
+    manager.revoke_s3_key(FS, "MTBLA")
+    manager.set_grant(FS, "api_key", "k1", "ro")
+    calls = api.calls()
+    assert [calls.count(f"{m} {p}") for m, p, _ in repeated] == [2] * 6
+    once = [
+        ("DELETE", f"{FILESYSTEMS}/{FS}", Reply(204)),
+        ("POST", API_KEYS, Reply(201, api_key_view(secret=NEW_KEY))),
+        ("POST", S3_KEYS, Reply(201, s3_key_view(secret_access_key="x"))),
+        ("DELETE", f"{GRANTS}/g1", Reply(204)),
+    ]
+    for method, path, reply in once:
+        api.route(method, path, fail_first(1, "drop", reply))
+    writes: list[Any] = [
+        lambda: manager.delete_filesystem(FS),
+        lambda: manager.create_api_key("worker"),
+        lambda: manager.create_s3_key(FS, "duck"),
+        lambda: manager.delete_grant(FS, "g1"),
+    ]
+    for write in writes:
+        assert raises(write).code == "network_error"
+    calls = api.calls()
+    assert [calls.count(f"{m} {p}") for m, p, _ in once] == [1] * 4
+
+
+def test_c56_the_wrong_kind_of_key_is_refused(api: MockAPI, client: Mountable):
+    api.route("POST", API_KEYS, error(403, "management_key_required"))
+    e = raises(lambda: client.create_api_key("worker"))
+    assert (e.status, e.code) == (403, "management_key_required")
+    api.route("POST", SESSIONS, error(403, "api_key_required"))
+    with Mountable(api_key=MANAGEMENT_KEY, base_url=api.url, org_id="org_one") as c:
+        e = raises(lambda: c.create_mount_ticket(FS))
+        assert (e.status, e.code) == (403, "api_key_required")
+        e = raises(lambda: c.filesystem(FS).read("a.txt"))
+        assert (e.status, e.code) == (403, "api_key_required")
+    assert [r.path for r in api.operations()] == [API_KEYS]
 
 
 # --- parity ----------------------------------------------------------------

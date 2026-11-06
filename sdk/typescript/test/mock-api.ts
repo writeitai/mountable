@@ -14,6 +14,10 @@ export const ORG = "org_one";
 export const FILESYSTEMS = `/api/v1/orgs/${ORG}/filesystems`;
 export const WEBHOOKS = `${FILESYSTEMS}/${FS}/webhooks`;
 export const WEBHOOK_SECRET = "whsec_c2VjcmV0K2tleQ+/=";
+export const API_KEYS = `/api/v1/orgs/${ORG}/api-keys`;
+export const S3_KEYS = `${FILESYSTEMS}/${FS}/s3-keys`;
+export const GRANTS = `${FILESYSTEMS}/${FS}/grants`;
+export const MANAGEMENT_KEY = "mtblm_testmanagementsecret";
 
 export interface Request {
   method: string;
@@ -98,6 +102,36 @@ export function webhookView(overrides: Record<string, unknown> = {}): Record<str
     failing_since: null,
     ...overrides,
   };
+}
+
+export function apiKeyView(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "k1",
+    name: "worker",
+    prefix: "mtbl_abcdefg",
+    filesystem_id: null,
+    expires_at: "2027-01-01T00:00:00Z",
+    revoked: false,
+    created_at: "2026-10-01T09:30:00Z",
+    ...overrides,
+  };
+}
+
+export function s3KeyView(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    access_key_id: "MTBLABCDEFGHIJKLMNOP",
+    filesystem_id: FS,
+    name: "duck",
+    mode: "rw",
+    expires_at: "2027-01-01T00:00:00Z",
+    revoked: false,
+    created_at: "2026-10-01T09:30:00Z",
+    ...overrides,
+  };
+}
+
+export function grantView(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { id: "g1", principal_type: "api_key", principal_id: "k1", mode: "ro", ...overrides };
 }
 
 /**

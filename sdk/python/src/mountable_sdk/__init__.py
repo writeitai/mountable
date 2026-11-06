@@ -1,6 +1,7 @@
 """The Mountable SDK: the files API, mount tickets and management over HTTPS."""
 
 from mountable_sdk._client import (
+    ApiKey,
     Change,
     ChangeBatch,
     File,
@@ -8,17 +9,20 @@ from mountable_sdk._client import (
     Filesystem,
     FilesystemInfo,
     FilesystemUsage,
+    Grant,
     ListPage,
     Mountable,
     MountableError,
     MountSession,
     MountTicket,
+    S3Key,
     Webhook,
     WebhookMessage,
     verify_webhook,
 )
 
 __all__ = [
+    "ApiKey",
     "Change",
     "ChangeBatch",
     "File",
@@ -26,11 +30,13 @@ __all__ = [
     "Filesystem",
     "FilesystemInfo",
     "FilesystemUsage",
+    "Grant",
     "ListPage",
     "MountSession",
     "MountTicket",
     "Mountable",
     "MountableError",
+    "S3Key",
     "Webhook",
     "WebhookMessage",
     "verify_webhook",

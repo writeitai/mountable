@@ -241,6 +241,7 @@ func TestOrgResolution(t *testing.T) {
 		{name: "api key", key: true, me: keyMe, wantOrg: orgB},
 		{name: "api key, flag", key: true, me: keyMe, args: []string{"--org", orgA}, wantOrg: orgA},
 		{name: "api key, older API", key: true, me: twoOrgs, wantErr: "org_required"},
+		{name: "management key", key: true, me: strings.Replace(twoOrgs, `"api_key":null`, `"api_key":null,"management_key":{"id":"k","org_id":"`+orgA+`"}`, 1), wantOrg: orgA},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -516,6 +517,7 @@ func TestErrorMapping(t *testing.T) {
 		{"not found", reply(404, `{"detail":{"code":"not_found"}}`), "not_found", "check the ID with `mountable fs list`", 0},
 		{"no grant", reply(403, `{"detail":{"code":"no_grant"}}`), "no_grant", "ask an owner or admin for a grant, or use `--ro`", 0},
 		{"key forbidden", reply(403, `{"detail":{"code":"api_key_forbidden"}}`), "api_key_forbidden", "use a person's login (`mountable login`) or the console", 0},
+		{"api key required", reply(403, `{"detail":{"code":"api_key_required"}}`), "api_key_required", "set MOUNTABLE_API_KEY to an API key (`mountable api-keys create`), or run `mountable login`", 0},
 		{"rate limited", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", "7")
 			reply(429, `{"detail":{"code":"rate_limited"}}`)(w, r)

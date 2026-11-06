@@ -3,7 +3,7 @@
 Read, write, delete, list and follow the files of a
 [mountable.io](https://mountable.io) filesystem over HTTPS from a backend,
 without mounting it, create one-time mount tickets for sandboxes, and manage
-filesystems, their limits, mount sessions and webhooks.
+filesystems, their limits, keys, grants, mount sessions and webhooks.
 
 ```sh
 npm install mountable-sdk
@@ -70,16 +70,28 @@ for (;;) {
 
 ## Managing filesystems
 
-```ts
-const client = new Mountable(); // orgId: MOUNTABLE_ORG, else the API key's organisation
+A management key (`mtblm_…`, created by an owner or admin in the console)
+creates and deletes filesystems, sets their limits, and creates API keys, S3
+keys and grants. An API key (`mtbl_…`) accesses files: token sessions, mount
+tickets, sessions and webhooks. Both go in `apiKey`; the API refuses the
+other kind with `403 management_key_required` or `403 api_key_required`.
 
-const info = await client.createFilesystem("agent-workspace", {
+```ts
+// orgId: MOUNTABLE_ORG, else the key's organisation
+const admin = new Mountable({ apiKey: process.env.MOUNTABLE_MANAGEMENT_KEY });
+
+const info = await admin.createFilesystem("agent-workspace", {
   spendingCapCents: 2_000,
   byteQuota: 5 * 2 ** 30,
 });
-await client.updateFilesystem(info.id, { mutationsPerMinute: null }); // the platform default
-console.log((await client.filesystemUsage(info.id)).retainedBytes);
+await admin.updateFilesystem(info.id, { mutationsPerMinute: null }); // the platform default
+console.log((await admin.filesystemUsage(info.id)).retainedBytes);
+const key = await admin.createApiKey("backend", { filesystemId: info.id, mode: "rw" });
+saveSecret(key.secret); // mtbl_…, returned only here
+const s3 = await admin.createS3Key(info.id, "duckdb", { mode: "ro", expiresInDays: 90 });
+saveSecret(s3.accessKeyId, s3.secretAccessKey); // returned only here
 
+const client = new Mountable({ apiKey: key.secret! });
 const hook = await client.createWebhook(info.id, "https://example.com/hooks/mountable", {
   pathPrefix: "/tickets",
 });
@@ -100,20 +112,35 @@ saveSecret(hook.secret); // whsec_…, returned only here and by rotateWebhookSe
 | `deleteWebhook(fsId, webhookId)` | `void` |
 | `rotateWebhookSecret(fsId, webhookId)` | `Webhook` with the new `.secret` |
 | `enableWebhook(fsId, webhookId)` | `Webhook` |
+| `deleteFilesystem(fsId)` | `void`; the filesystem, its files, sessions and S3 keys go at once |
+| `createApiKey(name, { expiresInDays, filesystemId, mode })` | `ApiKey` with `.secret`; with `filesystemId`, limited to that filesystem |
+| `listApiKeys()` | `ApiKey[]` (`.secret` `null`) |
+| `revokeApiKey(keyId)` | `void` |
+| `createS3Key(fsId, name, { mode, expiresInDays })` | `S3Key` with `.accessKeyId` and `.secretAccessKey` |
+| `listS3Keys(fsId)` | `S3Key[]` (`.secretAccessKey` `null`) |
+| `revokeS3Key(fsId, accessKeyId)` | `void` |
+| `listGrants(fsId)` | `Grant[]` |
+| `setGrant(fsId, principalType, principalId, mode)` | `Grant`; creates it or changes its mode |
+| `deleteGrant(fsId, grantId)` | `void` |
 
-These calls use the API key, and the API checks what it may do:
+An S3 key works with any S3 client at `https://s3.mountable.io`, path-style,
+with the filesystem ID as the bucket. Key secrets are not shown when the
+object is printed. Creating keys and deleting filesystems or grants are never
+retried after a network failure; list them to see what happened.
 
-- An API key limited to one filesystem cannot create or update filesystems
-  (`403 key_limited_to_filesystem`); creating and updating also need the
-  key's creator to be an owner or admin of the organisation.
-- Updating a filesystem and every webhook call, listing included, need
-  read-write access to the filesystem.
+These calls use the key, and the API checks what it may do:
+
+- Creating, updating and deleting filesystems, keys and grants need a
+  management key whose creator is still an owner or admin
+  (`403 management_key_required` for an API key).
+- Every webhook call, listing included, needs an API key with read-write
+  access to the filesystem (`403 api_key_required` for a management key).
 - A key lists only its own live sessions and revokes only its own sessions.
 - The API checks the ranges: `spendingCapCents` 0–1,000,000,000 or `null`
   (no cap), `mutationsPerMinute` 1–1,000 or `null` (the platform default),
   `byteQuota` 1 GiB–100 GiB, `entryQuota` 10,000–1,000,000. The two quotas
   cannot be removed.
-- An empty, `.` or `..` filesystem, session or webhook ID, or a `.` or `..`
+- An empty, `.` or `..` filesystem, session, webhook, key or grant ID, or a `.` or `..`
   organisation ID, rejects with `invalid_request` before any request: URL
   normalisation would send it to another resource. An empty `orgId` counts
   as not given.
@@ -159,15 +186,17 @@ seconds; a message can arrive more than once, so apply it only when its
   expiry, makes it create a new one and send the call once more.
 - Every failure rejects with `MountableError` carrying `status`, the API's
   stable `code`, `message`, `currentEtag` (for `precondition_failed`) and
-  `retryAfter`. Network failures have `code === "network_error"`. API keys,
-  tokens and webhook secrets never appear in errors or in `console.log` of
-  the client.
+  `retryAfter`. Network failures have `code === "network_error"`. API and
+  management keys, tokens and webhook secrets never appear in errors or in
+  `console.log` of the client.
 - Only a `2xx` answer is a success; redirects are not followed.
 - Only reads (`read`, `list`, `changes`, and the `get`, `list` and
-  `filesystemUsage` calls) and the repeatable `revokeMountSession` and
-  `enableWebhook` are retried, once, after a network failure. `write`,
-  `delete`, `createFilesystem`, `updateFilesystem`, `createWebhook`,
-  `rotateWebhookSecret` and `deleteWebhook` are never retried: after a
+  `filesystemUsage` calls) and the repeatable `revokeMountSession`,
+  `enableWebhook`, `revokeApiKey`, `revokeS3Key` and `setGrant` are retried,
+  once, after a network failure. `write`, `delete`, `createFilesystem`,
+  `updateFilesystem`, `deleteFilesystem`, `createWebhook`,
+  `rotateWebhookSecret`, `deleteWebhook`, `createApiKey`, `createS3Key` and
+  `deleteGrant` are never retried: after a
   timeout the outcome is unknown, and a conditional write makes your own retry
   safe.
 - A request fails with `network_error` after 60 seconds without an answer;

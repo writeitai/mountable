@@ -13,7 +13,8 @@ import (
 	"os"
 )
 
-// client calls the API with a person's login or an API key.
+// client calls the API with a person's login or a key: an API key (mtbl_)
+// or a management key (mtblm_), which the API tells apart by its prefix.
 type client struct {
 	token  string
 	apiKey bool
@@ -23,7 +24,8 @@ type client struct {
 	org string
 }
 
-// newClient authenticates with MOUNTABLE_API_KEY when it is set, otherwise
+// newClient authenticates with MOUNTABLE_API_KEY (either kind of key) when it
+// is set, otherwise
 // with the login from `mountable login`.
 func newClient(org string) (*client, error) {
 	if key := os.Getenv("MOUNTABLE_API_KEY"); key != "" {
@@ -68,10 +70,14 @@ func unauthenticated(err error) bool {
 
 type me struct {
 	Organisations []json.RawMessage `json:"organisations"`
-	// APIKey is set for an API-key caller.
-	APIKey *struct {
-		OrgID string `json:"org_id"`
-	} `json:"api_key"`
+	// APIKey is set for an API-key caller, ManagementKey for a
+	// management-key caller.
+	APIKey        *keySummary `json:"api_key"`
+	ManagementKey *keySummary `json:"management_key"`
+}
+
+type keySummary struct {
+	OrgID string `json:"org_id"`
 }
 
 type orgSummary struct {
@@ -80,8 +86,8 @@ type orgSummary struct {
 	Role string `json:"role"`
 }
 
-// organisations lists the caller's organisations. An API key has exactly
-// one: its own.
+// organisations lists the caller's organisations. A key has exactly one:
+// its own.
 func (c *client) organisations(ctx context.Context) ([]json.RawMessage, error) {
 	var m me
 	if err := c.call(ctx, "GET", "/api/v1/me", nil, &m); err != nil {
@@ -90,22 +96,26 @@ func (c *client) organisations(ctx context.Context) ([]json.RawMessage, error) {
 	if !c.apiKey {
 		return m.Organisations, nil
 	}
-	if m.APIKey == nil {
+	key := m.APIKey
+	if key == nil {
+		key = m.ManagementKey
+	}
+	if key == nil {
 		return nil, &cliError{
 			Code:    "org_required",
-			Message: "the API did not report this API key's organisation",
+			Message: "the API did not report this key's organisation",
 			Hint:    "pass `--org ORG_ID` or set `MOUNTABLE_ORG`",
 		}
 	}
 	for _, raw := range m.Organisations {
 		var o orgSummary
-		if json.Unmarshal(raw, &o) == nil && o.ID == m.APIKey.OrgID {
+		if json.Unmarshal(raw, &o) == nil && o.ID == key.OrgID {
 			return []json.RawMessage{raw}, nil
 		}
 	}
 	// The key's creator may no longer be a member; the key still belongs to
 	// its organisation.
-	raw, err := json.Marshal(map[string]string{"id": m.APIKey.OrgID})
+	raw, err := json.Marshal(map[string]string{"id": key.OrgID})
 	return []json.RawMessage{raw}, err
 }
 
@@ -150,8 +160,12 @@ func (c *client) inOrg(ctx context.Context, method, path string, body any) (json
 	if err != nil {
 		return nil, err
 	}
+	orgPath, err := idPath("orgs", org)
+	if err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
-	err = c.call(ctx, method, "/api/v1/orgs/"+url.PathEscape(org)+path, body, &out)
+	err = c.call(ctx, method, "/api/v1"+orgPath+path, body, &out)
 	return out, err
 }
 
@@ -186,21 +200,47 @@ func (c *client) listSessions(ctx context.Context, fsID string) (json.RawMessage
 	return c.inOrg(ctx, "GET", "/filesystems/"+url.PathEscape(fsID)+"/mount-sessions", nil)
 }
 
-// webhooksPath is the path of a filesystem's webhooks, or of the one named
-// by webhookID. An empty, "." or ".." ID is refused: once the path is
-// normalised it would name another resource (webhooks/.. is the filesystem
-// itself).
-func webhooksPath(fsID string, webhookID ...string) (string, error) {
-	path := "/filesystems/" + url.PathEscape(fsID) + "/webhooks"
-	for _, id := range webhookID {
-		path += "/" + url.PathEscape(id)
-	}
-	for _, id := range append([]string{fsID}, webhookID...) {
-		if id == "" || id == "." || id == ".." {
-			return "", &cliError{Code: "invalid_request", Message: fmt.Sprintf("invalid ID %q", id), Hint: "check the IDs with `mountable fs list` and `mountable webhooks list FS_ID`"}
+// idPath joins parts into a path, escaping each ID; parts alternate between
+// a fixed segment and an ID ("filesystems", fsID, "webhooks", webhookID). An
+// empty, "." or ".." ID is refused: once the path is normalised it would name
+// another resource (webhooks/.. is the filesystem, filesystems/.. the
+// organisation).
+func idPath(parts ...string) (string, error) {
+	path := ""
+	for i, part := range parts {
+		if i%2 == 0 {
+			path += "/" + part
+			continue
 		}
+		if part == "" || part == "." || part == ".." {
+			return "", &cliError{Code: "invalid_request", Message: fmt.Sprintf("invalid ID %q", part), Hint: "check the IDs with `mountable fs list` and the command's list"}
+		}
+		path += "/" + url.PathEscape(part)
 	}
 	return path, nil
+}
+
+// webhooksPath is the path of a filesystem's webhooks, or of the one named
+// by webhookID.
+func webhooksPath(fsID string, webhookID ...string) (string, error) {
+	parts := []string{"filesystems", fsID, "webhooks"}
+	return idPath(append(parts, webhookID...)...)
+}
+
+// inOrgAt calls the path idPath makes of parts, under the resolved
+// organisation; a bad ID fails before the organisation is resolved.
+func (c *client) inOrgAt(ctx context.Context, method string, body any, parts ...string) (json.RawMessage, error) {
+	path, err := idPath(parts...)
+	if err != nil {
+		return nil, err
+	}
+	return c.inOrg(ctx, method, path, body)
+}
+
+// deleteFilesystem deletes a filesystem at once, with everything in it.
+func (c *client) deleteFilesystem(ctx context.Context, fsID string) error {
+	_, err := c.inOrgAt(ctx, "DELETE", nil, "filesystems", fsID)
+	return err
 }
 
 // createWebhook sends path_prefix only when one is given (nil leaves it to

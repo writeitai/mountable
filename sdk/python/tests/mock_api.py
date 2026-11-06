@@ -23,6 +23,10 @@ ME = "/api/v1/me"
 ORG = "org_one"
 FILESYSTEMS = f"/api/v1/orgs/{ORG}/filesystems"
 WEBHOOKS = f"{FILESYSTEMS}/{FS}/webhooks"
+API_KEYS = f"/api/v1/orgs/{ORG}/api-keys"
+S3_KEYS = f"{FILESYSTEMS}/{FS}/s3-keys"
+GRANTS = f"{FILESYSTEMS}/{FS}/grants"
+MANAGEMENT_KEY = "mtblm_testmanagementsecret"
 WEBHOOK_SECRET = "whsec_c2VjcmV0K2tleQ+/="
 
 
@@ -110,6 +114,45 @@ def webhook_view(**overrides: Any) -> dict[str, Any]:
         "last_failure_at": None,
         "last_failure": None,
         "failing_since": None,
+    }
+    view.update(overrides)
+    return view
+
+
+def api_key_view(**overrides: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "id": "k1",
+        "name": "worker",
+        "prefix": "mtbl_abcdefg",
+        "filesystem_id": None,
+        "expires_at": "2027-01-01T00:00:00Z",
+        "revoked": False,
+        "created_at": "2026-10-01T09:30:00Z",
+    }
+    view.update(overrides)
+    return view
+
+
+def s3_key_view(**overrides: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "access_key_id": "MTBLABCDEFGHIJKLMNOP",
+        "filesystem_id": FS,
+        "name": "duck",
+        "mode": "rw",
+        "expires_at": "2027-01-01T00:00:00Z",
+        "revoked": False,
+        "created_at": "2026-10-01T09:30:00Z",
+    }
+    view.update(overrides)
+    return view
+
+
+def grant_view(**overrides: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "id": "g1",
+        "principal_type": "api_key",
+        "principal_id": "k1",
+        "mode": "ro",
     }
     view.update(overrides)
     return view

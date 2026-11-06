@@ -160,13 +160,102 @@ export class Webhook {
   }
 }
 
+/** An API key. Its secret is read from `.secret` and is not shown when the object is printed. */
+export class ApiKey {
+  readonly id: string;
+  readonly name: string;
+  /** The secret's first characters, to recognise it. */
+  readonly prefix: string;
+  /** Set for a key limited to one filesystem. */
+  readonly filesystemId: string | null;
+  readonly expiresAt: Date;
+  readonly revoked: boolean;
+  readonly createdAt: Date;
+  readonly #secret: string | null;
+
+  /** @internal */
+  constructor(raw: any) {
+    this.id = raw.id;
+    this.name = raw.name;
+    this.prefix = raw.prefix;
+    this.filesystemId = raw.filesystem_id ?? null;
+    this.expiresAt = new Date(raw.expires_at);
+    this.revoked = raw.revoked;
+    this.createdAt = new Date(raw.created_at);
+    this.#secret = raw.secret ?? null;
+  }
+
+  /** The secret; null except from createApiKey. */
+  get secret(): string | null {
+    return this.#secret;
+  }
+}
+
+/** An S3 key for one filesystem. Its secret is read from `.secretAccessKey` and is not shown when the object is printed. */
+export class S3Key {
+  readonly accessKeyId: string;
+  /** The bucket name. */
+  readonly filesystemId: string;
+  readonly name: string;
+  readonly mode: Mode;
+  readonly expiresAt: Date;
+  readonly revoked: boolean;
+  readonly createdAt: Date;
+  readonly #secretAccessKey: string | null;
+
+  /** @internal */
+  constructor(raw: any) {
+    this.accessKeyId = raw.access_key_id;
+    this.filesystemId = raw.filesystem_id;
+    this.name = raw.name;
+    this.mode = raw.mode;
+    this.expiresAt = new Date(raw.expires_at);
+    this.revoked = raw.revoked;
+    this.createdAt = new Date(raw.created_at);
+    this.#secretAccessKey = raw.secret_access_key ?? null;
+  }
+
+  /** The secret access key; null except from createS3Key. */
+  get secretAccessKey(): string | null {
+    return this.#secretAccessKey;
+  }
+}
+
+export type PrincipalType = "member" | "group" | "api_key";
+
+export interface Grant {
+  id: string;
+  principalType: PrincipalType;
+  principalId: string;
+  mode: Mode;
+}
+
 export interface MountableOptions {
-  /** Defaults to MOUNTABLE_API_KEY. */
+  /**
+   * An API key (mtbl_), which accesses files, or a management key (mtblm_),
+   * which manages filesystems, keys and grants. Defaults to MOUNTABLE_API_KEY.
+   */
   apiKey?: string;
   /** Defaults to MOUNTABLE_API_URL, then https://mountable.io. */
   baseUrl?: string;
-  /** Defaults to MOUNTABLE_ORG, then the API key's organisation. */
+  /** Defaults to MOUNTABLE_ORG, then the key's organisation. */
   orgId?: string;
+}
+
+export interface CreateApiKeyOptions {
+  /** The API's default is 30, at most 365. */
+  expiresInDays?: number;
+  /** Limits the key to this filesystem, with a grant of `mode`. */
+  filesystemId?: string;
+  /** The API's default is "rw". */
+  mode?: Mode;
+}
+
+export interface CreateS3KeyOptions {
+  /** The API's default is "rw". */
+  mode?: Mode;
+  /** The API's default is 30, at most 365. */
+  expiresInDays?: number;
 }
 
 export interface CreateMountTicketOptions {
@@ -244,9 +333,10 @@ export interface Filesystem {
   changes(options?: ChangesOptions): Promise<ChangeBatch>;
 }
 
-// Every secret the API issues starts with "mtbl": API keys (mtbl_), session
-// tokens (mtblst_), tickets (mtbltk_) and login tokens; except webhook signing
-// secrets: whsec_ and Base64.
+// Every secret the API issues starts with "mtbl": API keys (mtbl_), management
+// keys (mtblm_), session tokens (mtblst_), tickets (mtbltk_) and login tokens;
+// except webhook signing secrets (whsec_ and Base64) and S3 secret access keys,
+// which only createS3Key returns.
 const SECRET = /(mtbl[a-z]*|whsec)_[A-Za-z0-9_.+/=-]+/g;
 
 function redact(text: string): string {
@@ -300,7 +390,11 @@ interface Answer {
 
 type Send = (method: string, path: string, bearer: string, options?: SendOptions) => Promise<Answer>;
 
-/** A client authenticated with an API key. */
+/**
+ * A client authenticated with a key: an API key (mtbl_) or a management key
+ * (mtblm_). The API refuses the other kind with api_key_required or
+ * management_key_required.
+ */
 export class Mountable {
   readonly baseUrl: string;
   // Private fields stay out of console.log and util.inspect.
@@ -360,6 +454,11 @@ export class Mountable {
   /** Changes the limits passed; null removes the spending cap or the mutation rate. Never retried. */
   async updateFilesystem(fsId: string, options: UpdateFilesystemOptions): Promise<FilesystemInfo> {
     return filesystemInfo(json(await this.#call("PATCH", await this.#fsPath(fsId), false, limits(options))));
+  }
+
+  /** Deletes a filesystem at once, with every file in it. Never retried: a retry after a lost answer would find nothing. */
+  async deleteFilesystem(fsId: string): Promise<void> {
+    await this.#call("DELETE", await this.#fsPath(fsId), false);
   }
 
   async filesystemUsage(fsId: string): Promise<FilesystemUsage> {
@@ -426,6 +525,62 @@ export class Mountable {
     return new Webhook(json(await this.#call("POST", path, true)));
   }
 
+  async listApiKeys(): Promise<ApiKey[]> {
+    const response = await this.#call("GET", await this.#orgPath("/api-keys"), true);
+    return json(response).map((raw: any) => new ApiKey(raw));
+  }
+
+  /** Creates an API key; its secret is in `.secret`, only here. Never retried. */
+  async createApiKey(name: string, options: CreateApiKeyOptions = {}): Promise<ApiKey> {
+    const body = defined({
+      name,
+      expires_in_days: options.expiresInDays,
+      filesystem_id: options.filesystemId,
+      mode: options.mode,
+    });
+    return new ApiKey(json(await this.#call("POST", await this.#orgPath("/api-keys"), false, body)));
+  }
+
+  /** Revoking a revoked key succeeds too. */
+  async revokeApiKey(keyId: string): Promise<void> {
+    await this.#call("DELETE", await this.#orgPath(`/api-keys/${idSegment(keyId)}`), true);
+  }
+
+  async listS3Keys(fsId: string): Promise<S3Key[]> {
+    const response = await this.#call("GET", await this.#fsPath(fsId, "/s3-keys"), true);
+    return json(response).map((raw: any) => new S3Key(raw));
+  }
+
+  /**
+   * Creates an S3 key for the filesystem (the bucket of that ID at
+   * https://s3.mountable.io, path-style); its secret is in
+   * `.secretAccessKey`, only here. Never retried.
+   */
+  async createS3Key(fsId: string, name: string, options: CreateS3KeyOptions = {}): Promise<S3Key> {
+    const body = defined({ name, mode: options.mode, expires_in_days: options.expiresInDays });
+    return new S3Key(json(await this.#call("POST", await this.#fsPath(fsId, "/s3-keys"), false, body)));
+  }
+
+  /** Revoking a revoked key succeeds too. */
+  async revokeS3Key(fsId: string, accessKeyId: string): Promise<void> {
+    await this.#call("DELETE", await this.#fsPath(fsId, `/s3-keys/${idSegment(accessKeyId)}`), true);
+  }
+
+  async listGrants(fsId: string): Promise<Grant[]> {
+    return json(await this.#call("GET", await this.#fsPath(fsId, "/grants"), true)).map(grant);
+  }
+
+  /** Creates the principal's grant, or changes its mode. */
+  async setGrant(fsId: string, principalType: PrincipalType, principalId: string, mode: Mode): Promise<Grant> {
+    const body = { principal_type: principalType, principal_id: principalId, mode };
+    return grant(json(await this.#call("PUT", await this.#fsPath(fsId, "/grants"), true, body)));
+  }
+
+  /** Never retried: a retry after a lost answer would find nothing. */
+  async deleteGrant(fsId: string, grantId: string): Promise<void> {
+    await this.#call("DELETE", await this.#fsPath(fsId, `/grants/${idSegment(grantId)}`), false);
+  }
+
   async #orgPath(path: string): Promise<string> {
     // Concurrent first calls share one GET /api/v1/me; a failed one is not kept.
     this.#org ??= this.#readOrg().catch((error) => {
@@ -437,7 +592,8 @@ export class Mountable {
 
   async #readOrg(): Promise<string> {
     const me = json(await this.#call("GET", "/api/v1/me", true));
-    const orgId = me.api_key?.org_id;
+    // An API key's, or a management key's.
+    const orgId = (me.api_key ?? me.management_key)?.org_id;
     if (typeof orgId !== "string" || !orgId) {
       throw new MountableError(null, "org_required", "pass orgId or set MOUNTABLE_ORG");
     }
@@ -876,13 +1032,21 @@ function describe(error: unknown): string {
 
 /** The limits given, under the API's names. */
 function limits(options: UpdateFilesystemOptions): Record<string, unknown> {
-  const fields = {
+  return defined({
     spending_cap_cents: options.spendingCapCents,
     mutations_per_minute: options.mutationsPerMinute,
     byte_quota: options.byteQuota,
     entry_quota: options.entryQuota,
-  };
+  });
+}
+
+/** The fields that are not undefined. */
+function defined(fields: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+function grant(raw: any): Grant {
+  return { id: raw.id, principalType: raw.principal_type, principalId: raw.principal_id, mode: raw.mode };
 }
 
 function filesystemInfo(raw: any): FilesystemInfo {

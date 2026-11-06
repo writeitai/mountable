@@ -56,7 +56,9 @@ var explanations = map[string]struct{ message, hint string }{
 	"not_found":                 {"not found, or not visible to these credentials", "check the ID with `mountable fs list`"},
 	"no_grant":                  {"these credentials have no grant for this filesystem in this mode", "ask an owner or admin for a grant, or use `--ro`"},
 	"forbidden":                 {"these credentials may not do this", "ask an owner or admin of the organisation"},
-	"api_key_forbidden":         {"an API key may not do this", "use a person's login (`mountable login`) or the console"},
+	"api_key_forbidden":         {"a key may not do this", "use a person's login (`mountable login`) or the console"},
+	"management_key_required":   {"this needs a management key (mtblm_) or a person's login", "set MOUNTABLE_API_KEY to a management key, which an owner or admin creates in the console, or run `mountable login`"},
+	"api_key_required":          {"this needs an API key (mtbl_) or a person's login; a management key never accesses files", "set MOUNTABLE_API_KEY to an API key (`mountable api-keys create`), or run `mountable login`"},
 	"rate_limited":              {"too many requests", "wait `retry_after` seconds, then retry"},
 	"idempotency_conflict":      {"an identical request is in progress", "wait a moment, then retry with the same idempotency key"},
 	"ticket_already_used":       {"the ticket for this idempotency key was already used", "use a new `--idempotency-key` for another mount"},
@@ -163,8 +165,10 @@ func redactValue(v any) any {
 	return v
 }
 
-// Every secret the API issues starts with "mtbl": API keys (mtbl_), login
-// tokens (mtblat_, mtblrt_), tickets (mtbltk_) and invitations (mtblinv_).
+// Every secret the API issues starts with "mtbl": API keys (mtbl_),
+// management keys (mtblm_), login tokens (mtblat_, mtblrt_), tickets
+// (mtbltk_) and invitations (mtblinv_). An S3 key's secret has no prefix; it
+// is printed only by `s3-keys create`.
 // An access token may be a JWT (mtblat_<header>.<payload>.<signature>), so
 // a secret runs up to the first character outside [A-Za-z0-9_.-]; a dot
 // right after a secret is redacted with it. Webhook signing secrets are

@@ -1,13 +1,14 @@
 ---
 name: mountable
-description: Give an agent sandbox a shared, persistent POSIX filesystem with mountable.io. Use when files must outlive a sandbox, be shared between sandboxes or agents, or be handed from a backend to a sandbox; covers creating filesystems, minting one-time mount tickets with an API key, mounting with `mountable mount --ticket-stdin --json`, error codes and safe retries, per-end-user spend caps, and signed webhooks when files change.
+description: Give an agent sandbox a shared, persistent POSIX filesystem with mountable.io. Use when files must outlive a sandbox, be shared between sandboxes or agents, or be handed from a backend to a sandbox; covers creating filesystems, API keys and S3 keys with a management key, minting one-time mount tickets with an API key, mounting with `mountable mount --ticket-stdin --json`, error codes and safe retries, per-end-user spend caps, and signed webhooks when files change.
 ---
 
 # mountable.io
 
-mountable.io is a shared POSIX filesystem for agents and teams. A backend that
-holds an API key creates filesystems and one-time mount tickets; a sandbox
-mounts a filesystem with a ticket and uses it like a local directory.
+mountable.io is a shared POSIX filesystem for agents and teams. A management
+key creates filesystems and keys; a backend that holds an API key creates
+one-time mount tickets; a sandbox mounts a filesystem with a ticket and uses
+it like a local directory.
 
 ## When to use
 
@@ -37,8 +38,14 @@ Pass tickets on stdin, never in arguments or logs.
 
 ## Authenticate
 
-- **Backend or agent:** set `MOUNTABLE_API_KEY=mtbl_…` (created by an owner or
-  admin in the console). Commands use the key's organisation.
+- **Provisioning:** set `MOUNTABLE_API_KEY=mtblm_…`, a management key (an
+  owner or admin creates it in the console). It manages filesystems, API
+  keys, S3 keys and grants, and never touches files.
+- **Backend or agent:** set `MOUNTABLE_API_KEY=mtbl_…`, an API key. It
+  creates tickets and sessions, uses the `files` commands and manages
+  webhooks on filesystems it has a grant on. Commands use the key's
+  organisation; the wrong kind fails with `management_key_required` or
+  `api_key_required`.
 - **Person:** `mountable login` (device flow). With several organisations,
   pass `--org ORG_ID` or set `MOUNTABLE_ORG`.
 - **Sandbox:** needs no credentials, only a one-time ticket on stdin.
@@ -51,12 +58,16 @@ prompt you echo back.
 Add `--json` to every command: stdout then carries one JSON document with the
 API's field names, and diagnostics go to stderr. Nothing prompts.
 
-**1. Backend: pick or create a filesystem.**
+**1. Provisioning (management key): pick or create a filesystem**, and an
+API key for the backend:
 
 ```sh
 mountable fs list --json
 mountable fs create "agent-workspace" --json      # → {"id": "…", "name": …}
+mountable api-keys create backend --filesystem FS_ID --json   # → {"secret": "mtbl_…", …}, once
 ```
+
+Hand the key's secret straight to the backend's secret store.
 
 **2. Backend: create a ticket** with an idempotency key you choose for this
 mount (for example, the job ID):
@@ -115,6 +126,26 @@ Other commands: `mountable orgs list`, `mountable fs get FS_ID` (the
 filesystem and its limits), `mountable fs usage FS_ID` (stored bytes and
 files against quotas, 30-day traffic).
 
+## Keys, grants and deleting (management key)
+
+```sh
+mountable api-keys list --json
+mountable api-keys revoke KEY_ID --json
+mountable s3-keys create FS_ID duckdb --ro --expires-in-days 90 --json  # → {"access_key_id": "MTBL…", "secret_access_key": "…"}, once
+mountable s3-keys list FS_ID --json
+mountable s3-keys revoke FS_ID ACCESS_KEY_ID --json
+mountable grants list FS_ID --json
+mountable grants set FS_ID api_key KEY_ID ro --json  # or member / group; rw
+mountable grants delete FS_ID GRANT_ID --json
+mountable fs delete FS_ID --json                     # at once, with every file
+```
+
+A key's secret appears once, in the result of `create` (without `--json`,
+alone on stdout); store it like a key. An S3 key reads and writes the
+filesystem with any S3 client at `https://s3.mountable.io`, path-style, with
+the filesystem ID as the bucket. Never put an S3 key in a sandbox; give it a
+mount instead. Deleting a filesystem cannot be undone.
+
 ## Errors
 
 Exit code `0` is success, `1` an error (API, network, mount or credentials),
@@ -131,6 +162,8 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 | `not_found` | Check the ID with `mountable fs list`; an API key sees only filesystems it has a grant on. |
 | `no_grant` | Ask an owner or admin for a grant, or use `--ro`. |
 | `api_key_forbidden` | A person must do this (console or `mountable login`). |
+| `management_key_required` | Use a management key (`mtblm_`) or an owner's or admin's login. |
+| `api_key_required` | Use an API key (`mtbl_`); a management key never accesses files. |
 | `payment_required` | The hint is the console's billing link; give it to a person. |
 | `rate_limited` | Wait `retry_after` seconds, then retry. |
 | `ticket_already_used` | Use a new `--idempotency-key` for another mount. |
@@ -146,8 +179,8 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 
 - The CLI never retries on its own.
 - **Reads** (`orgs list`, `fs list`, `fs get`, `fs usage`, `sessions list`,
-  `files read`, `files list`, `files changes`, `webhooks list`) are safe to
-  retry.
+  `files read`, `files list`, `files changes`, `webhooks list`,
+  `api-keys list`, `s3-keys list`, `grants list`) are safe to retry.
 - **`ticket create`**: always pass a caller-known `--idempotency-key` (without
   one, the CLI prints a generated key to stderr before sending). After a
   timeout or an unknown outcome, retry with the key in the error's
@@ -171,7 +204,12 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 - **`files write`** and **`files delete`** with `--if-match` or
   `--if-none-match` can fail with `precondition_failed` on a repeat because
   the first attempt succeeded: compare `current_etag` with what you wrote.
-- **`sessions revoke`** is idempotent.
+- **`sessions revoke`**, **`api-keys revoke`**, **`s3-keys revoke`** and
+  **`grants set`** are idempotent. **`fs delete`** and **`grants delete`**
+  after a lost answer answer `not_found`.
+- **`api-keys create`** and **`s3-keys create`** are not idempotent and show
+  the secret once: after an unknown outcome, list the keys, revoke one with
+  that name, and create a new one.
 - **HTTP 429** (`rate_limited`): wait `retry_after` seconds.
 
 ## MCP
@@ -180,8 +218,11 @@ Exit code `0` is success, `1` an error (API, network, mount or credentials),
 (`list_organizations`, `list_filesystems`, `create_filesystem`,
 `filesystem_usage`, `create_mount_ticket`, `list_mount_sessions`,
 `revoke_mount_session`, `list_webhooks`, `delete_webhook`,
-`enable_webhook`; creating a webhook or rotating its secret returns the
-secret, so those stay CLI and SDK calls). Mounting stays a command in the sandbox:
+`enable_webhook`, and with a management key `list_api_keys`,
+`revoke_api_key`, `list_s3_keys`, `revoke_s3_key`, `list_grants`,
+`set_grant`, `delete_grant`; creating a webhook, rotating its secret or
+creating a key returns a secret, so those stay CLI and SDK calls, as does
+`fs delete`). Mounting stays a command in the sandbox:
 `create_mount_ticket` returns the ticket and a `mount_command` convenience
 hint for a person; agents construct the documented command under the trust
 boundary above. It takes an optional `max_duration_seconds`.
@@ -230,8 +271,7 @@ to 100 GiB) and `--entry-quota` (10,000 to 1,000,000) can be changed but not
 removed; the API checks every range (`invalid_request`). Past the cap, its
 mounts and the files API (`402 filesystem_spending_cap_reached`) refuse
 billable work; other end users keep working. Creating filesystems and
-changing limits need a key whose creator is an owner or admin; a key limited
-to one filesystem cannot (`key_limited_to_filesystem`). See
+changing limits need a management key. See
 https://mountable.io/docs/end-user-limits
 
 ## Webhooks when files change
@@ -267,4 +307,3 @@ once), and on `files.resync` list again. See https://mountable.io/docs/webhooks
   files. Databases such as SQLite work there; locks are local to one mount,
   so open a database through one mount at a time, even on the same machine. See the CLI README's macOS
   section for the limits.
-- Deleting a filesystem is done in the console, not from the CLI.
