@@ -20,7 +20,7 @@ from pathlib import Path
 import showcase
 import spend_cap
 import webhooks
-from rest import ApiError, Rest
+from rest import ApiError, Rest, create_filesystem
 
 API_KEY = "mtbl_orchestrator_secret_showcase"
 
@@ -395,6 +395,53 @@ class RestTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+class ManagementKeyTests(unittest.TestCase):
+    def test_a_management_key_creates_and_grants_the_api_key(self) -> None:
+        calls: list[tuple[str, str, str, object]] = []
+
+        class FakeRest:
+            def __init__(self, key: str) -> None:
+                self.key = key
+
+            def json(self, method: str, path: str, json_body: object = None) -> dict[str, object]:
+                calls.append((self.key, method, path, json_body))
+                if path == "/api/v1/me":
+                    return {"api_key": {"id": "k1", "org_id": "org/1"}}
+                if method == "POST":
+                    return {"id": "fs_new"}
+                return {}
+
+        created = create_filesystem(FakeRest("mtblm_admin"), FakeRest(API_KEY), {"name": "user-a"})  # type: ignore[arg-type]
+        self.assertEqual(created["id"], "fs_new")
+        self.assertEqual(
+            calls,
+            [
+                (API_KEY, "GET", "/api/v1/me", None),
+                ("mtblm_admin", "POST", "/api/v1/orgs/org%2F1/filesystems", {"name": "user-a"}),
+                (
+                    "mtblm_admin",
+                    "PUT",
+                    "/api/v1/orgs/org%2F1/filesystems/fs_new/grants",
+                    {"principal_type": "api_key", "principal_id": "k1", "mode": "rw"},
+                ),
+            ],
+        )
+
+    def test_live_runs_need_a_management_key_and_sandboxes_never_get_it(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "MOUNTABLE_MANAGEMENT_KEY"}
+        env.update({"MOUNTABLE_API_KEY": API_KEY, "MOUNTABLE_ORG_ID": "org"})
+        with mock.patch.dict(os.environ, env, clear=True):
+            for main in (spend_cap.main, webhooks.main):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(main([]), 2)
+                self.assertIn("MOUNTABLE_MANAGEMENT_KEY", stderr.getvalue())
+        sandbox = showcase.sandbox_env(
+            {"MOUNTABLE_MANAGEMENT_KEY": "mtblm_admin", "COPY": "x mtblm_admin", "PATH": "/bin"}
+        )
+        self.assertEqual(sandbox, {"PATH": "/bin"})
 
 
 if __name__ == "__main__":

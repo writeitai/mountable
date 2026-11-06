@@ -40,9 +40,12 @@ python3 examples/showcase/relay.py --fs "$MOUNTABLE_FS_ID" --trace /tmp/relay.js
 python3 examples/showcase/kill_switch.py --fs "$MOUNTABLE_FS_ID" --trace /tmp/kill-switch.json
 ```
 
-`--create` makes a filesystem when `--fs` is omitted. The CLI cannot delete
-it; delete it in the console when you are done, or it continues to count as
-stored usage. A live run also leaves mount sessions until they expire or you
+`--create` makes a filesystem when `--fs` is omitted. It needs
+`MOUNTABLE_MANAGEMENT_KEY`, a management key (`mtblm_…`) that an owner or
+admin creates in the console: the management key creates the filesystem and
+gives the API key read-write access to it. Neither key reaches a sandbox.
+Delete the filesystem in the console when you are done, or it continues to
+count as stored usage. A live run also leaves mount sessions until they expire or you
 revoke them (`mountable sessions list`, `mountable sessions revoke`).
 
 `--trace` from a live run has `"source": "recorded"` and, for the kill switch,
@@ -58,16 +61,18 @@ filesystem. When that user reaches the cap, their billable work stops with
 python3 examples/showcase/spend_cap.py --org "$MOUNTABLE_ORG_ID" --trace /tmp/spend-cap.json
 ```
 
-Needs `MOUNTABLE_API_KEY` for an organisation with a saved payment method,
-and `MOUNTABLE_ORG_ID` (`mountable orgs list`). The CLI cannot set a spend
-cap, so this demo calls the REST API.
+Needs `MOUNTABLE_API_KEY` and `MOUNTABLE_MANAGEMENT_KEY` for an organisation
+with a saved payment method, and `MOUNTABLE_ORG_ID` (`mountable orgs list`).
+The management key creates both filesystems, with their caps, and gives the
+API key read-write access; the API key writes and reads. This demo calls the
+REST API.
 
 User A's filesystem is created with a 0-cent monthly cap. The first billable
 write is refused, and the loop stops. User B's filesystem is created with a
 500-cent cap. One small file is written and read back. That write is billed.
 
 Delete both filesystems in the console when you are done. Stored files keep
-counting as usage until you delete them. The API cannot delete a filesystem.
+counting as usage until you delete them.
 
 Guide: [Limits per end user](https://mountable.io/docs/end-user-limits?utm_source=viral-showcase-demos&utm_medium=showcase_pr&utm_content=showcase-02-spend-cap).
 
@@ -86,8 +91,8 @@ python3 examples/showcase/webhooks.py --org "$MOUNTABLE_ORG_ID" \
 `--dry-run` also checks a locally signed delivery. It creates no filesystem
 and makes no network call.
 
-A live run needs the `mountable` CLI on `PATH` (on Linux, with FUSE), the same API
-key and organisation, and a public HTTPS URL on port 443 that forwards to
+A live run needs the `mountable` CLI on `PATH` (on Linux, with FUSE), the same
+two keys and organisation, and a public HTTPS URL on port 443 that forwards to
 `127.0.0.1:8787/hooks/mountable` on this machine. `--port` changes the local
 port. The proxy must pass the raw body and the `webhook-id`,
 `webhook-timestamp`, and `webhook-signature` headers unchanged. The receiver

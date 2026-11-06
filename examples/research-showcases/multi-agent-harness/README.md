@@ -48,9 +48,11 @@ and the mountable.io CLI 0.5.0 or later. Install the Python SDK:
 python3 -m pip install mountable-sdk==0.1.0 mountable==0.5.0
 ```
 
-Set `MOUNTABLE_API_KEY` through your secret store and `MOUNTABLE_ORG_ID` to
-your organisation ID. Use an organisation-wide key created by an owner or
-admin. The organisation needs a saved payment method and room for a 1 GiB,
+Set `MOUNTABLE_API_KEY` (an API key) and `MOUNTABLE_MANAGEMENT_KEY` (a
+management key, `mtblm_…`) through your secret store, and `MOUNTABLE_ORG_ID`
+to your organisation ID. An owner or admin creates both keys. The management
+key creates the filesystem and gives the API key read-write access to it;
+the API key runs the agents. The organisation needs a saved payment method and room for a 1 GiB,
 10,000-entry filesystem.
 
 Forward an existing public HTTPS endpoint on port 443 to
@@ -80,8 +82,8 @@ completion marker, covering a batched or missed marker event.
 The receiver acknowledges before verification. The verifier mints a `ro`
 ticket, starts `mountable mount --ro --ticket-stdin --json`, and waits for
 `mounted`. It checks the source hash and prints the patch. It runs tests without writing
-bytecode and checks that a workspace write is refused. The API key
-stays out of the mount and test environments. Read-only permissions protect
+bytecode and checks that a workspace write is refused. Both keys
+stay out of the mount and test environments. Read-only permissions protect
 the mountable.io workspace. Use a separate sandbox to isolate arbitrary code
 from the rest of a machine.
 
@@ -90,7 +92,7 @@ from the rest of a machine.
 The command unmounts the verifier, revokes its session and removes its webhook
 on success or failure. It prints the new filesystem ID immediately after
 creation. **Delete that filesystem in the mountable.io console when finished.**
-API keys cannot delete a filesystem. Stored files continue to count toward
+Stored files continue to count toward
 usage until deletion. Disconnecting a worker does not stop storage billing.
 The cap reserves this month's peak storage and downloads, so deletion does
 not return this month's reserved cents. No pricing or free allowance changes

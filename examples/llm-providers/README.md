@@ -32,10 +32,11 @@ the orchestrator with `mountable sessions revoke SESSION_ID`.
 ## One lifecycle for all four providers
 
 Run these snippets from this directory after installing
-`pip install mountable-sdk==0.1.0`. Keep `MOUNTABLE_API_KEY` on your backend.
-Provisioning requires an owner/admin key that is not limited to one
-filesystem, and a saved payment method. The SDK does file access; limits
-and webhook registration use REST.
+`pip install mountable-sdk==0.1.0`. Keep `MOUNTABLE_API_KEY` (an API key)
+and `MOUNTABLE_MANAGEMENT_KEY` (a management key, created by an owner or
+admin) on your backend. Provisioning needs the management key and a saved
+payment method. The SDK does file access; limits and webhook registration
+use REST.
 
 ### 1. Create an end user's capped workspace
 
@@ -48,12 +49,23 @@ import os
 import httpx
 from workspace import create_workspace
 
-control = httpx.Client(
-    base_url="https://mountable.io", timeout=30, follow_redirects=False,
-    headers={"Authorization": "Bearer " + os.environ["MOUNTABLE_API_KEY"]},
+def client(key):
+    return httpx.Client(
+        base_url="https://mountable.io", timeout=30, follow_redirects=False,
+        headers={"Authorization": "Bearer " + os.environ[key]},
+    )
+
+admin = client("MOUNTABLE_MANAGEMENT_KEY")  # creates filesystems
+backend = client("MOUNTABLE_API_KEY")        # works with files and webhooks
+api_key_id = backend.get("/api/v1/me").raise_for_status().json()["api_key"]["id"]
+fs_id = create_workspace(
+    admin, os.environ["MOUNTABLE_ORG_ID"], "user-42", 500, api_key_id
 )
-fs_id = create_workspace(control, os.environ["MOUNTABLE_ORG_ID"], "user-42", 500)
+admin.close()
 ```
+
+`create_workspace` also gives the backend's API key read-write access to the
+new filesystem.
 
 This caps monthly usage charges at 500 cents in your organisation's billing
 currency ($5 or €5). The example also sets 60 changes/minute, 1 GiB storage
@@ -101,11 +113,11 @@ secret store. Do not print the registration or include it in model messages.
 from workspace import register_webhook
 
 hook = register_webhook(
-    control, os.environ["MOUNTABLE_ORG_ID"], fs_id,
+    backend, os.environ["MOUNTABLE_ORG_ID"], fs_id,
     "https://your-app.example/hooks/mountable",
 )
 # Store hook["id"] and hook["secret"] before accepting deliveries.
-control.close()  # also close this client on errors in your application
+backend.close()  # also close these clients on errors in your application
 ```
 
 Your HTTP handler passes the untouched request bytes and headers to the

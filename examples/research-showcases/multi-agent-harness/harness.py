@@ -287,8 +287,11 @@ def live(args):
     import httpx
     from mountable_sdk import Mountable
 
-    if not os.environ.get("MOUNTABLE_API_KEY") or not args.org or not args.webhook_url:
-        raise DemoError("--live needs MOUNTABLE_API_KEY, --org and --webhook-url")
+    keys = ("MOUNTABLE_API_KEY", "MOUNTABLE_MANAGEMENT_KEY")
+    if not all(os.environ.get(k) for k in keys) or not args.org or not args.webhook_url:
+        raise DemoError(
+            "--live needs MOUNTABLE_API_KEY, MOUNTABLE_MANAGEMENT_KEY, --org and --webhook-url"
+        )
     url = urlsplit(args.webhook_url)
     if (
         url.scheme != "https"
@@ -302,22 +305,35 @@ def live(args):
         raise DemoError(
             "webhook URL must be public HTTPS on port 443 at /hooks/mountable"
         )
-    with (
-        httpx.Client(
+
+    def client_for(key):
+        return httpx.Client(
             base_url="https://mountable.io",
             follow_redirects=False,
             timeout=30,
-            headers={"Authorization": "Bearer " + os.environ["MOUNTABLE_API_KEY"]},
-        ) as http,
+            headers={"Authorization": "Bearer " + os.environ[key]},
+        )
+
+    with (
+        client_for("MOUNTABLE_API_KEY") as http,
+        client_for("MOUNTABLE_MANAGEMENT_KEY") as admin_http,
         Mountable(base_url="https://mountable.io") as client,
     ):
-        control = Control(http)
-        # Limits are atomic with creation. A worker cannot race ahead uncapped.
-        fs_id = control.call(
+        control, admin = Control(http), Control(admin_http)
+        key_id = control.call("GET", "/api/v1/me")["api_key"]["id"]
+        # A management key creates the filesystem. Limits are atomic with
+        # creation, so a worker cannot race ahead uncapped.
+        fs_id = admin.call(
             "POST",
             filesystem_path(args.org),
             {"name": "harness-" + str(uuid.uuid4())[:8], **LIMITS},
         )["id"]
+        # The API key that runs the agents gets read-write access to it.
+        admin.call(
+            "PUT",
+            filesystem_path(args.org, fs_id) + "/grants",
+            {"principal_type": "api_key", "principal_id": key_id, "mode": "rw"},
+        )
         print(
             "Created filesystem "
             + fs_id

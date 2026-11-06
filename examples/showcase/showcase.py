@@ -19,7 +19,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
+import rest
+
 API_KEY_ENV = "MOUNTABLE_API_KEY"
+# Creates filesystems (--create); never reaches a sandbox either.
+MANAGEMENT_KEY_ENV = "MOUNTABLE_MANAGEMENT_KEY"
 EXAMPLE_FS = "k5q2ztr4mvd7wn3xa6jhebcyfu"
 ABORT_LINE = "mountable: the mount session was revoked; aborting the mount"
 RELAY_CONTRACT = (
@@ -89,11 +93,13 @@ class UsageError(ShowcaseError):
 
 
 def sandbox_env(parent: Mapping[str, str]) -> dict[str, str]:
-    """Copy of parent with MOUNTABLE_API_KEY removed, including embedded copies."""
-    api_key = parent.get(API_KEY_ENV, "")
+    """Copy of parent with MOUNTABLE_API_KEY and MOUNTABLE_MANAGEMENT_KEY
+    removed, including embedded copies."""
+    names = (API_KEY_ENV, MANAGEMENT_KEY_ENV)
+    secrets = [parent[name] for name in names if parent.get(name)]
     env: dict[str, str] = {}
     for key, value in parent.items():
-        if key == API_KEY_ENV or (api_key and api_key in value):
+        if key in names or any(secret in value for secret in secrets):
             continue
         env[key] = value
     return env
@@ -356,9 +362,9 @@ def run_relay(
     create: bool,
 ) -> dict[str, object]:
     trace = Trace("relay", "Containers die. The workspace lives.", RELAY_RECORDED)
-    api_key = os.environ.get(API_KEY_ENV, "")
-    if api_key:
-        trace.secrets.append(api_key)
+    for name in (API_KEY_ENV, MANAGEMENT_KEY_ENV):
+        if os.environ.get(name):
+            trace.secrets.append(os.environ[name])
     trace.pane("planner", "Sandbox A — planner", "Read-write mount, then the sandbox is destroyed.")
     trace.pane("coder", "Sandbox B — coder", "A new sandbox mounts the same directory.")
     trace.pane("laptop", "Linux laptop", "The same directory, mounted read-only.")
@@ -788,12 +794,14 @@ class LiveBackend:
         return parsed
 
     def create_filesystem(self, name: str) -> str:
-        completed = self._run([self.binary, "fs", "create", name, "--json"], env=self.parent)
-        parsed = self._json(completed)
-        fs_id = parsed.get("id")
-        if not isinstance(fs_id, str) or not fs_id:
-            raise ShowcaseError("fs create returned no id")
-        return fs_id
+        management = self.parent.get(MANAGEMENT_KEY_ENV, "")
+        if not management:
+            raise ShowcaseError(f"{MANAGEMENT_KEY_ENV} is not set; --create needs a management key")
+        try:
+            created = rest.create_filesystem(rest.Rest(management), rest.Rest(self.api_key), {"name": name})
+        except rest.ApiError as exc:
+            raise ShowcaseError(f"filesystem create failed: HTTP {exc.status} {exc.code}") from None
+        return str(created["id"])
 
     def ticket(self, fs_id: str, *, read_only: bool, idempotency_key: str) -> tuple[str, str]:
         argv = [self.binary, "ticket", "create", fs_id, "--idempotency-key", idempotency_key, "--json"]
@@ -895,6 +903,8 @@ def _live(args: argparse.Namespace) -> LiveBackend:
         raise UsageError(
             "Pass --fs FS_ID or --create. Creating a filesystem leaves stored usage until you delete it in the console."
         )
+    if args.create and not args.fs and not os.environ.get(MANAGEMENT_KEY_ENV):
+        raise UsageError(f"--create needs {MANAGEMENT_KEY_ENV}, a management key (mtblm_), to create the filesystem.")
     return LiveBackend(os.environ, args.cli)
 
 

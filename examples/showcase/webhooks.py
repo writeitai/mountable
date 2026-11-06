@@ -28,7 +28,7 @@ from typing import Iterator
 from urllib.parse import quote, urlsplit
 
 import showcase
-from rest import ApiError, Rest
+from rest import ApiError, Rest, create_filesystem
 
 TITLE = "Signed webhooks when files change."
 EXPECTED = (
@@ -405,6 +405,7 @@ def _mount_and_edit(cli: str, parent: Mapping[str, str], fs_id: str, directory: 
 def run_webhooks_live(
     *,
     rest: Rest,
+    management: Rest,
     org_id: str,
     webhook_url: str,
     port: int,
@@ -415,9 +416,9 @@ def run_webhooks_live(
     check_webhook_url(webhook_url)
     state = State()
     trace = showcase.Trace("webhooks", TITLE, WEBHOOK_RECORDED)
-    api_key = parent.get(showcase.API_KEY_ENV, "")
-    if api_key:
-        trace.secrets.append(api_key)
+    for name in (showcase.API_KEY_ENV, showcase.MANAGEMENT_KEY_ENV):
+        if parent.get(name):
+            trace.secrets.append(parent[name])
     trace.pane("agent", "Agent", "One shared folder. Create, update, then rename.")
     trace.pane("backend", "App backend", "Signed files.changed deliveries.")
     webhook_id = ""
@@ -425,13 +426,10 @@ def run_webhooks_live(
     try:
         with receiver(state, port):
             try:
-                created = rest.json(
-                    "POST",
-                    _org_path(org_id),
-                    {
-                        "name": "showcase-webhooks-" + uuid.uuid4().hex[:8],
-                        "spending_cap_cents": 100,
-                    },
+                created = create_filesystem(
+                    management,
+                    rest,
+                    {"name": "showcase-webhooks-" + uuid.uuid4().hex[:8], "spending_cap_cents": 100},
                 )
             except ApiError as exc:
                 if exc.code == "payment_required":
@@ -599,6 +597,12 @@ def main(argv: list[str] | None = None) -> int:
         api_key = os.environ.get(showcase.API_KEY_ENV, "")
         if not api_key:
             raise showcase.UsageError("MOUNTABLE_API_KEY is not set. Use --dry-run to preview without a filesystem.")
+        management_key = os.environ.get(showcase.MANAGEMENT_KEY_ENV, "")
+        if not management_key:
+            raise showcase.UsageError(
+                "MOUNTABLE_MANAGEMENT_KEY is not set; a management key creates the filesystem. "
+                "Use --dry-run to preview without a filesystem."
+            )
         if not args.org:
             raise showcase.UsageError("Pass --org ORG_ID or set MOUNTABLE_ORG_ID.")
         if not args.webhook_url:
@@ -606,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
         root = args.root or Path("/tmp/mountable-showcase-webhooks")
         trace = run_webhooks_live(
             rest=Rest(api_key),
+            management=Rest(management_key),
             org_id=args.org,
             webhook_url=args.webhook_url,
             port=args.port,

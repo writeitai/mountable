@@ -176,6 +176,8 @@ class HarnessTest(unittest.TestCase):
 
         def call(method, path, body=None):
             calls.append((method, path, body))
+            if path == "/api/v1/me":
+                return {"api_key": {"id": "key-1", "org_id": "org-1"}}
             if method == "POST" and path.endswith("/filesystems"):
                 self.assertEqual({k: body[k] for k in h.LIMITS}, h.LIMITS)
                 return {"id": "fs-1"}
@@ -210,7 +212,13 @@ class HarnessTest(unittest.TestCase):
         }
         with (
             patch.dict(sys.modules, modules),
-            patch.dict(os.environ, {"MOUNTABLE_API_KEY": "never-print-me"}),
+            patch.dict(
+                os.environ,
+                {
+                    "MOUNTABLE_API_KEY": "never-print-me",
+                    "MOUNTABLE_MANAGEMENT_KEY": "mtblm_never-print-me",
+                },
+            ),
             patch.object(h.Control, "call", side_effect=call),
             patch.object(h, "receiver", receiver),
             patch.object(h, "readonly_mount", mount),
@@ -233,6 +241,22 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(
             calls[-1][:2],
             ("DELETE", "/api/v1/orgs/org-1/filesystems/fs-1/webhooks/hook-1"),
+        )
+        self.assertEqual(
+            calls[:3],
+            [
+                ("GET", "/api/v1/me", None),
+                ("POST", "/api/v1/orgs/org-1/filesystems", calls[1][2]),
+                (
+                    "PUT",
+                    "/api/v1/orgs/org-1/filesystems/fs-1/grants",
+                    {
+                        "principal_type": "api_key",
+                        "principal_id": "key-1",
+                        "mode": "rw",
+                    },
+                ),
+            ],
         )
         client.filesystem.assert_called_once_with("fs-1", mode="rw")
 

@@ -52,16 +52,26 @@ class WorkspaceTests(unittest.TestCase):
             requests.append(request)
             if request.url.path.endswith("/webhooks"):
                 return httpx.Response(201, json={"id": "hook_42", "secret": SECRET})
+            if request.url.path.endswith("/grants"):
+                return httpx.Response(200, json=json.loads(request.content))
             return httpx.Response(201, json={"id": "fs_42"})
 
-        with httpx.Client(
-            base_url="https://mountable.io",
-            headers={"Authorization": "Bearer mtbl_backend"},
-            transport=httpx.MockTransport(serve),
-        ) as http:
-            fs_id = workspace.create_workspace(http, "org/42", "user-42", 500)
+        transport = httpx.MockTransport(serve)
+        with (
+            httpx.Client(
+                base_url="https://mountable.io",
+                headers={"Authorization": "Bearer mtblm_admin"},
+                transport=transport,
+            ) as admin,
+            httpx.Client(
+                base_url="https://mountable.io",
+                headers={"Authorization": "Bearer mtbl_backend"},
+                transport=transport,
+            ) as backend,
+        ):
+            fs_id = workspace.create_workspace(admin, "org/42", "user-42", 500, "k42")
             hook = workspace.register_webhook(
-                http, "org/42", fs_id, "https://example.com/hooks/mountable"
+                backend, "org/42", fs_id, "https://example.com/hooks/mountable"
             )
         self.assertEqual(fs_id, "fs_42")
         self.assertEqual(hook["secret"], SECRET)
@@ -77,11 +87,23 @@ class WorkspaceTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            requests[1].url.raw_path,
-            b"/api/v1/orgs/org%2F42/filesystems/fs_42/webhooks",
+            (requests[1].method, requests[1].url.raw_path),
+            ("PUT", b"/api/v1/orgs/org%2F42/filesystems/fs_42/grants"),
         )
         self.assertEqual(
             json.loads(requests[1].content),
+            {"principal_type": "api_key", "principal_id": "k42", "mode": "rw"},
+        )
+        self.assertEqual(
+            [r.headers["authorization"] for r in requests],
+            ["Bearer mtblm_admin", "Bearer mtblm_admin", "Bearer mtbl_backend"],
+        )
+        self.assertEqual(
+            requests[2].url.raw_path,
+            b"/api/v1/orgs/org%2F42/filesystems/fs_42/webhooks",
+        )
+        self.assertEqual(
+            json.loads(requests[2].content),
             {"url": "https://example.com/hooks/mountable", "path_prefix": "/"},
         )
 
@@ -92,7 +114,7 @@ class WorkspaceTests(unittest.TestCase):
                 httpx.Client() as http,
                 self.assertRaises(ValueError),
             ):
-                workspace.create_workspace(http, "org", "user", cap)
+                workspace.create_workspace(http, "org", "user", cap, "k")
         calls = []
 
         def fail(request):
@@ -105,7 +127,7 @@ class WorkspaceTests(unittest.TestCase):
             ) as http,
             self.assertRaises(httpx.ReadTimeout),
         ):
-            workspace.create_workspace(http, "org", "user", 0)
+            workspace.create_workspace(http, "org", "user", 0, "k")
         self.assertEqual(len(calls), 1)
 
     def test_real_sdk_reads_writes_and_propagates_caps_without_retry(self):

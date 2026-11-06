@@ -1,7 +1,8 @@
 """Backend helpers shared by all four provider starters.
 
-Install mountable-sdk==0.1.0. Provisioning and webhook registration use REST;
-the SDK handles file access. Keep these clients and webhook secrets in your
+Install mountable-sdk==0.1.0. Provisioning (with a management key) and
+webhook registration (with the backend's API key) use REST; the SDK handles
+file access. Keep these clients and webhook secrets in your
 backend, outside model messages and sandbox environments.
 """
 
@@ -25,12 +26,18 @@ def filesystem_path(org_id: str, filesystem_id: str | None = None) -> str:
 
 
 def create_workspace(
-    http: httpx.Client, org_id: str, name: str, spending_cap_cents: int
+    http: httpx.Client,
+    org_id: str,
+    name: str,
+    spending_cap_cents: int,
+    api_key_id: str,
 ) -> str:
-    """Create one end user's filesystem with limits in the same request.
+    """Create one end user's filesystem with limits in the same request, and
+    give the backend's API key (api_key_id, from GET /api/v1/me) read-write
+    access to it.
 
-    http is authenticated with an unrestricted owner/admin API key. Cents are
-    in the organisation's billing currency. No retry: a timeout is ambiguous.
+    http is authenticated with a management key (mtblm_). Cents are in the
+    organisation's billing currency. No retry: a timeout is ambiguous.
     """
     if (
         type(spending_cap_cents) is not int
@@ -48,13 +55,22 @@ def create_workspace(
         },
     )
     response.raise_for_status()
-    return response.json()["id"]
+    filesystem_id = response.json()["id"]
+    # Repeating this PUT sets the same grant, so it is safe to retry.
+    grant = http.put(
+        filesystem_path(org_id, filesystem_id) + "/grants",
+        json={"principal_type": "api_key", "principal_id": api_key_id, "mode": "rw"},
+    )
+    grant.raise_for_status()
+    return filesystem_id
 
 
 def register_webhook(
     http: httpx.Client, org_id: str, filesystem_id: str, url: str
 ) -> dict:
     """Return the registration, including its one-time secret; never log it.
+
+    http is authenticated with the backend's API key (mtbl_).
 
     Start your public HTTPS receiver before calling this. Its initial
     files.resync may arrive before this call returns; respond 503 until your

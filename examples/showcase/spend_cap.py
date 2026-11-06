@@ -21,7 +21,7 @@ from typing import Protocol
 from urllib.parse import quote
 
 import showcase
-from rest import ApiError, Rest
+from rest import ApiError, Rest, create_filesystem
 
 API_KEY_ENV = showcase.API_KEY_ENV
 CAP_CODE = "filesystem_spending_cap_reached"
@@ -139,18 +139,18 @@ def _explain(exc: ApiError) -> showcase.ShowcaseError:
 
 
 class LiveFilesystems:
-    def __init__(self, rest: Rest, org_id: str) -> None:
+    def __init__(self, rest: Rest, org_id: str, management: Rest) -> None:
         self.rest = rest
         self.org_id = org_id
+        # Creates the filesystems; self.rest (the API key) uses them.
+        self.management = management
         self.sessions: list[str] = []
         self.tokens: dict[str, str] = {}
 
     def create(self, name: str, spending_cap_cents: int) -> str:
         try:
-            created = self.rest.json(
-                "POST",
-                "/api/v1/orgs/" + quote(self.org_id, safe="") + "/filesystems",
-                {"name": name, "spending_cap_cents": spending_cap_cents},
+            created = create_filesystem(
+                self.management, self.rest, {"name": name, "spending_cap_cents": spending_cap_cents}
             )
         except ApiError as exc:
             raise _explain(exc) from None
@@ -299,10 +299,16 @@ def main(argv: list[str] | None = None) -> int:
         api_key = os.environ.get(API_KEY_ENV, "")
         if not api_key:
             raise showcase.UsageError("MOUNTABLE_API_KEY is not set. Use --dry-run to preview without a filesystem.")
+        management_key = os.environ.get(showcase.MANAGEMENT_KEY_ENV, "")
+        if not management_key:
+            raise showcase.UsageError(
+                "MOUNTABLE_MANAGEMENT_KEY is not set; a management key creates the filesystems. "
+                "Use --dry-run to preview without a filesystem."
+            )
         if not args.org:
             raise showcase.UsageError("Pass --org ORG_ID or set MOUNTABLE_ORG_ID.")
-        filesystems = LiveFilesystems(Rest(api_key), args.org)
-        trace = run_spend_cap(filesystems, secrets=[api_key])
+        filesystems = LiveFilesystems(Rest(api_key), args.org, Rest(management_key))
+        trace = run_spend_cap(filesystems, secrets=[api_key, management_key])
     except showcase.ShowcaseError as exc:
         print(f"showcase: {exc}", file=sys.stderr)
         return 2 if isinstance(exc, showcase.UsageError) else 1
