@@ -16,11 +16,14 @@ import xai_grok
 API_KEY = "mtbl_orchestrator_secret"
 TICKET = "mtbltk_sandbox_ticket"
 SESSION = "11111111-1111-1111-1111-111111111111"
+MANAGEMENT_KEY = "mtblm_provisioning_secret"
 PARENT = {
     "MOUNTABLE_API_KEY": API_KEY,
+    "MOUNTABLE_MANAGEMENT_KEY": MANAGEMENT_KEY,
     "PATH": "/usr/bin",
     "HOME": "/tmp/orchestrator",
     "NOTE": f"prefix-{API_KEY}",
+    "OTHER": f"prefix-{MANAGEMENT_KEY}",
 }
 
 
@@ -68,7 +71,9 @@ class StarterTests(unittest.TestCase):
         ):
             mount = handoff.prepare("fs_123", "job-1", False)
         self.assertNotIn(handoff.API_KEY_ENV, mount.env)
+        self.assertNotIn(handoff.MANAGEMENT_KEY_ENV, mount.env)
         self.assertNotIn("NOTE", mount.env)
+        self.assertNotIn("OTHER", mount.env)
         self.assertEqual(mount.env["PATH"], "/usr/bin")
         self.assertEqual(mount.stdin, f"{TICKET}\n")
 

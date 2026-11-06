@@ -438,10 +438,30 @@ class ManagementKeyTests(unittest.TestCase):
                 with contextlib.redirect_stderr(stderr):
                     self.assertEqual(main([]), 2)
                 self.assertIn("MOUNTABLE_MANAGEMENT_KEY", stderr.getvalue())
-        sandbox = showcase.sandbox_env(
-            {"MOUNTABLE_MANAGEMENT_KEY": "mtblm_admin", "COPY": "x mtblm_admin", "PATH": "/bin"}
-        )
-        self.assertEqual(sandbox, {"PATH": "/bin"})
+        parent = {
+            "MOUNTABLE_API_KEY": API_KEY,
+            "MOUNTABLE_MANAGEMENT_KEY": "mtblm_admin",
+            "COPY": "x mtblm_admin",
+            "PATH": "/bin",
+        }
+        self.assertEqual(showcase.sandbox_env(parent), {"PATH": "/bin"})
+        # The laptop mount and every other CLI child get the API key only.
+        backend = showcase.LiveBackend(parent, "mountable")
+        self.assertEqual(backend.parent, {"MOUNTABLE_API_KEY": API_KEY, "PATH": "/bin"})
+        self.assertEqual(backend.management_key, "mtblm_admin")
+
+    def test_another_organisation_is_refused_before_creating(self) -> None:
+        calls: list[str] = []
+
+        class FakeRest:
+            def json(self, method: str, path: str, json_body: object = None) -> dict[str, object]:
+                calls.append(method + " " + path)
+                return {"api_key": {"id": "k1", "org_id": "org-a"}}
+
+        with self.assertRaises(ApiError) as caught:
+            create_filesystem(FakeRest(), FakeRest(), {"name": "x"}, "org-b")  # type: ignore[arg-type]
+        self.assertEqual(caught.exception.code, "org_mismatch")
+        self.assertEqual(calls, ["GET /api/v1/me"])
 
 
 if __name__ == "__main__":

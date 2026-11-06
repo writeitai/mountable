@@ -260,6 +260,30 @@ class HarnessTest(unittest.TestCase):
         )
         client.filesystem.assert_called_once_with("fs-1", mode="rw")
 
+    def test_live_refuses_an_api_key_of_another_organisation(self):
+        calls = []
+
+        def call(method, path, body=None):
+            calls.append((method, path))
+            return {"api_key": {"id": "key-1", "org_id": "org-2"}}
+
+        modules = {
+            "httpx": SimpleNamespace(Client=MagicMock()),
+            "mountable_sdk": SimpleNamespace(Mountable=MagicMock()),
+        }
+        keys = {"MOUNTABLE_API_KEY": "k", "MOUNTABLE_MANAGEMENT_KEY": "m"}
+        args = SimpleNamespace(
+            org="org-1", webhook_url="https://example.com/hooks/mountable"
+        )
+        with (
+            patch.dict(sys.modules, modules),
+            patch.dict(os.environ, keys),
+            patch.object(h.Control, "call", side_effect=call),
+            self.assertRaises(h.DemoError),
+        ):
+            h.live(args)
+        self.assertEqual(calls, [("GET", "/api/v1/me")])
+
     def test_readonly_mount_uses_ro_ticket_stdin_and_revokes_on_failure(self):
         client, control, process = MagicMock(), MagicMock(), MagicMock()
         client.create_mount_ticket.return_value = SimpleNamespace(

@@ -320,7 +320,10 @@ def live(args):
         Mountable(base_url="https://mountable.io") as client,
     ):
         control, admin = Control(http), Control(admin_http)
-        key_id = control.call("GET", "/api/v1/me")["api_key"]["id"]
+        key = control.call("GET", "/api/v1/me")["api_key"]
+        if key["org_id"] != args.org:
+            raise DemoError("MOUNTABLE_API_KEY belongs to another organisation")
+        key_id = key["id"]
         # A management key creates the filesystem. Limits are atomic with
         # creation, so a worker cannot race ahead uncapped.
         fs_id = admin.call(

@@ -52,7 +52,8 @@ Set `MOUNTABLE_API_KEY` (an API key) and `MOUNTABLE_MANAGEMENT_KEY` (a
 management key, `mtblm_…`) through your secret store, and `MOUNTABLE_ORG_ID`
 to your organisation ID. An owner or admin creates both keys. The management
 key creates the filesystem and gives the API key read-write access to it;
-the API key runs the agents. The organisation needs a saved payment method and room for a 1 GiB,
+the API key runs the agents. Use an API key that is not limited to one
+filesystem. The organisation needs a saved payment method and room for a 1 GiB,
 10,000-entry filesystem.
 
 Forward an existing public HTTPS endpoint on port 443 to

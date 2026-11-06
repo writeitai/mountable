@@ -34,7 +34,8 @@ the orchestrator with `mountable sessions revoke SESSION_ID`.
 Run these snippets from this directory after installing
 `pip install mountable-sdk==0.1.0`. Keep `MOUNTABLE_API_KEY` (an API key)
 and `MOUNTABLE_MANAGEMENT_KEY` (a management key, created by an owner or
-admin) on your backend. Provisioning needs the management key and a saved
+admin) on your backend. Use an API key created by an owner or admin and not
+limited to one filesystem. Provisioning needs the management key and a saved
 payment method. The SDK does file access; limits and webhook registration
 use REST.
 
@@ -57,10 +58,9 @@ def client(key):
 
 admin = client("MOUNTABLE_MANAGEMENT_KEY")  # creates filesystems
 backend = client("MOUNTABLE_API_KEY")        # works with files and webhooks
-api_key_id = backend.get("/api/v1/me").raise_for_status().json()["api_key"]["id"]
-fs_id = create_workspace(
-    admin, os.environ["MOUNTABLE_ORG_ID"], "user-42", 500, api_key_id
-)
+key = backend.get("/api/v1/me").raise_for_status().json()["api_key"]
+org_id = key["org_id"]  # the API key's organisation, used below too
+fs_id = create_workspace(admin, org_id, "user-42", 500, key["id"])
 admin.close()
 ```
 
@@ -113,7 +113,7 @@ secret store. Do not print the registration or include it in model messages.
 from workspace import register_webhook
 
 hook = register_webhook(
-    backend, os.environ["MOUNTABLE_ORG_ID"], fs_id,
+    backend, org_id, fs_id,
     "https://your-app.example/hooks/mountable",
 )
 # Store hook["id"] and hook["secret"] before accepting deliveries.

@@ -150,7 +150,7 @@ class LiveFilesystems:
     def create(self, name: str, spending_cap_cents: int) -> str:
         try:
             created = create_filesystem(
-                self.management, self.rest, {"name": name, "spending_cap_cents": spending_cap_cents}
+                self.management, self.rest, {"name": name, "spending_cap_cents": spending_cap_cents}, self.org_id
             )
         except ApiError as exc:
             raise _explain(exc) from None

@@ -426,6 +426,7 @@ def run_relay(
         test = subprocess.run(
             [sys.executable, "-m", "unittest", "test_adder"],
             cwd=coder,
+            env=sandbox_env(os.environ),
             capture_output=True,
             text=True,
             check=False,
@@ -490,9 +491,9 @@ def run_kill_switch(
         "Revoke the mount. The sandbox keeps no API key.",
         KILL_RECORDED,
     )
-    api_key = os.environ.get(API_KEY_ENV, "")
-    if api_key:
-        trace.secrets.append(api_key)
+    for name in (API_KEY_ENV, MANAGEMENT_KEY_ENV):
+        if os.environ.get(name):
+            trace.secrets.append(os.environ[name])
     trace.pane("agent", "Untrusted agent sandbox", "Ticket on stdin. No API key in this environment.")
     trace.pane("backend", "Customer backend", "The API key stays here.")
     sessions: list[str] = []
@@ -760,7 +761,13 @@ class _ProcessMount:
 
 class LiveBackend:
     def __init__(self, parent: Mapping[str, str], binary: str) -> None:
-        self.parent = dict(parent)
+        # Only create_filesystem uses the management key; no CLI child gets it.
+        self.management_key = parent.get(MANAGEMENT_KEY_ENV, "")
+        self.parent = {
+            key: value
+            for key, value in parent.items()
+            if key != MANAGEMENT_KEY_ENV and not (self.management_key and self.management_key in value)
+        }
         self.binary = binary
         self.api_key = self.parent.get(API_KEY_ENV, "")
 
@@ -780,7 +787,7 @@ class LiveBackend:
         except FileNotFoundError as exc:
             raise ShowcaseError(f"{self.binary} was not found on PATH") from exc
         if completed.returncode != 0:
-            detail = redact(completed.stderr.strip() or completed.stdout.strip(), [self.api_key])
+            detail = redact(completed.stderr.strip() or completed.stdout.strip(), [self.api_key, self.management_key])
             raise ShowcaseError(detail or f"{argv[0]} failed")
         return completed
 
@@ -794,11 +801,10 @@ class LiveBackend:
         return parsed
 
     def create_filesystem(self, name: str) -> str:
-        management = self.parent.get(MANAGEMENT_KEY_ENV, "")
-        if not management:
+        if not self.management_key:
             raise ShowcaseError(f"{MANAGEMENT_KEY_ENV} is not set; --create needs a management key")
         try:
-            created = rest.create_filesystem(rest.Rest(management), rest.Rest(self.api_key), {"name": name})
+            created = rest.create_filesystem(rest.Rest(self.management_key), rest.Rest(self.api_key), {"name": name})
         except rest.ApiError as exc:
             raise ShowcaseError(f"filesystem create failed: HTTP {exc.status} {exc.code}") from None
         return str(created["id"])
