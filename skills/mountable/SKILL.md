@@ -22,8 +22,8 @@ Use an existing caller-approved `mountable` installation first. Otherwise,
 if installation is authorized, choose one exact-version package install:
 
 ```sh
-npm install --global --ignore-scripts mountable-cli@0.9.0  # npm
-uv tool install mountable==0.9.0                          # or PyPI
+npm install --global --ignore-scripts mountable-cli@0.10.0  # npm
+uv tool install mountable==0.10.0                         # or PyPI
 mountable version
 ```
 

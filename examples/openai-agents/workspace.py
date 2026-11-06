@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import asdict, dataclass
 
+import httpx
 from agents import (
     Agent,
     ModelSettings,
@@ -94,6 +96,29 @@ async def run(filesystem: Filesystem, note: str, text: str, model: str | Model) 
     print(json.dumps({"tools": sorted(used), "result": result.final_output}))
 
 
+def provision(name: str, spending_cap_cents: int) -> str:
+    """A management key creates the filesystem; the backend's API key
+    (MOUNTABLE_API_KEY, which the run command uses) gets read-write access."""
+    base = os.environ.get("MOUNTABLE_API_URL", "https://mountable.io")
+    me = httpx.get(
+        base + "/api/v1/me",
+        headers={"Authorization": "Bearer " + os.environ["MOUNTABLE_API_KEY"]},
+        timeout=60,
+    )
+    me.raise_for_status()
+    key_id = me.json()["api_key"]["id"]
+    with Mountable(api_key=os.environ["MOUNTABLE_MANAGEMENT_KEY"]) as admin:
+        info = admin.create_filesystem(
+            name,
+            spending_cap_cents=spending_cap_cents,
+            byte_quota=2**30,
+            entry_quota=10000,
+            mutations_per_minute=30,
+        )
+        admin.set_grant(info.id, "api_key", key_id, "rw")
+    return info.id
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -106,19 +131,13 @@ def main() -> None:
     execute.add_argument("--text", default="Check empty input in the parser next.")
     execute.add_argument("--model", default="gpt-4.1-mini")
     args = parser.parse_args()
+    if args.command == "provision":
+        if args.spending_cap_cents < 0:
+            parser.error("spending cap must be nonnegative")
+        fs_id = provision(args.name, args.spending_cap_cents)
+        print(json.dumps({"filesystem_id": fs_id}))
+        return
     with Mountable() as client:
-        if args.command == "provision":
-            if args.spending_cap_cents < 0:
-                parser.error("spending cap must be nonnegative")
-            info = client.create_filesystem(
-                args.name,
-                spending_cap_cents=args.spending_cap_cents,
-                byte_quota=2**30,
-                entry_quota=10000,
-                mutations_per_minute=30,
-            )
-            print(json.dumps({"filesystem_id": info.id}))
-            return
         info = client.get_filesystem(args.filesystem)
         if info.spending_cap_cents is None:
             parser.error("Set a finite spending cap on this filesystem first")
