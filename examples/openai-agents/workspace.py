@@ -122,9 +122,11 @@ def provision(name: str, spending_cap_cents: int) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    provision = commands.add_parser("provision", help="Trusted backend: create once")
-    provision.add_argument("--name", required=True)
-    provision.add_argument("--spending-cap-cents", required=True, type=int)
+    provision_parser = commands.add_parser(
+        "provision", help="Trusted backend: create once"
+    )
+    provision_parser.add_argument("--name", required=True)
+    provision_parser.add_argument("--spending-cap-cents", required=True, type=int)
     execute = commands.add_parser("run", help="Use the user's saved filesystem ID")
     execute.add_argument("--filesystem", required=True)
     execute.add_argument("--note", default="/note.txt")

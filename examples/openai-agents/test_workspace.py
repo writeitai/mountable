@@ -177,7 +177,7 @@ def test_runner_cap_error_is_sanitized_at_cli(monkeypatch, capsys):
 
 
 def test_provision_creates_with_the_management_key_and_grants_the_api_key(
-    monkeypatch,
+    monkeypatch, capsys
 ):
     monkeypatch.setenv("MOUNTABLE_API_KEY", "mtbl_backend")
     monkeypatch.setenv("MOUNTABLE_MANAGEMENT_KEY", "mtblm_admin")
@@ -214,7 +214,12 @@ def test_provision_creates_with_the_management_key_and_grants_the_api_key(
 
     monkeypatch.setattr(workspace.httpx, "get", get)
     monkeypatch.setattr(workspace, "Mountable", Admin)
-    assert workspace.provision("notes", 100) == "fs-1"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["workspace.py", "provision", "--name", "notes", "--spending-cap-cents", "100"],
+    )
+    workspace.main()
+    assert json.loads(capsys.readouterr().out) == {"filesystem_id": "fs-1"}
     assert calls == [
         ("me", "https://mountable.io/api/v1/me", "Bearer mtbl_backend"),
         ("client", "mtblm_admin"),
