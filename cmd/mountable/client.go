@@ -160,8 +160,12 @@ func (c *client) inOrg(ctx context.Context, method, path string, body any) (json
 	if err != nil {
 		return nil, err
 	}
+	orgPath, err := idPath("orgs", org)
+	if err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
-	err = c.call(ctx, method, "/api/v1/orgs/"+url.PathEscape(org)+path, body, &out)
+	err = c.call(ctx, method, "/api/v1"+orgPath+path, body, &out)
 	return out, err
 }
 

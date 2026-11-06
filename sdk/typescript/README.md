@@ -133,8 +133,8 @@ These calls use the key, and the API checks what it may do:
 - Creating, updating and deleting filesystems, keys and grants need a
   management key whose creator is still an owner or admin
   (`403 management_key_required` for an API key).
-- Updating a filesystem and every webhook call, listing included, need
-  read-write access to the filesystem.
+- Every webhook call, listing included, needs an API key with read-write
+  access to the filesystem (`403 api_key_required` for a management key).
 - A key lists only its own live sessions and revokes only its own sessions.
 - The API checks the ranges: `spendingCapCents` 0–1,000,000,000 or `null`
   (no cap), `mutationsPerMinute` 1–1,000 or `null` (the platform default),
@@ -186,15 +186,17 @@ seconds; a message can arrive more than once, so apply it only when its
   expiry, makes it create a new one and send the call once more.
 - Every failure rejects with `MountableError` carrying `status`, the API's
   stable `code`, `message`, `currentEtag` (for `precondition_failed`) and
-  `retryAfter`. Network failures have `code === "network_error"`. API keys,
-  tokens and webhook secrets never appear in errors or in `console.log` of
-  the client.
+  `retryAfter`. Network failures have `code === "network_error"`. API and
+  management keys, tokens and webhook secrets never appear in errors or in
+  `console.log` of the client.
 - Only a `2xx` answer is a success; redirects are not followed.
 - Only reads (`read`, `list`, `changes`, and the `get`, `list` and
-  `filesystemUsage` calls) and the repeatable `revokeMountSession` and
-  `enableWebhook` are retried, once, after a network failure. `write`,
-  `delete`, `createFilesystem`, `updateFilesystem`, `createWebhook`,
-  `rotateWebhookSecret` and `deleteWebhook` are never retried: after a
+  `filesystemUsage` calls) and the repeatable `revokeMountSession`,
+  `enableWebhook`, `revokeApiKey`, `revokeS3Key` and `setGrant` are retried,
+  once, after a network failure. `write`, `delete`, `createFilesystem`,
+  `updateFilesystem`, `deleteFilesystem`, `createWebhook`,
+  `rotateWebhookSecret`, `deleteWebhook`, `createApiKey`, `createS3Key` and
+  `deleteGrant` are never retried: after a
   timeout the outcome is unknown, and a conditional write makes your own retry
   safe.
 - A request fails with `network_error` after 60 seconds without an answer;

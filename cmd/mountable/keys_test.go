@@ -57,6 +57,11 @@ func TestFilesystemDelete(t *testing.T) {
 			t.Errorf("fs delete %q = %d %+v", bad, r.code, e)
 		}
 	}
+	// So would an organisation ID of "..".
+	t.Setenv("MOUNTABLE_ORG", "..")
+	if e := jsonError(t, runManaged(t, "fs", "delete", "fsone", "--json")); e.Code != "invalid_request" {
+		t.Errorf("MOUNTABLE_ORG=.. = %+v", e)
+	}
 	if calls := api.called(); len(calls) != 2 {
 		t.Fatalf("calls = %v", calls)
 	}
