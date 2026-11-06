@@ -10,7 +10,7 @@ import http.client
 import json
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 _SECRET = re.compile(r"mtbl[a-z]*_[A-Za-z0-9_.-]+|whsec_[A-Za-z0-9+/=_-]+")
 
@@ -119,3 +119,30 @@ class Rest:
         if not isinstance(parsed, dict):
             raise ApiError(status, "request_failed", "the API did not return an object")
         return parsed
+
+
+def create_filesystem(
+    management: Rest, api: Rest, body: dict[str, Any], org_id: str | None = None
+) -> dict[str, Any]:
+    """Create a filesystem with the management key (mtblm_) and give the API
+    key (mtbl_) read-write access to it: management keys create filesystems,
+    API keys use them. The organisation is the API key's; a different org_id
+    fails before anything is created. Returns the created filesystem. Not
+    retried."""
+    key = api.json("GET", "/api/v1/me").get("api_key")
+    if not isinstance(key, dict) or not key.get("id") or not key.get("org_id"):
+        raise ApiError(0, "api_key_required", "MOUNTABLE_API_KEY must be an API key (mtbl_)")
+    if org_id is not None and org_id != key["org_id"]:
+        raise ApiError(0, "org_mismatch", "MOUNTABLE_API_KEY belongs to another organisation")
+    path = "/api/v1/orgs/" + quote(key["org_id"], safe="") + "/filesystems"
+    created = management.json("POST", path, body)
+    fs_id = created.get("id")
+    if not isinstance(fs_id, str) or not fs_id:
+        raise ApiError(0, "request_failed", "filesystem create returned no id")
+    # Repeating this PUT sets the same grant, so it is safe to retry.
+    management.json(
+        "PUT",
+        path + "/" + quote(fs_id, safe="") + "/grants",
+        {"principal_type": "api_key", "principal_id": key["id"], "mode": "rw"},
+    )
+    return created

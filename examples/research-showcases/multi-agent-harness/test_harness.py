@@ -176,6 +176,8 @@ class HarnessTest(unittest.TestCase):
 
         def call(method, path, body=None):
             calls.append((method, path, body))
+            if path == "/api/v1/me":
+                return {"api_key": {"id": "key-1", "org_id": "org-1"}}
             if method == "POST" and path.endswith("/filesystems"):
                 self.assertEqual({k: body[k] for k in h.LIMITS}, h.LIMITS)
                 return {"id": "fs-1"}
@@ -210,7 +212,13 @@ class HarnessTest(unittest.TestCase):
         }
         with (
             patch.dict(sys.modules, modules),
-            patch.dict(os.environ, {"MOUNTABLE_API_KEY": "never-print-me"}),
+            patch.dict(
+                os.environ,
+                {
+                    "MOUNTABLE_API_KEY": "never-print-me",
+                    "MOUNTABLE_MANAGEMENT_KEY": "mtblm_never-print-me",
+                },
+            ),
             patch.object(h.Control, "call", side_effect=call),
             patch.object(h, "receiver", receiver),
             patch.object(h, "readonly_mount", mount),
@@ -234,7 +242,47 @@ class HarnessTest(unittest.TestCase):
             calls[-1][:2],
             ("DELETE", "/api/v1/orgs/org-1/filesystems/fs-1/webhooks/hook-1"),
         )
+        self.assertEqual(
+            calls[:3],
+            [
+                ("GET", "/api/v1/me", None),
+                ("POST", "/api/v1/orgs/org-1/filesystems", calls[1][2]),
+                (
+                    "PUT",
+                    "/api/v1/orgs/org-1/filesystems/fs-1/grants",
+                    {
+                        "principal_type": "api_key",
+                        "principal_id": "key-1",
+                        "mode": "rw",
+                    },
+                ),
+            ],
+        )
         client.filesystem.assert_called_once_with("fs-1", mode="rw")
+
+    def test_live_refuses_an_api_key_of_another_organisation(self):
+        calls = []
+
+        def call(method, path, body=None):
+            calls.append((method, path))
+            return {"api_key": {"id": "key-1", "org_id": "org-2"}}
+
+        modules = {
+            "httpx": SimpleNamespace(Client=MagicMock()),
+            "mountable_sdk": SimpleNamespace(Mountable=MagicMock()),
+        }
+        keys = {"MOUNTABLE_API_KEY": "k", "MOUNTABLE_MANAGEMENT_KEY": "m"}
+        args = SimpleNamespace(
+            org="org-1", webhook_url="https://example.com/hooks/mountable"
+        )
+        with (
+            patch.dict(sys.modules, modules),
+            patch.dict(os.environ, keys),
+            patch.object(h.Control, "call", side_effect=call),
+            self.assertRaises(h.DemoError),
+        ):
+            h.live(args)
+        self.assertEqual(calls, [("GET", "/api/v1/me")])
 
     def test_readonly_mount_uses_ro_ticket_stdin_and_revokes_on_failure(self):
         client, control, process = MagicMock(), MagicMock(), MagicMock()

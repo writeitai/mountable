@@ -13,6 +13,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 API_KEY_ENV = "MOUNTABLE_API_KEY"
+# Provisions filesystems on the backend; never reaches a sandbox either.
+MANAGEMENT_KEY_ENV = "MOUNTABLE_MANAGEMENT_KEY"
 # In the sandbox, run `mkdir -p /mnt/work` before starting this argv. Start it
 # as a child and leave it running. It renews the session certificate until
 # unmount, revoke, or expiry. Read stdout for the mounted event before using
@@ -118,13 +120,13 @@ def revoke_argv(session_id: str) -> list[str]:
 
 
 def sandbox_env(parent: Mapping[str, str]) -> dict[str, str]:
-    """Copy of parent with MOUNTABLE_API_KEY removed, including embedded copies."""
-    api_key = parent.get(API_KEY_ENV, "")
+    """Copy of parent with MOUNTABLE_API_KEY and MOUNTABLE_MANAGEMENT_KEY
+    removed, including embedded copies."""
+    names = (API_KEY_ENV, MANAGEMENT_KEY_ENV)
+    secrets = [parent[name] for name in names if parent.get(name)]
     env: dict[str, str] = {}
     for key, value in parent.items():
-        if key == API_KEY_ENV:
-            continue
-        if api_key and api_key in value:
+        if key in names or any(secret in value for secret in secrets):
             continue
         env[key] = value
     return env
